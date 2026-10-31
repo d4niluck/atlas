@@ -1,0 +1,10 @@
+/* Explicit defaults prevent the browser's light button background from hiding dark-theme text. */
+button{color:#eeeaf4;background:#30313a;border:1px solid #54515d;border-radius:8px}
+:where(:root[data-theme=light]) button{color:#302b36;background:#f0edf3;border-color:#c9c2d0}
+button:disabled{opacity:.65}
+:root[data-theme=light] .workspace-tabs{background:#f3f0f5}
+:root[data-theme=light] .workspace-tabs button.active{background:#5f62ba;color:#fff}
+:root[data-theme=light] .stack-header button{color:#58416e}
+:root[data-theme=light] .stack.collapsed,:root[data-theme=light] .stack.collapsed::before,:root[data-theme=light] .stack.collapsed::after{background:#fff}
+.error button{color:#fff}
+:root[data-theme=light] .toolbar .zoom{color:#554e5c}

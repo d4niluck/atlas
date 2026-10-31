@@ -1,0 +1,14 @@
+smart-canvas/
+models/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+dist/
+target/
+*.app/
+ui/src-tauri/resources/
+
+# Generated local binaries and Tauri schemas
+/native/atlas-native-http/http-tests
+/ui/src-tauri/gen/

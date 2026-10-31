@@ -1,0 +1,24 @@
+{
+  "identifier": "atlas-local-proxy",
+  "description": "Local application window",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "allow-open-external-url",
+    "allow-download-model",
+    "allow-model-download-status",
+    "allow-download-rag-model",
+    "allow-rag-model-download-status",
+    "allow-download-rag-e4b-model",
+    "allow-rag-e4b-model-download-status",
+    "allow-prepare-restart",
+    "allow-restart-atlas"
+  ]
+}

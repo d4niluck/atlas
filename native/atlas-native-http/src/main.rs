@@ -1,0 +1,268 @@
+mod device;
+mod semantic;
+use std::{env, io::{self, BufRead, Read}};
+use tiny_http::{Header, Response, Server, StatusCode, Request};
+use serde_json::{json,Value};
+use rusqlite::OptionalExtension;
+
+fn valid(headers: &[Header], token: &str) -> bool {
+    fn one<'a>(headers: &'a [Header], name: &'static str) -> Result<Option<&'a str>, ()> {
+        let mut values = headers.iter().filter(|h| h.field.equiv(name)).map(|h| h.value.as_str());
+        let first = values.next();
+        if values.next().is_some() { Err(()) } else { Ok(first) }
+    }
+    let host = match one(headers, "Host") { Ok(Some(h)) => h.split(':').next().unwrap_or(""), _ => return false };
+    let origin = match one(headers, "Origin") { Ok(v) => v, Err(_) => return false };
+    let actual = match one(headers, "X-Atlas-Token") { Ok(Some(v)) => v, _ => return false };
+    let mut difference = actual.len() ^ token.len();
+    for (a, b) in actual.bytes().zip(token.bytes()) { difference |= (a ^ b) as usize; }
+    (host == "localhost" || host == "127.0.0.1") && origin.map_or(true, |o| o == "http://localhost:5173" || o == "http://127.0.0.1:5173") && difference == 0
+}
+fn answer(req: Request, status: u16, value: Value) { let mut response = Response::from_string(value.to_string()).with_status_code(StatusCode(status)); response.add_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap()); let _=req.respond(response); }
+fn body(req: &mut Request) -> Result<Value,()> {
+ let c=req.headers().iter().find(|h|h.field.equiv("Content-Type")).map(|h|h.value.as_str());
+ if !c.is_some_and(|s|s.split(';').next()==Some("application/json")) {return Err(())}
+ let mut buf=Vec::new();req.as_reader().take(10_000_001).read_to_end(&mut buf).map_err(|_|())?;
+ if buf.len()>10_000_000{return Err(())} let v:Value=serde_json::from_slice(&buf).map_err(|_|())?; if !v.is_object(){return Err(())} Ok(v)
+}
+fn call(action:&str, root:&std::path::Path, args:&[&str])->Result<Value,Box<dyn std::error::Error>> {
+ let mut argv=vec!["atlas".to_owned(),action.to_owned(),root.to_string_lossy().to_string()];argv.extend(args.iter().map(|s|s.to_string()));atlas_native_storage_contract::execute(&argv)
+}
+struct ExactReader<'a>{source:&'a mut dyn Read,remaining:u64}
+impl Read for ExactReader<'_>{fn read(&mut self,buf:&mut [u8])->io::Result<usize>{if self.remaining==0{return Ok(0)}let limit=buf.len().min(self.remaining as usize);let n=self.source.read(&mut buf[..limit])?;if n==0{return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"incomplete upload"))}self.remaining-=n as u64;Ok(n)}}
+fn mime(title:&str)->(&'static str,bool){let ext=title.rsplit_once('.').map(|(_,e)|e.to_ascii_lowercase()).unwrap_or_default();match ext.as_str(){"pdf"=>("application/pdf",true),"png"=>("image/png",true),"jpg"|"jpeg"=>("image/jpeg",true),"gif"=>("image/gif",true),"webp"=>("image/webp",true),"txt"=>("text/plain",true),"md"|"markdown"=>("text/markdown",true),"mp3"=>("audio/mpeg",true),"wav"=>("audio/wav",true),"ogg"=>("audio/ogg",true),_=>("application/octet-stream",false)}}
+fn valid_workspace(path:&std::path::Path)->bool {
+ if path.is_symlink() || !path.is_dir(){return false}
+ let db=path.join("atlas.sqlite3");if db.is_symlink() || !db.is_file(){return false}
+ let conn=match rusqlite::Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY){Ok(c)=>c,Err(_)=>return false};
+ ["objects","board","search_index"].iter().all(|name|conn.query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",[name],|r|r.get::<_,i32>(0)).is_ok())
+}
+fn source_hash(title:&str,body:&str,description:&str)->String {use sha2::{Digest,Sha256};let mut values=vec![title,body];if !description.is_empty(){values.push(description)}let parts:Vec<String>=values.into_iter().map(|v|serde_json::to_string(v).unwrap()).collect();format!("{:x}",Sha256::digest(format!("[{}]",parts.join(", ")).as_bytes()))}
+struct Staged(std::path::PathBuf);
+impl Drop for Staged { fn drop(&mut self) { let _=std::fs::remove_file(&self.0); } }
+fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, token:&str, serial:&std::sync::Mutex<()>, model: &std::sync::Mutex<ModelState>, rag: &std::sync::Arc<std::sync::Mutex<RagState>>, choice: &std::sync::Arc<ModelChoice>, device: &std::sync::Arc<device::DeviceSettings>) {
+ if !valid(req.headers(),token){return answer(req,403,json!({"error":"Forbidden"}))}
+ let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
+ if parts.len()==6 && parts[0..2]==["api","w"] && parts[3]=="files" && parts[5]=="content" && method=="GET" {
+   let wid=parts[2];let id=parts[4];let valid_id=|s:&str|!s.is_empty()&&s.chars().all(|c|c.is_ascii_hexdigit()||c=='-');
+   if (wid=="default" && root.join(".default-deleted").exists()) || (wid!="default" && (wid.len()!=32||!valid_id(wid)))||!valid_id(id){return answer(req,404,json!({"error":"Not found"}))}
+   let dir=if wid=="default" {default.to_path_buf()} else {root.join(wid)};let _serial=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};let _guard=match atlas_native_storage_contract::workspace_lock(&dir){Ok(g)=>g,Err(_)=>return answer(req,404,json!({"error":"Not found"}))};let found=(|| -> Result<(std::fs::File,String),Box<dyn std::error::Error>> {if !valid_workspace(&dir){return Err("unsafe".into())}let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;let (path,title):(String,String)=db.query_row("SELECT path,title FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;let target=dir.join(path).canonicalize()?;if !target.starts_with(dir.canonicalize()?){return Err("unsafe".into())}Ok((std::fs::File::open(target)?,title))} )();
+   drop(_guard);drop(_serial);match found {Ok((file,title))=>{let (content_type,safe)=mime(&title);let encoded=percent_encoding::utf8_percent_encode(&title,percent_encoding::NON_ALPHANUMERIC).to_string();let disposition=format!("{}; filename*=UTF-8''{}",if safe {"inline"}else{"attachment"},encoded);let mut response=Response::from_file(file);response.add_header(Header::from_bytes("Content-Type",content_type).unwrap());response.add_header(Header::from_bytes("Content-Disposition",disposition).unwrap());response.add_header(Header::from_bytes("X-Content-Type-Options","nosniff").unwrap());response.add_header(Header::from_bytes("Content-Security-Policy","sandbox; default-src 'none'").unwrap());let _=req.respond(response);return},Err(_)=>return answer(req,404,json!({"error":"Not found"}))}
+ }
+ let upload=(method=="POST" && parts.len()==4 && parts[3]=="files") || (method=="PUT" && parts.len()==5 && parts[3]=="files");
+ let staged=if upload {let size=match req.body_length(){Some(n) if n <= 10usize*1024*1024*1024=>n as u64,_=>return answer(req,400,json!({"error":"Invalid file size"}))}; let wid=parts[2];if (wid=="default" && root.join(".default-deleted").exists()) || (wid!="default" && (wid.len()!=32 || !wid.chars().all(|c|c.is_ascii_hexdigit()))) {return answer(req,404,json!({"error":"Not found"}))} let upload_dir=if wid=="default" {default.to_path_buf()} else {root.join(wid)};if upload_dir.is_symlink() || !upload_dir.is_dir() {return answer(req,404,json!({"error":"Not found"}))} let p=upload_dir.join(format!(".atlas-upload-{}",uuid::Uuid::new_v4())); let staged=Staged(p); let mut options=std::fs::OpenOptions::new(); options.write(true).create_new(true); #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt; options.mode(0o600);} let mut f=match options.open(&staged.0){Ok(f)=>f,Err(_)=>return answer(req,400,json!({"error":"Upload failed"}))}; let mut reader=ExactReader{source:req.as_reader(),remaining:size}; if std::io::copy(&mut reader,&mut f).is_err(){return answer(req,400,json!({"error":"Incomplete upload"}))} Some(staged)} else {None};
+ let bodyless_close=method=="POST" && parts.len()==4 && parts[0..2]==["api","workspaces"] && parts[3]=="close";
+ let prepared=if !upload && !bodyless_close && matches!(method.as_str(),"POST"|"PUT"|"PATCH") {Some(body(&mut req))} else {None};
+ let _serial=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};
+ let model_state=model.lock().map(|v|v.clone()).unwrap_or(ModelState::Failed("Состояние модели недоступно".to_owned()));
+ let semantic=if let ModelState::Ready(ref service)=model_state {Some(service)} else {None};
+ let run=(|| -> Result<(u16,Value),Box<dyn std::error::Error>> {
+  if parts==["api","settings","app"]&&method=="GET" {return Ok((200,app_settings(&choice,&device)))}
+  if parts==["api","settings","app"]&&method=="PUT" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;return match save_app_settings(&choice,&device,&b) {Ok(())=>Ok((200,b)),Err(e)=>Ok((400,json!({"error":e})))};}
+  if parts==["api","settings","device"]&&method=="GET" {return Ok((200,device.status()))}
+  if parts==["api","settings","device"]&&method=="PUT" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let e=b["embedding"].as_str().ok_or("invalid embedding device")?;let l=b["llm"].as_str().ok_or("invalid llm device")?;return match device.select(e,l) {Ok(())=>Ok((200,device.status())),Err(e)=>Ok((400,json!({"error":e})))};}
+  if parts==["api","workspaces"]&&method=="GET" {let default_name=std::fs::read_to_string(default.join(".atlas-workspace.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).and_then(|v|v["name"].as_str().map(str::to_owned)).unwrap_or_else(||"Рабочее пространство".to_owned());let mut items=if root.join(".default-deleted").exists(){vec![]}else{vec![json!({"id":"default","name":default_name})]};let mut paths=std::fs::read_dir(root)?.collect::<Result<Vec<_>,_>>()?;paths.sort_by_key(|e|e.file_name());for entry in paths {let id=entry.file_name().to_string_lossy().to_string();let p=entry.path();if id.len()!=32||!id.chars().all(|c|c.is_ascii_digit()||('a'..='f').contains(&c))||p.is_symlink()||!p.is_dir(){continue}if let Ok(raw)=std::fs::read_to_string(p.join(".workspace.json")){if let Ok(value)=serde_json::from_str::<Value>(&raw){if let Some(name)=value["name"].as_str(){items.push(json!({"id":id,"name":name}))}}}}return Ok((200,json!({"workspaces":items})))}
+  if parts==["api","workspaces"]&&method=="POST" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let name=b["name"].as_str().ok_or("invalid name")?.trim();if name.is_empty()||name.chars().count()>100{return Err("invalid name".into())}let wid=uuid::Uuid::new_v4().simple().to_string();let dir=root.join(&wid);call("create-workspace",&dir,&[])?;std::fs::write(dir.join(".workspace.json"),json!({"name":name}).to_string())?;return Ok((201,json!({"id":wid,"name":name})))}
+  if parts.len()>=3&&parts[0..2]==["api","workspaces"] {let wid=parts[2];if wid!="default"&&(wid.len()!=32||!wid.chars().all(|c|c.is_ascii_hexdigit())){return Ok((404,json!({"error":"Not found"})))}let dir=if wid=="default" {default.to_path_buf()} else {root.join(wid)};if (wid=="default" && root.join(".default-deleted").exists()) || !valid_workspace(&dir){return Ok((404,json!({"error":"Not found"})))}let _workspace_guard=atlas_native_storage_contract::workspace_lock(&dir)?;if method=="PATCH"&&parts.len()==3 {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let name=b["name"].as_str().ok_or("invalid name")?.trim();if name.is_empty()||name.chars().count()>100{return Err("invalid name".into())}let tmp=dir.join(format!(".workspace-{}.tmp",uuid::Uuid::new_v4()));std::fs::write(&tmp,json!({"name":name}).to_string())?;std::fs::rename(tmp,dir.join(if wid=="default" {".atlas-workspace.json"} else {".workspace.json"}))?;return Ok((200,json!({"id":wid,"name":name})))}if method=="DELETE"&&parts.len()==3 {if wid=="default" {let owner=dir.join(".atlas-owned");if owner.is_symlink() || !owner.is_file() || std::fs::read_to_string(owner).ok().as_deref()!=Some("atlas-workspace-v1") {return Ok((403,json!({"error":"Папка не подтверждена как пространство Atlas"})))}}if root.is_symlink(){return Err("workspace deletion unavailable".into())}if wid!="default" {let marker=dir.join(".workspace.json");if marker.is_symlink()||!marker.is_file(){return Err("workspace is not registered".into())}let metadata:Value=serde_json::from_slice(&std::fs::read(&marker)?)?;if !metadata["name"].is_string()||dir.parent().ok_or("no parent")?.canonicalize()?!=root.canonicalize()?{return Err("workspace is not registered".into())}}if let Some(service)=semantic {service.close(&dir)?;}let tombstone=dir.parent().ok_or("no parent")?.join(format!(".atlas-deleted-{}",uuid::Uuid::new_v4().simple()));let marker=root.join(".default-deleted");if wid=="default" {std::fs::OpenOptions::new().write(true).create_new(true).open(&marker)?;}if let Err(e)=std::fs::rename(&dir,&tombstone) {if wid=="default" {let _=std::fs::remove_file(&marker);}return Err(e.into())}std::fs::remove_dir_all(tombstone)?;return Ok((200,json!({"ok":true})))}if method=="POST"&&parts.len()==4&&parts[3]=="close" {if let Some(service)=semantic {service.close(&dir)?;}return Ok((200,json!({"ok":true})))}}
+  if parts.len()<4||parts[0..2]!=["api","w"]{return Ok((404,json!({"error":"Not found"})))}let wid=parts[2];if wid!="default"&&(wid.len()!=32||!wid.chars().all(|c|c.is_ascii_hexdigit())){return Ok((404,json!({"error":"Not found"})))}let dir=if wid=="default" {default.to_path_buf()} else {root.join(wid)};if (wid=="default" && root.join(".default-deleted").exists()) || !valid_workspace(&dir){return Ok((404,json!({"error":"Not found"})))}let resource=&parts[3..];let _workspace_guard=if resource==["files","copy"] {None} else {Some(match atlas_native_storage_contract::workspace_lock(&dir){Ok(g)=>g,Err(_)=>return Ok((409,json!({"error":"Workspace unavailable"})))})};
+  if resource==["files","copy"] && method=="POST" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let wid=b["source_workspace"].as_str().ok_or("invalid workspace")?;let id=b["source_id"].as_str().ok_or("invalid id")?;let expected=b["expected_revision"].as_str().ok_or("invalid revision")?;if (wid!="default" && (wid.len()!=32 || !wid.chars().all(|c|c.is_ascii_hexdigit()))) || id.is_empty() || !id.chars().all(|c|c.is_ascii_hexdigit() || c=='-') || expected.len()!=64 {return Err("invalid source".into())}let source=if wid=="default" {default.to_path_buf()} else {root.join(wid)};if !valid_workspace(&source){return Ok((404,json!({"error":"Not found"})))}let d=dir.canonicalize()?;let src=source.canonicalize()?;let mut locks=Vec::new();if d==src {locks.push(atlas_native_storage_contract::workspace_lock(&d)?);} else {let (first,second)=if d<src {(&d,&src)} else {(&src,&d)};locks.push(atlas_native_storage_contract::workspace_lock(first)?);locks.push(atlas_native_storage_contract::workspace_lock(second)?);}let id=match atlas_native_storage_contract::copy_file_from(&dir,&source,id,expected){Ok(id)=>id,Err(_)=>return Ok((409,json!({"error":"Исходный файл изменился во время копирования"})))};let board=call("get-board",&dir,&[])?;let mut obj=board["objects"].as_array().ok_or("board")?.iter().find(|o|o["id"]==id).ok_or("missing file")?.clone();obj["revision"]=json!(atlas_native_storage_contract::object_revision(&dir,&id)?);return Ok((201,obj))}
+  if resource.len()==3 && resource[0]=="objects" && resource[2]=="undo-create" && method=="POST" {let id=resource[1];if id.is_empty() || !id.chars().all(|c|c.is_ascii_hexdigit() || c=='-'){return Ok((404,json!({"error":"Not found"})))}let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let expected=b["expected_revision"].as_str().ok_or("invalid revision")?;if expected.len()!=64{return Err("invalid revision".into())}return match atlas_native_storage_contract::undo_created(&dir,id,expected) {Ok(())=>Ok((200,json!({"ok":true}))),Err(_)=>Ok((409,json!({"error":"Объект изменился; отмена невозможна"})))}}
+  if (resource==["files"]&&method=="POST") || (resource.len()==2 && resource[0]=="files" && method=="PUT") {
+   let c=req.headers().iter().find(|h|h.field.equiv("Content-Type")).map(|h|h.value.as_str());if c!=Some("application/octet-stream"){return Err("invalid content type".into())}
+   let query=url.split_once('?').map(|x|x.1).unwrap_or("");let names:Vec<String>=url::form_urlencoded::parse(query.as_bytes()).filter(|(k,_)|k=="filename").map(|(_,v)|v.into_owned()).collect();if names.len()!=1||names[0].is_empty()||names[0]=="."||names[0]==".."||names[0].contains(['/', '\\', '\0']){return Err("invalid filename".into())}
+   let mut reader=std::fs::File::open(&staged.as_ref().ok_or("missing staged upload")?.0)?;
+   let id=if method=="POST" { atlas_native_storage_contract::add_file_stream(&dir,&names[0],&mut reader)? } else { let id=resource[1]; if id.is_empty() || !id.chars().all(|c|c.is_ascii_hexdigit() || c=='-') { return Ok((404,json!({"error":"Not found"}))) } atlas_native_storage_contract::replace_file_stream(&dir,id,&names[0],&mut reader)?; id.to_string() };let board=call("get-board",&dir,&[])?;let mut obj=board["objects"].as_array().ok_or("board")?.iter().find(|o|o["id"]==id).ok_or("missing file")?.clone();if method=="POST" { obj["revision"]=json!(atlas_native_storage_contract::object_revision(&dir,&id)?); }return Ok((200,obj))
+  }
+  if resource.len()==3&&resource[0]=="trash"&&resource[2]=="restore"&&method=="POST" {prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let id=resource[1];let board=atlas_native_storage_contract::restore_objects(&dir,&[id.to_string()])?;let object=board["objects"].as_array().ok_or("board")?.iter().find(|o|o["id"]==id).ok_or("object")?.clone();return Ok((200,object))}
+  if resource.len()==2 && resource[0]=="objects" && method=="DELETE" {let id=resource[1]; if id.is_empty() || !id.chars().all(|c|c.is_ascii_hexdigit() || c=='-') {return Ok((404,json!({"error":"Not found"})))} atlas_native_storage_contract::delete_objects(&dir,&[id.to_string()])?; return Ok((200,json!({"ok":true})))}
+  if resource==["trash"]&&method=="GET" {return Ok((200,json!({"objects":atlas_native_storage_contract::list_trash(&dir)?})))}
+  if method=="POST"&&(resource==["objects","delete-many"]||resource==["trash","restore-many"]) {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let ids=b["ids"].as_array().ok_or("invalid ids")?.iter().map(|v|v.as_str().map(str::to_owned).ok_or("invalid id")).collect::<Result<Vec<_>,_>>()?;let result=if resource==["objects","delete-many"]{atlas_native_storage_contract::delete_objects(&dir,&ids)?}else{atlas_native_storage_contract::restore_objects(&dir,&ids)?};return Ok((200,result))}
+  if resource==["board"]&&method=="GET" {return Ok((200,call("get-board",&dir,&[])?))}
+  if resource==["board"]&&method=="PUT" {let v=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;call("put-board",&dir,&[&v.to_string()])?;return Ok((200,call("get-board",&dir,&[])?))}
+  if resource==["notes"]&&method=="POST" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let title=b["title"].as_str().ok_or("title")?;let text=b["text"].as_str().ok_or("text")?;let v=call("create-note",&dir,&[title,text])?;let id=v["id"].as_str().ok_or("id")?;let revision=atlas_native_storage_contract::object_revision(&dir,id)?;return Ok((201,json!({"id":id,"title":title,"kind":"note","x":0,"y":0,"revision":revision})))}
+  if resource.len()==2&&resource[0]=="notes" {let nid=resource[1];if !nid.chars().all(|c|c.is_ascii_hexdigit()||c=='-'){return Ok((404,json!({"error":"Not found"})))}if method=="GET" {return Ok((200,call("get-note",&dir,&[nid])?))}if method=="PUT"{let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let title=b["title"].as_str().ok_or("title")?;let text=b["text"].as_str().ok_or("text")?;call("update-note",&dir,&[nid,title,text])?;return Ok((200,call("get-note",&dir,&[nid])?))}}
+  if resource.len()==3&&resource[0]=="objects"&&resource[2]=="revision"&&method=="GET" {let id=resource[1];let revision=atlas_native_storage_contract::file_revision(&dir,id)?;return Ok((200,json!({"revision":revision})))}
+  if resource.len()==3&&resource[0]=="objects"&&(resource[2]=="description"||resource[2]=="search-text") {let id=resource[1];if !id.chars().all(|c|c.is_ascii_hexdigit()||c=='-'){return Ok((404,json!({"error":"Not found"})))}let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;
+   if resource[2]=="description"&&method=="PUT" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let value=b["description"].as_str().ok_or("invalid description")?;atlas_native_storage_contract::set_file_description(&dir,id,value)?;return Ok((200,json!({"id":id,"description":value})))}
+   if resource[2]=="description"&&method=="GET" {let value:String=db.query_row("SELECT description FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;return Ok((200,json!({"id":id,"description":value})))}
+   if resource[2]=="search-text"&&method=="GET" {let value:Option<String>=db.query_row("SELECT search_index.body FROM search_index JOIN objects ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;return Ok((200,json!({"id":id,"text":value.unwrap_or_default()})))}
+  }
+  if resource==["history"]&&method=="GET" {
+   let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;let mut stmt=db.prepare("SELECT query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic FROM search_history ORDER BY id DESC")?;let mut rows=stmt.query([])?;let mut items=vec![];
+   while let Some(row)=rows.next()? {let query:String=row.get(0)?;let mode:String=row.get(1)?;let raw:String=row.get(2)?;let created_at:f64=row.get(3)?;let scope:Option<String>=row.get(4)?;let known:bool=row.get(5)?;let answer:Option<String>=row.get(6)?;let sources:Option<String>=row.get(7)?;let error:Option<String>=row.get(8)?;let history_agentic:Option<bool>=row.get(9)?;let mut results:Vec<Value>=serde_json::from_str(&raw)?;
+    for result in &mut results {let id=result["id"].as_str().unwrap_or("");let src=db.query_row("SELECT objects.title, COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;let saved=result.get("_source_hash").and_then(Value::as_str).map(str::to_owned);let stale=src.as_ref().map_or(true,|(t,b,d)|saved.as_deref()!=Some(source_hash(t,b,d).as_str())||result["title"].as_str()!=Some(t));result.as_object_mut().ok_or("invalid result")?.remove("_source_hash");result["missing"]=json!(src.is_none());result["stale"]=json!(stale);
+     if let Some(chunks)=result["chunks"].as_array_mut(){for chunk in chunks {let text=src.as_ref().map(|(_,b,d)|if chunk["field"]=="description"{d}else{b});let chars:Vec<char>=text.map(|x|x.chars().collect()).unwrap_or_default();let start=chunk["start"].as_u64().map(|x|x as usize);let end=chunk["end"].as_u64().map(|x|x as usize);let valid=match (start,end){(Some(a),Some(b)) if a<=b&&b<=chars.len()=>chars[a..b].iter().collect::<String>()==chunk["text"].as_str().unwrap_or(""),_=>false};chunk["stale"]=json!(stale||!valid);}}
+    }items.push(json!({"query":query,"mode":mode,"results":results,"created_at":created_at,"order_exact":true,"scope_known":known,"answer":answer,"error":error,"agentic":history_agentic,"sources":sources.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"object_ids":scope.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}));
+   }
+   for item in &mut items {if let Some(sources)=item["sources"].as_array_mut(){for source in sources {let id=source["id"].as_str().unwrap_or("");let found=db.query_row("SELECT COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;let text=found.as_ref().map(|(body,description)|if source["field"]=="description"{description}else{body});let chars:Vec<char>=text.map(|s|s.chars().collect()).unwrap_or_default();let start=source["start"].as_u64().map(|x|x as usize);let end=source["end"].as_u64().map(|x|x as usize);let matches=match (start,end){(Some(a),Some(b)) if a<=b&&b<=chars.len()=>chars[a..b].iter().collect::<String>()==source["text"].as_str().unwrap_or(""),_=>false};source["missing"]=json!(found.is_none());source["stale"]=json!(!matches);}}}
+   return Ok((200,json!({"items":items})))
+  }
+  if resource==["rag","model"]&&method=="POST" {
+   if device.restart_only(){return Ok((409,json!({"error":"Не удалось завершить работу модели. Перезапустите Atlas, чтобы повторить загрузку."})))}
+   if !device.is_ready(){return Ok((409,json!({"error":"Дождитесь завершения загрузки моделей"})))}
+   let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;
+   let name=b["model"].as_str().ok_or("invalid model")?;
+   let filename=match name {"e2b"=>"gemma-4-e2b-it-q4.gguf","e4b"=>"gemma-4-e4b-it-q4.gguf",_=>return Ok((400,json!({"error":"Неизвестная модель"})))};
+   let path=choice.dir.join(filename);if !path.is_file(){return Ok((404,json!({"error":"Модель не загружена"})))}
+   let mut state=rag.lock().map_err(|_|"generator unavailable")?;
+   if matches!(*state,RagState::Loading){return Ok((409,json!({"error":"Дождитесь загрузки модели"})))}
+   let old=std::mem::replace(&mut *state,RagState::Loading);drop(state);if let Ok(mut warning)=choice.warning.lock(){*warning=None;}
+   // Requests hold serial here: capture chosen and active mode as one snapshot before spawning.
+   let previous_device=device.active_llm();let requested_mode=device.llm_requested();
+   let rag=rag.clone();let choice=choice.clone();let device=device.clone();let name=name.to_owned();
+   std::thread::spawn(move||{
+    let previous=choice.selected.lock().ok().map(|s|s.clone());
+    let had_old=if let RagState::Ready(old)=old {while std::sync::Arc::strong_count(&old)>1 {std::thread::sleep(std::time::Duration::from_millis(25));}drop(old);true}else{false};
+    let requested_device=if requested_mode=="legacy" {"metal".to_string()} else {requested_mode.clone()};
+    let mut active_device=requested_mode;
+    let mut warning=String::new();
+    let mut started=atlas_llama_probe::Generator::start_device(&choice.exe,path.to_string_lossy().as_ref(),&requested_device);
+    if started.is_err() && requested_device=="metal" && previous_device.is_none() {started=atlas_llama_probe::Generator::start_device(&choice.exe,path.to_string_lossy().as_ref(),"cpu");active_device="cpu".into();warning="GPU Apple недоступен, используется CPU".into();}
+    let result=started.and_then(|g|{let tmp=choice.dir.join(".rag-choice.tmp");match std::fs::write(&tmp,&name).and_then(|_|std::fs::rename(&tmp,choice.dir.join("rag-choice"))){Ok(())=>Ok(g),Err(_)=>{drop(g);Err("Не удалось сохранить выбор модели".into())}}});
+    let state=match result {Ok(g)=>{if previous_device.is_none() {device.set_llm(Some(&active_device),&warning);}if let Ok(mut selected)=choice.selected.lock(){*selected=name;}RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g)))},Err(e)=>{let fallback=previous.filter(|_|had_old).map(|n|choice.dir.join(if n=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}));match fallback.and_then(|p|atlas_llama_probe::Generator::start_device(&choice.exe,p.to_string_lossy().as_ref(),&device.llm_requested()).ok()){Some(g)=>{if let Ok(mut warning)=choice.warning.lock(){*warning=Some("Не удалось загрузить выбранную модель; восстановлена предыдущая".into());}RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g)))},None=>{device.set_llm(None,"Не удалось загрузить модель ответа");RagState::Failed(e)}}}};
+    if let Ok(mut slot)=rag.lock(){*slot=state}
+   });return Ok((202,json!({"ok":true})))
+  }
+  if resource==["rag","status"]&&method=="GET" {let state=rag.lock().map_err(|_|"generator unavailable")?;let name=choice.selected.lock().map_err(|_|"generator unavailable")?.clone();let mut result=match &*state {RagState::Ready(_)=>json!({"available":true,"message":""}),RagState::Loading=>json!({"available":false,"message":"Загрузка модели ответа"}),RagState::Failed(_)=>json!({"available":false,"message":"Не удалось загрузить модель ответа"}),RagState::Disabled=>json!({"available":false,"message":"Модель ответа не загружена"})};result["model"]=json!(name);result["warning"]=json!(choice.warning.lock().ok().and_then(|v|v.clone()));result["installed_e2b"]=json!(choice.dir.join("gemma-4-e2b-it-q4.gguf").is_file());result["installed_e4b"]=json!(choice.dir.join("gemma-4-e4b-it-q4.gguf").is_file());return Ok((200,result))}
+  if resource==["semantic","status"]&&method=="GET" {return if let Some(service)=semantic {service.ensure(&dir)?;Ok((200,service.status(&dir)))}else{let message=match &model_state {ModelState::Loading=>"Загрузка модели".to_string(),ModelState::Failed(e)=>format!("Ошибка загрузки модели: {e}"),_=>"Модель не загружена".to_string()};Ok((200,json!({"available":false,"message":message,"processing_ids":[],"failed_ids":[]})))}}
+  if resource==["semantic","rebuild"]&&method=="POST" {prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;return if let Some(service)=semantic {service.enqueue(&dir,None)?;Ok((202,json!({"ok":true})))}else{Ok((503,json!({"error":"Модель не загружена"})))}}
+  if (resource==["search"] || resource==["rag","search"])&&method=="POST" {
+   let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let query=b["query"].as_str().ok_or("query")?;
+   let is_rag=resource==["rag","search"];
+   if b.get("agentic").is_some_and(|v| !v.is_boolean()) {return Err("invalid agentic mode".into())}
+   let agentic=b.get("agentic").and_then(Value::as_bool).unwrap_or(false);
+   if is_rag {
+    #[cfg(feature="test-hook")] let budget=std::env::var("ATLAS_TEST_RAG_DEADLINE_MS").ok().and_then(|v|v.parse::<u64>().ok()).map(std::time::Duration::from_millis).unwrap_or(std::time::Duration::from_secs(150));
+    #[cfg(not(feature="test-hook"))] let budget=std::time::Duration::from_secs(150);
+    atlas_llama_probe::set_search_deadline(std::time::Instant::now()+budget);
+   }
+   if !is_rag && b.get("mode").and_then(Value::as_str)==Some("rag") {return Ok((400,json!({"error":"Используйте поиск с ответом"})))}
+   if is_rag && (query.is_empty() || query.len()>1000) {return Err("invalid question".into())}
+   let is_semantic=is_rag || b.get("mode").and_then(Value::as_str)==Some("semantic");
+   let mut rag_answer:Option<String>=None;let mut rag_error:Option<String>=None;let mut rag_sources:Vec<Value>=Vec::new();
+   let words:Vec<String>=query.split(|c:char|!c.is_alphanumeric()).filter(|x|!x.is_empty()).map(|x|format!("\"{}\"",x)).collect();
+   let ids:Option<Vec<String>>=match b.get("object_ids"){None|Some(Value::Null)=>None,Some(Value::Array(v))=>Some(v.iter().map(|x|x.as_str().map(str::to_owned).ok_or("invalid id")).collect::<Result<Vec<_>,_>>()?),_=>return Err("invalid ids".into())};
+   let mut results=Vec::new();
+   let _serial_after; let _workspace_after;
+   if is_semantic {let service=match semantic {Some(s)=>s,None=>return Ok((503,json!({"error":"Модель не загружена"})))};service.ensure(&dir)?;let revision=match service.revision(&dir){Some(v)=>v,None=>return Ok((503,json!({"error":"Семантический поиск недоступен"})))};
+    drop(_workspace_guard);drop(_serial);
+    results=match service.search(&dir,query,ids.as_deref()){Ok(v)=>v,Err(_)=>return Ok((503,json!({"error":if is_rag && atlas_llama_probe::remaining_search_time().is_err(){"Превышено время ожидания поиска"}else{"Семантический поиск недоступен"}})))};
+    if is_rag {
+     let generator={let guard=rag.lock().map_err(|_|"generator unavailable")?;match &*guard{RagState::Ready(g)=>Some(g.clone()),_=>None}};
+     let mut candidates=results.clone();
+     let select=|rows:&Vec<Value>,limit:usize,threshold:f64| -> Vec<Value> {
+      let mut out=Vec::new();let mut remaining=24000usize;
+      for result in rows {if result["score"].as_f64().is_none_or(|score|!score.is_finite()||score<threshold){continue}
+       let title=result["title"].as_str().unwrap_or("");
+       for chunk in result["chunks"].as_array().into_iter().flatten(){let text=chunk["text"].as_str().unwrap_or("");let overhead=title.chars().take(150).collect::<String>().len()+40;if text.trim().is_empty()||remaining<=overhead+100{continue}remaining-=overhead;let mut end=text.len().min(remaining);while !text.is_char_boundary(end){end-=1}let excerpt=&text[..end];if excerpt.trim().is_empty(){continue}if let Some(start)=chunk["start"].as_u64(){out.push(json!({"id":result["id"],"title":title,"text":excerpt,"start":start,"end":start+excerpt.chars().count() as u64,"field":chunk["field"]}));remaining-=end;}if out.len()>=limit{return out}}
+      }out
+     };
+
+     if let Some(generator)=generator {
+      let generator=loop {match generator.try_lock(){Ok(g)=>break g,Err(std::sync::TryLockError::WouldBlock)=>{if atlas_llama_probe::remaining_search_time().is_err(){return Ok((503,json!({"error":"Превышено время ожидания модели"})))}std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("generator unavailable".into())}};
+      if !agentic {let first=select(&candidates,5,0.70);if !first.is_empty(){let generated=generator.answer(query,&first);if !accept_answer(&mut rag_answer,&mut rag_sources,first,generated){rag_error=Some("Не удалось сформировать ответ. Найденные фрагменты доступны ниже.".into())}}}
+      let mut retry=agentic||rag_sources.is_empty();if !retry {if let Some(a)=rag_answer.as_ref(){retry=match generator.answer_quality(query,a,&rag_sources){Ok(v)=>v!="sufficient",Err(_)=>{rag_error=Some("Не удалось проверить полноту ответа".into());false}}}}
+      if retry && !agentic {let expanded=select(&candidates,8,0.65);if expanded.len()>rag_sources.len(){let generated=generator.answer(query,&expanded);if accept_answer(&mut rag_answer,&mut rag_sources,expanded,generated){if let Some(a)=rag_answer.as_ref(){retry=match generator.answer_quality(query,a,&rag_sources){Ok(v)=>v!="sufficient",Err(_)=>{rag_error=Some("Не удалось проверить полноту ответа".into());false}}}}else{rag_error=Some("Не удалось расширить ответ; показан предыдущий результат".into());retry=false}}}
+      #[cfg(feature="test-hook")] if rag_answer.is_some() && std::env::var_os("ATLAS_TEST_FAIL_RETRY").is_some(){retry=true;}
+      let rewrite=retry;
+      if rewrite {
+       #[cfg(feature="test-hook")] if rag_answer.is_some() && std::env::var_os("ATLAS_TEST_FAIL_RETRY").is_some(){rag_error=Some("Не удалось выполнить дополнительный поиск".into());}
+       let questions=if rag_error.is_some(){Vec::new()}else{match generator.search_questions(query,agentic){Ok(q)=>q,Err(_)=>{rag_error=Some("Не удалось подготовить дополнительные поисковые запросы".into());Vec::new()}}};
+       let mut groups=Vec::new();
+       for q in questions.iter().take(if agentic{3}else{2}) {let more=match service.search(&dir,q,ids.as_deref()){Ok(v)=>v,Err(_)=>{rag_error=Some("Не удалось выполнить дополнительный поиск".into());break}};groups.push(more.into_iter().filter(|r|r["score"].as_f64().is_some_and(|v|v.is_finite()&&v>=0.65)).take(4).collect::<Vec<_>>());}
+       candidates=merge_agentic(&groups,candidates);
+       // Preserve all original ranked results and append newly discovered spans.
+       let mut visible=std::collections::HashSet::new();for r in &results {for c in r["chunks"].as_array().into_iter().flatten(){visible.insert((r["id"].to_string(),c["field"].to_string(),c["start"].to_string(),c["end"].to_string()));}}
+       let original_count=results.len();for r in &candidates{if results.len()>=original_count+12{break}let fresh=r["chunks"].as_array().is_some_and(|chunks|chunks.iter().any(|c|visible.insert((r["id"].to_string(),c["field"].to_string(),c["start"].to_string(),c["end"].to_string()))));if fresh{results.push(r.clone())}}
+       let proposed=select(&candidates,8,0.65);if !proposed.is_empty() && rag_error.is_none(){let generated=generator.answer(query,&proposed);if !accept_answer(&mut rag_answer,&mut rag_sources,proposed,generated){rag_error=Some("Не удалось улучшить ответ; показан предыдущий результат".into());}else if let Some(a)=rag_answer.as_ref(){match generator.answer_quality(query,a,&rag_sources){Ok(v) if v!="sufficient"=>rag_error=Some("Ответ может быть неполным: проверьте найденные фрагменты".into()),Err(_)=>rag_error=Some("Не удалось проверить полноту ответа".into()),_=>{}}}}
+      }
+      if rag_sources.is_empty() && rag_error.is_none(){rag_answer=Some("Не найдено достаточно близких фрагментов".into())}
+     } else if candidates.is_empty(){rag_answer=Some("Не найдено достаточно близких фрагментов".into())}else{return Ok((503,json!({"error":"Модель ответа не загружена"})))}
+    }
+    _serial_after=Some(serial.lock().map_err(|_|"server unavailable")?);
+    if !valid_workspace(&dir){return Ok((404,json!({"error":"Not found"})))}
+    _workspace_after=Some(atlas_native_storage_contract::workspace_lock(&dir)?);
+    if service.revision(&dir)!=Some(revision){return Ok((409,json!({"error":"Рабочее пространство изменилось; повторите поиск"})))}
+   } else {_serial_after=None;_workspace_after=None;}
+   let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;
+   if !is_semantic && !words.is_empty()&&ids.as_ref().map_or(true,|v|!v.is_empty()) {
+    let mut sql=String::from("SELECT objects.id,objects.title,search_chunks.start,search_chunks.field,search_chunks.content,bm25(search_chunks) FROM search_chunks JOIN objects ON objects.id=search_chunks.object_id WHERE search_chunks MATCH ? AND objects.id NOT IN (SELECT id FROM trash)");
+    let mut args:Vec<rusqlite::types::Value>=vec![words.join(" OR ").into()];if let Some(ids)=ids {sql.push_str(" AND objects.id IN (");sql.push_str(&vec!["?";ids.len()].join(","));sql.push(')');args.extend(ids.into_iter().map(Into::into));}sql.push_str(" ORDER BY bm25(search_chunks),objects.id,CAST(search_chunks.start AS INTEGER) LIMIT 128");
+    let mut stmt=db.prepare(&sql)?;let rows=stmt.query_map(rusqlite::params_from_iter(args),|r|{let id:String=r.get(0)?;let title:String=r.get(1)?;let start:i64=r.get(2)?;let field:String=r.get(3)?;let text:String=r.get(4)?;let score=-r.get::<_,f64>(5)?;let chunks=if start>=0{vec![json!({"text":text,"start":start,"end":start+text.chars().count() as i64,"field":field,"score":score})]}else{vec![]};Ok(json!({"id":id,"title":title,"chunks":chunks,"score":score}))})?;for row in rows{results.push(row?)}
+   }
+   if !query.trim().is_empty() && (rag_error.is_none() || rag_answer.is_some()){let mut snapshot=results.clone();for result in &mut snapshot {let id=result["id"].as_str().ok_or("invalid id")?;let (title,text,description):(String,String,String)=db.query_row("SELECT objects.title,COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;result["_source_hash"]=json!(source_hash(&title,&text,&description));}let mode=b.get("mode").and_then(Value::as_str).unwrap_or("lexical");let scope=b.get("object_ids").filter(|x|!x.is_null()).map(|x|x.to_string());let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64();db.execute("INSERT INTO search_history(query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic) VALUES(?,?,?,?,?,1,?,?,?,?)",rusqlite::params![query,mode,serde_json::to_string(&snapshot)?,now,scope,rag_answer,if is_rag {Some(serde_json::to_string(&rag_sources)?)} else {None},rag_error,if is_rag {Some(agentic)} else {None}])?;db.execute("DELETE FROM search_history WHERE id NOT IN (SELECT id FROM search_history ORDER BY id DESC LIMIT 100)",[])?;}
+   return Ok((200,if is_rag {json!({"answer":rag_answer,"error":rag_error,"results":results,"sources":rag_sources})} else {json!({"results":results})}))
+  }
+  Ok((404,json!({"error":"Not found"})))
+ })();match run{Ok((status,value))=>{
+ if status<300 && method!="GET" && parts.len()>=4 && parts[0..2]==["api","w"] && matches!(parts[3],"notes"|"files"|"objects"|"trash") {
+  if let Some(service)=semantic {let wid=parts[2];let dir=if wid=="default" {default.to_path_buf()} else {root.join(wid)};let id=value.get("id").and_then(Value::as_str).or_else(||if parts.len()>=5 && !matches!(parts[4],"delete-many"|"restore-many"|"copy"){Some(parts[4])}else{None});let _=service.enqueue(&dir,id);}
+ }
+ answer(req,status,value)},Err(e) if e.to_string()=="duplicate edge"=>answer(req,409,json!({"error":"Эти карточки уже связаны"})),Err(_)=>answer(req,400,json!({"error":"Invalid request"}))}
+}
+struct ModelChoice {exe:String,dir:std::path::PathBuf,selected:std::sync::Mutex<String>,warning:std::sync::Mutex<Option<String>>}
+fn accept_answer(answer:&mut Option<String>,sources:&mut Vec<Value>,proposed:Vec<Value>,generated:Result<String,String>)->bool{match generated{Ok(value)=>{*answer=Some(value);*sources=proposed;true},Err(_)=>false}}
+fn merge_agentic(groups:&[Vec<Value>],candidates:Vec<Value>)->Vec<Value>{
+ let mut out=Vec::new();let mut unique=std::collections::HashSet::new();
+ let mut add=|r:&Value|{let fresh=r["chunks"].as_array().is_some_and(|chunks|chunks.iter().any(|c|unique.insert((r["id"].to_string(),c["field"].to_string(),c["start"].to_string(),c["end"].to_string()))));if fresh{out.push(r.clone())}};
+ for rank in 0..4 {for group in groups {if let Some(r)=group.get(rank){add(r)}}}
+ for r in &candidates {add(r)} out
+}
+#[cfg(test)] mod agentic_tests;
+#[derive(Clone)]
+enum RagState { Disabled, Loading, Ready(std::sync::Arc<std::sync::Mutex<atlas_llama_probe::Generator>>), Failed(String) }
+#[derive(Clone)]
+enum ModelState { Disabled, Loading, Ready(semantic::SemanticService), Failed(String) }
+fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
+ let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
+ let mut v=json!({"agentic":false,"model":model,"embedding":selected.0,"llm":selected.1});
+ if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){if saved["agentic"].is_boolean(){v["agentic"]=saved["agentic"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v
+}
+fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{
+ if !b["agentic"].is_boolean(){return Err("Неизвестный режим поиска".into())}let model=b["model"].as_str().filter(|s|*s=="e2b"||*s=="e4b").ok_or("Неизвестная модель")?;let embedding=b["embedding"].as_str().ok_or("Неизвестное устройство")?;let llm=b["llm"].as_str().ok_or("Неизвестное устройство")?;
+ let old=app_settings(choice,device);if old["model"]!=model && !choice.dir.join(if model=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}).is_file(){return Err("Выбранная модель ответа не загружена".into())}
+ if old["embedding"]!=embedding || old["llm"]!=llm {device.validate(embedding,llm)?;}
+ std::fs::create_dir_all(&choice.dir).map_err(|e|e.to_string())?;let tmp=choice.dir.join(format!(".settings-{}",uuid::Uuid::new_v4()));let result=(|| -> Result<(),String>{let f=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e|e.to_string())?;serde_json::to_writer(&f,b).map_err(|e|e.to_string())?;f.sync_all().map_err(|e|e.to_string())?;std::fs::rename(&tmp,choice.dir.join("settings.json")).map_err(|e|e.to_string())?;Ok(())})();if result.is_err(){let _=std::fs::remove_file(tmp);}result
+}
+
+struct RequestSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for RequestSlot {fn drop(&mut self){self.0.fetch_sub(1,std::sync::atomic::Ordering::SeqCst);}}
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+ let args: Vec<String> = env::args().skip(1).collect();
+ let root = args.iter().position(|v| v == "--root").and_then(|i| args.get(i+1)).or_else(|| args.first()).ok_or("temporary registry directory required")?;
+ let port: u16 = args.iter().position(|v| v == "--port").and_then(|i| args.get(i+1)).map(|s| s.parse()).transpose()?.unwrap_or(8765);
+ let dir=std::path::PathBuf::from(root);if dir.is_symlink(){return Err("workspace registry cannot be a symbolic link".into())}std::fs::create_dir_all(&dir)?;let default=args.iter().position(|v|v=="--default-workspace").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).unwrap_or_else(||dir.join(".default"));if default.is_symlink(){return Err("workspace cannot be a symbolic link".into())}let new_default=!default.exists() || (default.is_dir() && std::fs::read_dir(&default)?.next().is_none());if !new_default && !valid_workspace(&default){return Err("invalid existing workspace".into())}if dir.join(".default-deleted").exists() && default.is_dir() && !default.is_symlink() {let owner=default.join(".atlas-owned");if owner.is_file() && !owner.is_symlink() && std::fs::read_to_string(owner).ok().as_deref()==Some("atlas-workspace-v1") {std::fs::remove_file(dir.join(".default-deleted"))?;}}if new_default && !dir.join(".default-deleted").exists(){atlas_native_storage_contract::create_workspace(&default).map_err(|e|e.to_string())?;std::fs::write(default.join(".atlas-owned"),"atlas-workspace-v1")?;}
+ let token=io::stdin().lock().lines().next().ok_or("missing token")??;if token.is_empty(){return Err("empty token".into())}
+ let semantic=std::sync::Arc::new(std::sync::Mutex::new(ModelState::Disabled));
+ let rag=std::sync::Arc::new(std::sync::Mutex::new(RagState::Disabled));
+ let initial=args.iter().position(|v|v=="--rag-model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).or_else(||args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from)).unwrap_or_default();let model_dir=args.iter().position(|v|v=="--rag-model-dir").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).unwrap_or_else(||initial.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());let exe=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned().unwrap_or_default();let selected=std::fs::read_to_string(model_dir.join("settings.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).and_then(|v|v["model"].as_str().map(str::to_owned)).or_else(||std::fs::read_to_string(model_dir.join("rag-choice")).ok()).filter(|v|v=="e2b"||v=="e4b").unwrap_or_else(||"e2b".to_owned());let startup=model_dir.join(if selected=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"});let choice=std::sync::Arc::new(ModelChoice{exe,dir:model_dir,selected:std::sync::Mutex::new(selected),warning:std::sync::Mutex::new(None)});
+ let device=std::sync::Arc::new(device::DeviceSettings::new(choice.dir.clone(),choice.exe.clone()));
+ let startup_device=device.selected_pair();
+ let serial=std::sync::Arc::new(std::sync::Mutex::new(()));
+ let embedding_path=args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).cloned();
+ let executable=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned();
+ if executable.is_none() || (embedding_path.is_none() && !startup.is_file()) {device.set_embedding(None,"Модель поиска не загружена");device.set_llm(None,"Модель ответа не загружена");device.mark_ready();}
+ if embedding_path.is_some() && executable.is_none(){return Err("model and llama-server paths are both required".into())}
+ if let Some(exe)=executable {if embedding_path.is_some() || startup.is_file(){
+  if embedding_path.is_some(){*semantic.lock().map_err(|_|"model state unavailable")?=ModelState::Loading;}
+  if startup.is_file(){*rag.lock().map_err(|_|"generator state unavailable")?=RagState::Loading;}
+  let state=semantic.clone();let rag_state=rag.clone();let device=device.clone();let startup_serial=serial.clone();let startup_default=default.clone();let startup_registry=dir.clone();
+  std::thread::spawn(move || {
+   let (requested_embedding,requested_llm)=startup_device;
+   let mut embedding_device=requested_embedding.clone();let mut llm_device=requested_llm.clone();
+   let mut embedding=embedding_path.as_ref().map(|p|semantic::SemanticService::start_device(&exe,p,&embedding_device));
+   let mut embedding_message=String::new();
+   if embedding_device=="metal" && embedding.as_ref().is_some_and(|r|r.is_err()) {embedding_device="cpu".into();embedding_message="GPU Apple недоступен для поиска, используется CPU".into();embedding=embedding_path.as_ref().map(|p|semantic::SemanticService::start_device(&exe,p,&embedding_device));}
+   let mut generator=if startup.is_file(){Some(atlas_llama_probe::Generator::start_device(&exe,startup.to_string_lossy().as_ref(),&llm_device))}else{None};
+   let mut llm_message=String::new();
+   if llm_device=="metal" && generator.as_ref().is_some_and(|r|r.is_err()) {llm_device="cpu".into();llm_message="GPU Apple недоступен для модели ответа, используется CPU".into();generator=Some(atlas_llama_probe::Generator::start_device(&exe,startup.to_string_lossy().as_ref(),&llm_device));}
+   device.set_embedding(if embedding.as_ref().is_some_and(|r|r.is_ok()){Some(&embedding_device)}else{None},if embedding.is_none(){"Модель поиска не загружена"}else if embedding.as_ref().is_some_and(|r|r.is_err()){"Не удалось загрузить модель поиска"}else{&embedding_message});
+   device.set_llm(if generator.as_ref().is_some_and(|r|r.is_ok()){Some(&llm_device)}else{None},if generator.is_none(){"Модель ответа не загружена"}else if generator.as_ref().is_some_and(|r|r.is_err()){"Не удалось загрузить модель ответа"}else{&llm_message});
+   if let Some(result)=embedding {if let Ok(_guard)=startup_serial.lock(){if let Ok(mut slot)=state.lock(){*slot=match result {Ok(service)=>{if !startup_registry.join(".default-deleted").exists() && valid_workspace(&startup_default){let _=service.ensure(&startup_default);}ModelState::Ready(service)},Err(e)=>ModelState::Failed(e)}}}}
+   if let Some(result)=generator {if let Ok(mut slot)=rag_state.lock(){*slot=match result {Ok(g)=>RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g))),Err(e)=>RagState::Failed(e)}}}
+   device.mark_ready();
+  });
+ }}
+ let server=Server::http(format!("127.0.0.1:{port}"))?;println!("{}",server.server_addr().to_ip().ok_or("invalid address")?.port()); let active=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));for req in server.incoming_requests(){if active.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|if n<32 {Some(n+1)}else{None}).is_err(){answer(req,503,json!({"error":"Server busy"}));continue}let slot=RequestSlot(active.clone());let dir=dir.clone();let default=default.clone();let token=token.clone();let serial=serial.clone();let semantic=semantic.clone();let rag=rag.clone();let choice=choice.clone();let device=device.clone();std::thread::spawn(move || {let _slot=slot;handle(req,&dir,&default,&token,&serial,&semantic,&rag,&choice,&device)});} Ok(())
+}
+#[cfg(test)] mod tests {use super::*;fn h(k:&str,v:&str)->Header{Header::from_bytes(k,v).unwrap()} #[test]fn authorization(){assert!(valid(&[h("Host","127.0.0.1:18765"),h("Origin","http://localhost:5173"),h("X-Atlas-Token","secret")],"secret"));assert!(!valid(&[h("Host","evil.test"),h("X-Atlas-Token","secret")],"secret"));assert!(!valid(&[h("Host","localhost"),h("Host","evil.test"),h("X-Atlas-Token","secret")],"secret"));}}

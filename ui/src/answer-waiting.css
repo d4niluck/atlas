@@ -1,0 +1,8 @@
+.answer-waiting { display:flex; align-items:center; gap:9px; padding:10px 12px; border:1px solid #544765; border-radius:10px; color:#eee8fa; background:#302939; font-size:13px; }
+.answer-waiting-dots { display:inline-flex; gap:4px; align-items:center; }
+.answer-waiting-dots i { width:5px; height:5px; border-radius:50%; background:currentColor; animation:answer-pulse 1.2s ease-in-out infinite; }
+.answer-waiting-dots i:nth-child(2) { animation-delay:.2s; }
+.answer-waiting-dots i:nth-child(3) { animation-delay:.4s; }
+@keyframes answer-pulse { 0%, 80%, 100% { opacity:.4; transform:translateY(0); } 40% { opacity:1; transform:translateY(-3px); } }
+@media (prefers-reduced-motion:reduce) { .answer-waiting-dots i { animation:none; } }
+:root[data-theme=light] .answer-waiting { color:#30233f; background:#f3edf9; border-color:#b5a7c5; }

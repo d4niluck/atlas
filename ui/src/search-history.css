@@ -1,0 +1,32 @@
+.search-panel .history-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+.search-panel .history-entry strong {
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.search-panel .history-entry .history-detail {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.search-panel .history-entry .history-preview {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-panel .history-entry .history-count {
+  flex: none;
+  white-space: nowrap;
+}

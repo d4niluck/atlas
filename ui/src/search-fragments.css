@@ -1,0 +1,9 @@
+.search-hit-wrap { margin-bottom: 8px; min-width: 0; border: 1px solid #3a3b45; border-radius: 10px; background: #252630; overflow: hidden; }
+.search-hit-wrap .search-hit { margin-bottom: 0; border: 0; border-radius: 0; background: transparent; }
+.search-hit-expand { margin: 0 12px 12px; padding: 4px 8px; color: #e8d5ff; background: #35303e; border: 1px solid #756587; border-radius: 6px; font-size: 12px; }
+.search-hit-expand:hover, .search-hit-expand:focus-visible { background: #50435f; outline-color: #e8d5ff; }
+:root[data-theme=light] .search-hit-expand { color: #3c2454; background: #f2eaf9; border-color: #81748f; }
+:root[data-theme=light] .search-hit-wrap { background: #fff; border-color: #ded9e4; }
+:root[data-theme=light] .search-hit-wrap .search-hit { background: transparent; }
+:root[data-theme=light] .search-hit-wrap .search-hit:hover:not(:disabled) { background: #f1eaf8; }
+:root[data-theme=light] .search-hit-expand:hover, :root[data-theme=light] .search-hit-expand:focus-visible { background: #dfd1ed; outline-color: #3c2454; }

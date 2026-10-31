@@ -1,0 +1,18 @@
+[package]
+name = "atlas-native-http"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+tiny_http = "0.12"
+serde_json = "1"
+rusqlite = { version = "0.41.1", features = ["bundled", "modern_sqlite"] }
+atlas-native-storage-contract = { path = "../atlas-native-storage" }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+sha2 = "0.10"
+percent-encoding = "2"
+
+atlas-joined-probe={path="../atlas-joined-probe"}
+atlas-llama-probe={path="../atlas-llama-rust"}
+[features]
+test-hook=[]

@@ -1,0 +1,13 @@
+.file-description{flex:0 1 auto;min-height:0;max-height:35%;overflow:auto;margin:8px 0 14px;border:1px solid #514d5b;border-radius:9px}
+.file-description summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:9px 12px;font-size:13px;list-style:none}
+.file-description summary::-webkit-details-marker{display:none}
+.file-description summary span::before{content:'▸';display:inline-block;width:18px}
+.file-description[open] summary span::before{content:'▾'}
+.file-description summary small{color:#aaa6b4;font-size:11px}
+.file-description textarea,.file-description pre{display:block;width:calc(100% - 24px);margin:0 12px 12px;min-height:64px;max-height:140px;overflow:auto;resize:vertical}
+:root[data-theme=light] .file-description{border-color:#d1cbd6}
+:root[data-theme=light] .file-description summary small{color:#68616c}
+/* Keep the workspace tab strip accessible above modal content. */
+.overlay{inset:42px 0 0;z-index:10}
+.overlay .editor.fullscreen{width:100%;height:100%;max-width:none;max-height:none}
+.error{z-index:11}

@@ -1,0 +1,8 @@
+.agentic-toggle{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid #4a4459;border-radius:10px;background:#25232e;color:#f2edf8;cursor:pointer;text-align:left}
+.agentic-toggle input{flex:none;width:17px;height:17px;margin:2px 0 0;accent-color:#c9b4fa}
+.agentic-toggle span{display:flex;flex-direction:column;gap:4px;min-width:0}
+.agentic-toggle strong{font-size:13px}.agentic-toggle small{font-size:12px;line-height:1.4;color:#cbc3d9}
+.agentic-toggle:focus-within{outline:2px solid #d0baff;outline-offset:2px}.agentic-toggle.is-disabled{opacity:.7;cursor:not-allowed}
+:root[data-theme=light] .agentic-toggle{background:#f7f4fa;border-color:#d3c9dc;color:#292331}
+:root[data-theme=light] .agentic-toggle small{color:#595064}
+:root[data-theme=light] .agentic-toggle:focus-within{outline-color:#684497}
