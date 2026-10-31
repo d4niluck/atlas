@@ -75,7 +75,6 @@ name = "atlas"
 version = "0.1.0"
 dependencies = [
  "libc",
- "serde_json",
  "tauri",
  "tauri-build",
 ]

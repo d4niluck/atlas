@@ -1,13 +1,26 @@
 import React, {useState} from 'react';
-import './workspace-portability.css';
-type Workspace={id:string;name:string};type Operation={kind:'import'|'export';ids?:string[];name?:string};
-type Props={workspaces:Workspace[];onOpen:(id:string)=>void;onCreate:()=>void;onDelete:(id:string)=>Promise<void>;onImport:()=>Promise<{warning:string|null;count?:number}|null>;onExport:(ids:string[])=>Promise<{warning:string|null;count?:number}|null>};
-export function WorkspaceHome({workspaces,onOpen,onCreate,onDelete,onImport,onExport}:Props){
- const [warning,setWarning]=useState('');
- const [confirm,setConfirm]=useState<Workspace|null>(null),[operation,setOperation]=useState<Operation|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
- async function perform(){if(!operation||busy)return;setBusy(true);setError('');setNotice('');setWarning('');try{const done=operation.kind==='import'?await onImport():await onExport(operation.ids||[]);setOperation(null);if(done){if(done.warning)setWarning(done.warning);else setNotice(operation.kind==='import'?(done.count&&done.count>1?'Копии пространств добавлены в Atlas.':'Копия пространства добавлена в Atlas.'):'Копия сохранена в выбранной папке.')}}catch(e){setError(e instanceof Error?e.message:'Не удалось выполнить операцию.')}finally{setBusy(false)}}
- async function remove(){if(!confirm||busy)return;setBusy(true);setError('');try{await onDelete(confirm.id);setConfirm(null)}catch(e){setError(e instanceof Error?e.message:'Не удалось удалить пространство.')}finally{setBusy(false)}}
- return <main className="workspace-home"><header className="portable-header"><div><h1>Ваши пространства</h1><p>Открывайте пространства и переносите их копии.</p></div><button className="primary" onClick={onCreate} disabled={busy}>＋ Создать пространство</button></header><div className="portable-actions"><button type="button" disabled={busy} onClick={()=>{setError('');setOperation({kind:'import'})}}><strong>Импортировать пространства</strong><small>Создать в Atlas копии из папки</small></button><button type="button" disabled={busy||!workspaces.length} onClick={()=>{setError('');setOperation({kind:'export',ids:workspaces.map(w=>w.id)})}}><strong>Сохранить копии всех пространств</strong><small>Выбрать папку для копий</small></button></div>{notice&&<p role="status">{notice}</p>}{warning&&<p role="alert" className="portable-error">{warning}</p>}<section className="portable-list" aria-label="Список пространств">{workspaces.map(item=><div className="workspace-home-row" key={item.id}><button className="portable-name" onClick={()=>onOpen(item.id)} disabled={busy}>{item.name}</button><div className="portable-row-actions"><button type="button" disabled={busy} aria-label={`Сохранить копию пространства ${item.name}`} onClick={()=>{setError('');setOperation({kind:'export',ids:[item.id],name:item.name})}}>Сохранить копию</button><button type="button" disabled={busy} aria-label={`Удалить пространство ${item.name}`} onClick={()=>{setConfirm(item);setError('')}}>Удалить</button></div></div>)}</section>
- {operation&&<div className="overlay"><section className="editor workspace-delete" role="dialog" aria-modal="true" aria-labelledby="transfer-title" onKeyDown={e=>{if(e.key==='Escape'&&!busy)setOperation(null);if(e.key==='Tab'){const buttons=Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));if(!buttons.length){e.preventDefault();return}if(e.shiftKey&&document.activeElement===buttons[0]){e.preventDefault();buttons[buttons.length-1].focus()}else if(!e.shiftKey&&document.activeElement===buttons[buttons.length-1]){e.preventDefault();buttons[0].focus()}}}}><h2 id="transfer-title">{operation.kind==='import'?'Импортировать пространства?':operation.name?`Сохранить копию «${operation.name}»?`:'Сохранить копии всех пространств?'}</h2><p>{operation.kind==='import'?'Выберите папку пространства или папку с копиями пространств. Atlas создаст отдельные копии; исходные файлы останутся на месте.':'Выберите папку, в которую Atlas сохранит копию. Существующие файлы не будут перезаписаны.'}</p>{busy&&<p role="status">{operation.kind==='import'?'Импортируем пространство…':'Сохраняем копию…'}</p>}{error&&<p role="alert">{error}</p>}<div><button type="button" autoFocus onClick={()=>setOperation(null)} disabled={busy}>Отмена</button><button type="button" onClick={()=>void perform()} disabled={busy}>Выбрать папку</button></div></section></div>}
- {confirm&&<div className="overlay"><section className="editor workspace-delete" role="dialog" aria-modal="true" aria-label="Подтверждение удаления"><h2>Удалить «{confirm.name}»?</h2><p>Все заметки и файлы этого пространства будут удалены.</p>{error&&<p role="alert">{error}</p>}<div><button onClick={()=>setConfirm(null)} disabled={busy}>Отмена</button><button onClick={()=>void remove()} disabled={busy}>Удалить пространство</button></div></section></div>}</main>
+
+type Workspace = {id: string; name: string};
+type Props = {workspaces: Workspace[]; onOpen: (id:string) => void; onCreate: () => void; onDelete: (id:string) => Promise<void>};
+export function WorkspaceHome({workspaces, onOpen, onCreate, onDelete}: Props) {
+ const [confirm, setConfirm] = useState<Workspace|null>(null);
+ const [busy, setBusy] = useState(false);
+ const [error, setError] = useState('');
+ async function remove() {
+  if (!confirm || busy) return;
+  setBusy(true);
+  try { await onDelete(confirm.id); setConfirm(null); setError(''); }
+  catch (e) { setError(e instanceof Error ? e.message : 'Не удалось удалить пространство'); }
+  finally { setBusy(false); }
+ }
+ return <main className="workspace-home"><h1>Ваши пространства</h1><button className="primary" onClick={onCreate}>＋ Создать пространство</button>
+  {workspaces.map(item => <div className="workspace-home-row" key={item.id}>
+   <button onClick={() => onOpen(item.id)}>{item.name}</button><button aria-label={`Удалить пространство ${item.name}`} onClick={() => { setConfirm(item); setError(''); }}>Удалить</button>
+  </div>)}
+  {confirm && <div className="overlay"><section className="editor workspace-delete" role="dialog" aria-modal="true" aria-label="Подтверждение удаления">
+   <h2>Удалить «{confirm.name}»?</h2><p>Все заметки и файлы этого пространства будут удалены.</p>
+   {error && <p role="alert">{error}</p>}
+   <div><button onClick={() => setConfirm(null)} disabled={busy}>Отмена</button><button onClick={remove} disabled={busy}>Удалить пространство</button></div>
+  </section></div>}
+ </main>;
 }

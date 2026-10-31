@@ -64,7 +64,6 @@ dependencies = [
  "atlas-joined-probe",
  "atlas-llama-probe",
  "atlas-native-storage-contract",
- "libc",
  "percent-encoding",
  "rusqlite",
  "serde_json",

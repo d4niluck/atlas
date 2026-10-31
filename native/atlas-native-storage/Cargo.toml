@@ -10,6 +10,3 @@ pdf-extract = "0.12.1"
 docx-lite = "0.2"
 sha2 = "0.10"
 libc = "0.2"
-
-[features]
-test-hook=[]
