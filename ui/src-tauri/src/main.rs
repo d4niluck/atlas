@@ -29,6 +29,38 @@ fn download_rag_e4b_model(app: tauri::AppHandle) -> Result<(), String> { let _gu
 #[tauri::command]
 fn rag_e4b_model_download_status(app: tauri::AppHandle) -> Result<String, String> { Ok(rag_e4b_model_download::status(model_data_dir(&app)?)) }
 
+struct TransferBackend { port:u16, token:String }
+#[tauri::command]
+async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Result<Option<String>,String> {
+    if operation!="import" && operation!="export" {return Err("Недопустимая операция.".into())}
+    use tauri::Manager;
+    let auth=app.try_state::<TransferBackend>().ok_or("Выбор папки недоступен в этом режиме.")?;
+    let port=auth.port;let token=auth.token.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os="macos")]
+        {
+            use std::io::{Read,Write};
+            let output=std::process::Command::new("/usr/bin/osascript").args(["-e","POSIX path of (choose folder with prompt \"Выберите папку\")"]).output().map_err(|_|"Не удалось открыть выбор папки.")?;
+            if !output.status.success(){if String::from_utf8_lossy(&output.stderr).contains("(-128)"){return Ok(None)}return Err("Не удалось выбрать папку.".into())}
+            let raw=String::from_utf8(output.stdout).map_err(|_|"Не удалось прочитать путь к папке.")?;
+            let path=raw.strip_suffix('\n').unwrap_or(&raw);
+            if !std::path::Path::new(path).is_absolute(){return Err("Не удалось прочитать путь к папке.".into())}
+            let body=serde_json::json!({"operation":operation,"path":path}).to_string();
+            let mut socket=std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST,port)).map_err(|_|"Не удалось связаться с Atlas.")?;
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(10))).map_err(|_|"Не удалось связаться с Atlas.")?;
+            write!(socket,"POST /api/workspaces/authorize HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Atlas-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",token,body.len(),body).map_err(|_|"Не удалось связаться с Atlas.")?;
+            let mut response=String::new();socket.read_to_string(&mut response).map_err(|_|"Не удалось связаться с Atlas.")?;
+            let (head,data)=response.split_once("\r\n\r\n").ok_or("Не удалось подтвердить выбор папки.")?;
+            if !head.lines().next().is_some_and(|line|line.starts_with("HTTP/1.1 200 ")||line.starts_with("HTTP/1.0 200 ")){return Err("Не удалось подтвердить выбор папки.".into())}
+            let value:serde_json::Value=serde_json::from_str(data).map_err(|_|"Не удалось подтвердить выбор папки.")?;
+            let capability=value.get("capability").and_then(|v|v.as_str()).filter(|v|!v.is_empty()).ok_or("Не удалось подтвердить выбор папки.")?;
+            Ok(Some(capability.to_owned()))
+        }
+        #[cfg(not(target_os="macos"))]
+        {let _=(port,token,operation);Err("Выбор папки пока доступен только на macOS.".into())}
+    }).await.map_err(|_|"Не удалось открыть выбор папки.".to_owned())?
+}
+
 fn allowed_external_url(url: &str) -> bool {
     tauri::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
@@ -54,7 +86,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| { tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External("http://127.0.0.1:5173".parse()?)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0, 800.0).build()?; Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_external_url, download_model, model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
+        .invoke_handler(tauri::generate_handler![select_workspace_directory, open_external_url, download_model, model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
         .run(tauri::generate_context!())
         .expect("failed to start Atlas");
 }
@@ -171,13 +203,14 @@ fn main() {
         backend_args.extend(["--rag-model-dir".into(),data.join("models").to_string_lossy().into_owned()]);
         if model.is_file() || rag_model.is_file() || rag_e4b_model.is_file() { backend_args.extend(["--llama-server".into(),resources.join("llama/llama-server").to_string_lossy().into_owned()]); }
         let (backend,backend_port)=launch(&resources.join("atlas-backend"),&backend_args,&format!("{token}\n"),&BACKEND)?;
+        app.manage(TransferBackend{port:backend_port,token:token.clone()});
         BACKEND.store(backend.id() as i32,Ordering::Relaxed);
         let (proxy,port)=match launch(&resources.join("atlas-proxy"),&[resources.join("ui").to_string_lossy().into_owned(),backend_port.to_string(),"0".into()],&format!("{bootstrap}\n{token}\n"),&PROXY){Ok(v)=>v,Err(e)=>{let mut b=backend;unsafe {libc::kill(-(b.id() as i32),libc::SIGTERM);} let _=b.wait(); return Err(e.into());}};
         PROXY.store(proxy.id() as i32,Ordering::Relaxed); app.manage(Children(Mutex::new(vec![backend,proxy])));
         let origin=format!("http://127.0.0.1:{port}");let url=format!("{origin}/bootstrap/{bootstrap}").parse()?;
         WebviewWindowBuilder::new(app,"main",WebviewUrl::External(url)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0,800.0).on_navigation(move |url| url.scheme()=="http" && url.host_str()==Some("127.0.0.1") && url.port_or_known_default()==Some(port)).build()?;
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_external_url, download_model, model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
+    }).invoke_handler(tauri::generate_handler![select_workspace_directory, open_external_url, download_model, model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
 }
 #[cfg(all(test,not(debug_assertions),unix))]
 mod restart_group_contract_tests {
