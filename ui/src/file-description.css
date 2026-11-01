@@ -11,3 +11,5 @@
 .overlay{inset:42px 0 0;z-index:10}
 .overlay .editor.fullscreen{width:100%;height:100%;max-width:none;max-height:none}
 .error{z-index:11}
+
+.file-description:not([open]){width:38px;height:38px;overflow:hidden;margin:4px 0 8px}.file-description summary{width:38px;height:38px;padding:9px;justify-content:center}.file-description p{margin:0 12px 10px;font-size:13px}.file-description[open]{max-width:480px}

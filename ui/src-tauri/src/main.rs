@@ -205,6 +205,36 @@ fn main() {
             if registry.is_dir() && (default.join("atlas.sqlite3").is_file() || registry.join(".default-deleted").is_file()) {workspace=registry;legacy_default=Some(default);}
         }
         fs::create_dir_all(&workspace)?;
+        #[cfg(target_os="macos")]
+        {
+            use tauri::menu::{CheckMenuItem,Menu,MenuItem};
+            use std::sync::{Arc,atomic::AtomicBool};
+            let setting=data.join("show-memory");
+            let enabled=Arc::new(AtomicBool::new(setting.is_file()));
+            let menu=Menu::default(app.handle())?;
+            let items=menu.items()?;
+            let app_menu=items.first().and_then(|i|i.as_submenu()).ok_or("Нет меню Atlas")?;
+            let toggle=CheckMenuItem::with_id(app,"atlas-memory","Показывать потребление памяти",true,enabled.load(Ordering::Relaxed),None::<&str>)?;
+            let label=MenuItem::with_id(app,"atlas-memory-value","Память: выключено",false,None::<&str>)?;
+            let detail=MenuItem::with_id(app,"atlas-memory-detail","Без WebKit; общая память может учитываться повторно",false,None::<&str>)?;
+            app_menu.insert(&toggle,1)?;app_menu.insert(&label,2)?;app_menu.insert(&detail,3)?;
+            app.set_menu(menu)?;
+            let active=enabled.clone();let toggle_event=toggle.clone();
+            app.on_menu_event(move |_app,event| {if event.id().as_ref()=="atlas-memory" {let next=!active.load(Ordering::Relaxed);let result=if next {std::fs::write(&setting,b"1")} else {match std::fs::remove_file(&setting){Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),r=>r}};if result.is_ok(){active.store(next,Ordering::Relaxed);}let _=toggle_event.set_checked(active.load(Ordering::Relaxed));}});
+            std::thread::spawn(move || loop {
+                if enabled.load(Ordering::Relaxed) {
+                    let text=std::process::Command::new("/bin/ps").args(["-axo","pid=,ppid=,rss="]).stdout(std::process::Stdio::piped()).spawn().ok().and_then(|child|{let pid=child.id();child.wait_with_output().ok().filter(|o|o.status.success()).and_then(|o|String::from_utf8(o.stdout).ok()).map(|text|(pid,text))});
+                    let value=text.and_then(|(ps_pid,text)| {
+                        let rows:Vec<(u32,u32,u64)>=text.lines().filter_map(|line|{let mut x=line.split_whitespace();Some((x.next()?.parse().ok()?,x.next()?.parse().ok()?,x.next()?.parse().ok()?))}).collect();
+                        let root=std::process::id();if !rows.iter().any(|r|r.0==root){return None}
+                        let mut ids=std::collections::HashSet::from([root]);loop {let old=ids.len();for (pid,parent,_) in &rows {if ids.contains(parent){ids.insert(*pid);}}if old==ids.len(){break}}
+                        Some(rows.iter().filter(|r|r.0!=ps_pid&&ids.contains(&r.0)).map(|r|r.2).sum::<u64>())
+                    });
+                    if enabled.load(Ordering::Relaxed) {let _=label.set_text(value.map(|kb|format!("Память Atlas и моделей: ≈ {:.0} МиБ",kb as f64/1024.)).unwrap_or_else(||"Память: недоступна".into()));}
+                } else {let _=label.set_text("Память: выключено");}
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            });
+        }
         let model=data.join("models/embeddinggemma-2.gguf");
         let token=secret()?;let bootstrap=secret()?;
         let mut backend_args=vec!["--root".into(),workspace.to_string_lossy().into_owned(),"--port".into(),"0".into(),"--token-stdin".into()];
