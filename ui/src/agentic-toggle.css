@@ -6,3 +6,5 @@
 :root[data-theme=light] .agentic-toggle{background:#f7f4fa;border-color:#d3c9dc;color:#292331}
 :root[data-theme=light] .agentic-toggle small{color:#595064}
 :root[data-theme=light] .agentic-toggle:focus-within{outline-color:#684497}
+
+.agentic-toggle{justify-content:space-between;align-items:center}.agentic-toggle .search-settings-switch span{display:block;min-width:18px}

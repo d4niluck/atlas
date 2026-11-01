@@ -11,8 +11,9 @@ static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
 static TEMP: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 fn temp() -> &'static Mutex<Option<PathBuf>> { TEMP.get_or_init(|| Mutex::new(None)) }
 fn state() -> &'static Mutex<String> { STATUS.get_or_init(|| Mutex::new("idle".into())) }
-pub fn status(_path: PathBuf) -> String {
+pub fn status(path: PathBuf) -> String {
     let s = state().lock().unwrap().clone();
+    if s == "idle" && path.join("models/gemma-4-e4b-it-q4.gguf").is_file() { return "installed".into(); }
     if s == "downloading" { let n = temp().lock().unwrap().as_ref().and_then(|p| fs::metadata(p).ok()).ok_or(()).map(|x| x.len()).unwrap_or(0); format!("downloading:{}", n.saturating_mul(100).checked_div(SIZE).unwrap_or(0).min(100)) } else { s }
 }
 pub fn start(path: PathBuf) -> Result<(), String> {
