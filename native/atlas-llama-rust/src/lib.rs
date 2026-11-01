@@ -8,7 +8,7 @@ pub fn remaining_search_time()->Result<Option<Duration>,String>{SEARCH_DEADLINE.
 struct KeyFile { path:PathBuf, dir:PathBuf, token:String }
 impl Drop for KeyFile {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.dir);}}
 impl KeyFile {fn new()->Result<Self,String>{let mut bytes=[0u8;32];File::open("/dev/urandom").and_then(|mut f|f.read_exact(&mut bytes)).map_err(|e|e.to_string())?;let token=bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();let dir=std::env::temp_dir().join(format!("atlas-{}-{}",std::process::id(),&token[..16]));std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e|e.to_string())?;let path=dir.join("key");let mut f=match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path){Ok(f)=>f,Err(e)=>{let _=std::fs::remove_dir_all(&dir);return Err(e.to_string())}};if let Err(e)=writeln!(f,"{token}"){let _=std::fs::remove_dir_all(&dir);return Err(e.to_string())}Ok(Self{path,dir,token})}}
-pub struct Encoder { child: Child, address: PathBuf, identity: String, diagnostic: String, key:KeyFile }
+pub struct Encoder { child: Child, address: PathBuf, identity: String, diagnostic: String, key:KeyFile, images:bool }
 
 pub struct Generator { child: Child, address: PathBuf, key:KeyFile }
 impl Drop for Generator {fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
@@ -95,19 +95,35 @@ impl Encoder {
     hash.update(format!("atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;{device};ctx=2048").as_bytes());
     Ok(format!("{:x}",hash.finalize()))
  }
- pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
-    let identity=Self::model_identity(model,device)?;let mut buf=[0u8;65536];
+ pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{Self::start_with_mmproj(exe,model,device,None)}
+ pub fn start_device_with_images(exe:&str,model:&str,device:&str,mmproj:&str)->Result<Self,String>{Self::start_with_mmproj(exe,model,device,Some(mmproj))}
+ fn start_with_mmproj(exe:&str,model:&str,device:&str,mmproj:Option<&str>)->Result<Self,String>{
+    let mut identity=Self::model_identity(model,device)?;if mmproj.is_some(){identity.push_str(":vision-q8-v1");}let mut buf=[0u8;65536];
     let mut binary_hash=Sha256::new();let mut bin=std::fs::File::open(exe).map_err(|e|e.to_string())?;loop {let n=bin.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}binary_hash.update(&buf[..n]);}let diagnostic=format!("{:x}",binary_hash.finalize());
     let key=KeyFile::new()?;
     let address=key.dir.join("model.sock");
-    let child=Command::new(exe).args(["-m",model,"--embedding","--host",address.to_str().ok_or("invalid socket path")?,"--api-key-file",key.path.to_str().ok_or("invalid key path")?,"-ngl",if device=="metal" {"99"} else {"0"},"-c","2048","-b","2048","-ub","2048"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
-    let mut encoder=Self {child,address,identity,diagnostic,key}; let start=Instant::now();
+    let mut command=Command::new(exe);if let Some(path)=mmproj{command.args(["--mmproj",path]);}
+    let child=command.args(["-m",model,"--embedding","--host",address.to_str().ok_or("invalid socket path")?,"--api-key-file",key.path.to_str().ok_or("invalid key path")?,"-ngl",if device=="metal" {"99"} else {"0"},"-c","2048","-b","2048","-ub","2048"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
+    let mut encoder=Self {child,address,identity,diagnostic,key,images:mmproj.is_some()}; let start=Instant::now();
     while start.elapsed()<Duration::from_secs(30) {
        if encoder.child.try_wait().map_err(|e|e.to_string())?.is_some() {return Err("model process exited during startup".into());}
        if request(&encoder.address,"/health",None,Some(&encoder.key.token)).is_ok() {return Ok(encoder);}
        thread::sleep(Duration::from_millis(100));
     }
     Err("model process did not become ready".into())
+ }
+ pub fn supports_images(&self)->bool {self.images}
+ pub fn encode_image(&self,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>{
+    use base64::Engine;
+    if !self.images{return Err("image model is not loaded".into())}
+    if !matches!(mime,"image/png"|"image/jpeg"|"image/webp"|"image/gif"){return Err("unsupported image format".into())}
+    let url=format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes));
+    let payload=serde_json::to_vec(&serde_json::json!({"input":[{"content":[{"type":"image_url","image_url":{"url":url}}]}]})).map_err(|_|"invalid request")?;
+    let response=request(&self.address,"/v1/embeddings",Some(&payload),Some(&self.key.token))?;
+    let value:serde_json::Value=serde_json::from_slice(&response).map_err(|_|"invalid model response")?;
+    let array=value["data"][0]["embedding"].as_array().ok_or("missing model vector")?;
+    let vector:Result<Vec<_>,_>=array.iter().map(|v|v.as_f64().ok_or("invalid vector element")).collect();
+    normalize(&vector.map_err(str::to_string)?)
  }
  pub fn encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{
     let payload=serde_json::to_vec(&serde_json::json!({"input":prompt(text,query)})).map_err(|_|"invalid request")?;

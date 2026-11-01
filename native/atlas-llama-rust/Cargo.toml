@@ -6,6 +6,7 @@ edition = "2021"
 test-hook=[]
 [dependencies]
 serde_json = "1"
+base64 = "0.21"
 sha2 = "0.10"
 
 libc = "0.2"
