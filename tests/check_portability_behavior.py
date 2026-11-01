@@ -119,8 +119,12 @@ try:
         imported = expect(201, call('/api/workspaces/import', {'capability': cap('import', folder)}))['workspaces']
         assert len(imported) == 1 and imported[0]['id'] != protected, imported
         copied = imported[0]['id']
+        listing = expect(200, call('/api/workspaces'))['workspaces']
+        copy_name = next(w['name'] for w in listing if w['id'] == copied)
+        assert copy_name == 'synthetic-name-57297 копия 1', copy_name
         expect(403, call('/api/workspaces/' + copied + '/unlock', {'password': 'wrong'}))
         expect(200, call('/api/workspaces/' + copied + '/unlock', {'password': password}))
+        assert next(w['name'] for w in expect(200, call('/api/workspaces'))['workspaces'] if w['id'] == copied) == copy_name
         assert expect(200, call('/api/w/' + copied + '/notes/' + note))['text'] == secret
         req = Request(url + '/api/w/' + copied + '/files/' + file_id + '/content', headers={'X-Atlas-Token': token})
         with urlopen(req, timeout=10) as response:
@@ -145,9 +149,12 @@ try:
         for directory, _, files in os.walk(base):
             for name in files:
                 data = (Path(directory) / name).read_bytes()
-                for text in (secret, password, 'synthetic-name-57297', 'synthetic-title-57297', 'synthetic-attachment-secret-57297', 'synthetic-file-57297.bin'):
+                for text in (secret, password, 'synthetic-title-57297', 'synthetic-attachment-secret-57297', 'synthetic-file-57297.bin'):
                     assert text.encode() not in data, (directory, name, text)
         start()
+        assert next(w['name'] for w in expect(200, call('/api/workspaces'))['workspaces'] if w['id'] == copied) == copy_name
+        expect(200, call('/api/workspaces/' + copied + '/unlock', {'password': password}))
+        assert next(w['name'] for w in expect(200, call('/api/workspaces'))['workspaces'] if w['id'] == copied) == copy_name
         expect(200, call('/api/workspaces/' + protected + '/unlock', {'password': password}))
         assert expect(200, call('/api/w/' + protected + '/notes/' + note))['text'] == secret
         req = Request(url + '/api/w/' + protected + '/files/' + file_id + '/content', headers={'X-Atlas-Token': token})

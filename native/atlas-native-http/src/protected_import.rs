@@ -20,6 +20,6 @@ pub fn copy(destination:&Path)->R<()> {
  let mut hash=Sha256::new();let mut buffer=[0u8;65536];loop{let n=src.read(&mut buffer)?;if n==0{break}hash.update(&buffer[..n]);dst.write_all(&buffer[..n])?;}dst.sync_all()?;drop(dst);
  let mut dst=File::open(destination.join("workspace.atlas"))?;let mut check=Sha256::new();loop{let n=dst.read(&mut buffer)?;if n==0{break}check.update(&buffer[..n]);}let expected=hash.finalize();if expected!=check.finalize(){return Err("protected copy verification failed".into())}
  src.seek(SeekFrom::Start(0))?;let mut again=Sha256::new();loop{let n=src.read(&mut buffer)?;if n==0{break}again.update(&buffer[..n]);}if expected!=again.finalize(){return Err("source changed during copy".into())}
- for (name,bytes) in [(".atlas-protected",b"atlas-protected-v1".as_slice()),(".workspace.json",br#"{"name":"Protected workspace","protected":true}"#.as_slice())] {let mut f=OpenOptions::new().write(true).create_new(true).mode(0o600).open(destination.join(name))?;f.write_all(bytes)?;f.sync_all()?;}
+ let meta_bytes=serde_json::to_vec(&metadata)?;for (name,bytes) in [(".atlas-protected",b"atlas-protected-v1".as_slice()),(".workspace.json",meta_bytes.as_slice())] {let mut f=OpenOptions::new().write(true).create_new(true).mode(0o600).open(destination.join(name))?;f.write_all(bytes)?;f.sync_all()?;}
  File::open(destination)?.sync_all()?;Ok(())
 }

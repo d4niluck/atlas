@@ -3,27 +3,27 @@ import {useEffect, useRef, useState} from 'react';
 import {getDocument, GlobalWorkerOptions} from './pdfCompat';
 import type {PDFDocumentProxy, RenderTask} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
-import {decodePlainText} from './filePreviewText';
 import './file-preview-layout.css';
+import {decodePlainText} from './filePreviewText';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
+
+import {readPreviewWindow} from './preview-window';
 
 export function PlainFilePreview({url}: {url: string}) {
   const [value, setValue] = useState<string | null>(null);
   const [status, setStatus] = useState('Загрузка файла…');
+  const [truncated, setTruncated] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
-    setValue(null); setStatus('Загрузка файла…');
+    setValue(null); setTruncated(false); setStatus('Загрузка файла…');
     (async () => {
       try {
         const response = await fetch(url, {signal: controller.signal});
         if (!response.ok) throw new Error();
-        // Limit automatic previews; the complete file remains downloadable.
-        if (Number(response.headers.get('content-length')) > 8 * 1024 * 1024) {
-          setStatus('Файл слишком большой для предпросмотра. Скачайте его, чтобы открыть.');
-          return;
-        }
-        const text = decodePlainText(new Uint8Array(await response.arrayBuffer()));
+        const part = await readPreviewWindow(response);
+        const text = decodePlainText(new TextEncoder().encode(part.text));
+        setTruncated(part.truncated);
         if (controller.signal.aborted) return;
         if (text === null) setStatus('Предпросмотр этого файла недоступен. Скачайте его, чтобы открыть.');
         else setValue(text);
@@ -31,7 +31,7 @@ export function PlainFilePreview({url}: {url: string}) {
     })();
     return () => controller.abort();
   }, [url]);
-  return value === null ? <p role="status">{status}</p> : <pre className="file-preview-text">{value}</pre>;
+  return value === null ? <p role="status">{status}</p> : <><span role="status">{truncated && "Показано начало большого файла. Полный файл можно скачать."}</span><pre className="file-preview-text">{value}</pre></>;
 }
 
 export function PdfPreview({url, title}: {url:string; title:string}) {
