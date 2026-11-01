@@ -18,3 +18,5 @@
 :root[data-theme=light] .file-preview-title .file-description{background:#fff}
 
 .editor .file-preview-title{margin:35px 0 18px;display:flex;align-items:center;min-height:38px;flex-shrink:0}.editor .file-preview-title h1{margin:0}.file-preview-title .file-description{top:50%;transform:translateY(-19px)}
+
+.file-description[open] summary{width:100%;justify-content:flex-start}.file-description summary .file-description-label::before{content:none}
