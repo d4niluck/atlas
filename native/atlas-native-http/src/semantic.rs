@@ -31,6 +31,8 @@ impl SemanticService {
  pub fn unload_if_idle(&self,age:std::time::Duration)->bool {if let Ok(mut slot)=self.model.try_lock(){if slot.last_used.elapsed()>=age {slot.encoder.take();return true}}false}
  pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.identity.read().map_err(|_|"model unavailable")?.clone())}
  pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{acquire(&self.model)?.encode(text,query)}
+ pub fn worker_images_enabled(&self)->bool{self.model.lock().map(|m|m.images).unwrap_or(false)}
+ pub fn worker_encode_image(&self,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>{acquire(&self.model)?.encode_image(bytes,mime)}
 
  pub fn start(exe:&str,model_path:&str)->Result<Self,String>{Self::start_inner(exe,model_path,None,"cpu")}
  #[cfg(feature="test-hook")]
