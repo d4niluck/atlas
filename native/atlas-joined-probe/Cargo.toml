@@ -7,3 +7,6 @@ atlas-llama-probe = {path = "../atlas-llama-rust"}
 atlas-faiss-probe = {path = "../atlas-faiss-rust"}
 serde_json = "1"
 sha2 = "0.10"
+
+[features]
+test-hook=[]

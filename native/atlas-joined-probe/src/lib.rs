@@ -1,4 +1,5 @@
 mod chunk;
+pub fn worker_chunks(text:&str)->Vec<serde_json::Value>{chunk::chunks(text,1000)}
 use atlas_faiss_probe::Index;
 use atlas_llama_probe::Encoder;
 use serde_json::{json,Value};
@@ -15,6 +16,21 @@ fn reusable(dir:&Path,model:&Encoder)->std::collections::HashMap<String,[f32;512
 }
 fn encode_cached(model:&Encoder,text:&str,cache:&mut std::collections::HashMap<String,[f32;512]>,count:&mut usize,should_continue:&impl Fn()->bool)->Result<([f32;512],String),String>{let key=input_hash(text);if let Some(v)=cache.get(&key){return Ok((*v,key))}if !should_continue(){return Err("indexing cancelled".into())}let v:[f32;512]=model.encode(text,false)?.try_into().map_err(|_|"invalid dimensions")?;*count+=1;cache.insert(key.clone(),v);Ok((v,key))}
 pub struct Source<'a> { pub id: &'a str, pub title: &'a str, pub body: &'a str, pub description: &'a str }
+fn memory_limits()->(usize,usize){
+ #[cfg(feature="test-hook")]
+ {let vectors=std::env::var("ATLAS_TEST_PROTECTED_MAX_VECTORS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(16000).min(16000);let metadata=std::env::var("ATLAS_TEST_PROTECTED_MAX_METADATA").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(32*1024*1024).min(32*1024*1024);(vectors,metadata)}
+ #[cfg(not(feature="test-hook"))]
+ {(16000,32*1024*1024)}
+}
+/// Keep FAISS and result metadata bounded while processing one source at a time.
+pub struct MemoryBuilder {index:Index,records:Vec<Value>,cache:std::collections::HashMap<String,[f32;512]>,encoded_count:usize,metadata_bytes:usize}
+impl MemoryBuilder {
+ pub fn new(model:&Encoder,previous:Option<(&Index,&Value)>)->Result<Self,String>{let mut cache=std::collections::HashMap::new();if let Some((old,meta))=previous {if meta["key"]==model.identity(){if let Some(rows)=meta["records"].as_array(){if old.count()==rows.len() as i64&&rows.len()<=16000 {for (i,row) in rows.iter().enumerate(){if let Some(hash)=row["input_hash"].as_str(){cache.insert(hash.to_owned(),old.reconstruct(i as i64).map_err(str::to_string)?);}}}}}}Ok(Self{index:Index::new().map_err(str::to_string)?,records:Vec::new(),cache,encoded_count:0,metadata_bytes:0})}
+ fn add(&mut self,model:&Encoder,text:&str,row:Value,should_continue:&impl Fn()->bool)->Result<(),String>{let(vector_limit,metadata_limit)=memory_limits();if self.records.len()>=vector_limit{return Err("Смысловой поиск ограничен 16 000 фрагментов".into())}let n=serde_json::to_vec(&row).map_err(|_|"invalid record")?.len();if self.metadata_bytes.saturating_add(n).saturating_add(80)>metadata_limit{return Err("Метаданные смыслового поиска превышают 32 МиБ".into())}let(vector,key)=encode_cached(model,text,&mut self.cache,&mut self.encoded_count,should_continue)?;let mut row=row;row["input_hash"]=json!(key);self.index.add(&[vector]).map_err(str::to_string)?;self.metadata_bytes+=n+80;self.records.push(row);Ok(())}
+ pub fn push(&mut self,model:&Encoder,doc:&Source<'_>,should_continue:&impl Fn()->bool)->Result<(),String>{for(field,text)in [("body",doc.body),("description",doc.description)]{if text.trim().is_empty(){continue}for c in split(text)?{let fragment=c["text"].as_str().ok_or("missing text")?;self.add(model,&format!("{}\n{fragment}",doc.title),json!({"id":doc.id,"title":doc.title,"field":field,"text":fragment,"start":c["start"],"end":c["end"],"start_utf16":c["start_utf16"],"end_utf16":c["end_utf16"]}),should_continue)?;}}if doc.body.trim().is_empty()&&!doc.title.trim().is_empty(){self.add(model,doc.title,json!({"id":doc.id,"title":doc.title,"field":"title","text":doc.title,"start":null,"end":null}),should_continue)?;}Ok(())}
+ pub fn finish(self,model:&Encoder)->Result<(Vec<u8>,Value),String>{let bytes=self.index.to_memory().map_err(str::to_string)?;let hash=format!("{:x}",Sha256::digest(&bytes));Ok((bytes,json!({"key":model.identity(),"binary_diagnostic":model.diagnostic(),"index_sha256":hash,"encoded_count":self.encoded_count,"records":self.records})))}
+}
+pub fn search_memory(model:&Encoder,index:&Index,data:&Value,q:&str,filter:Option<&[String]>,k:usize)->Result<Vec<Value>,String>{if data["key"]!=model.identity(){return Err("model key mismatch".into())}let records=data["records"].as_array().ok_or("invalid records")?;if index.count()!=records.len() as i64{return Err("index and records count mismatch".into())}let ids:Vec<i64>=records.iter().enumerate().filter(|(_,x)|filter.is_none_or(|allowed|allowed.iter().any(|id|x["id"].as_str()==Some(id)))).map(|(i,_)|i as i64).collect();let vector:[f32;512]=model.encode(q,true)?.try_into().map_err(|_|"invalid dimensions")?;index.search(&vector,&ids,k).map_err(str::to_string)?.into_iter().map(|(id,score)|{let mut row=records.get(id as usize).ok_or("index mismatch")?.clone();row["score"]=json!(score);Ok(row)}).collect()}
 pub fn build(model:&Encoder,docs:&[(&str,&str,&str)],dir:&Path)->Result<(),String>{
  let converted:Vec<Source> = docs.iter().map(|&(id,title,body)|Source{id,title,body,description:""}).collect();
  build_sources(model,&converted,dir)

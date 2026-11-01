@@ -1,0 +1,22 @@
+//! Shared model adapter for anchored workspace workers. No model lives in a worker.
+use serde_json::{json,Value};
+use crate::{workspace_worker::Workers,semantic::SemanticService};
+type R<T>=Result<T,Box<dyn std::error::Error>>;
+fn call(workers:&Workers,id:&str,session:&str,value:Value)->R<Value>{let result=workers.request_session(id,session,&value)?;if let Some(e)=result["error"].as_str(){return Err(e.to_owned().into())}result.get("ok").cloned().ok_or_else(||"invalid worker response".into())}
+pub fn rebuild(workers:&Workers,id:&str,service:&SemanticService)->R<()> {let session=workers.session(id)?;rebuild_session(workers,id,&session,service)}
+pub fn rebuild_session(workers:&Workers,id:&str,session:&str,service:&SemanticService)->R<()> {
+ let model=service.worker_model_identity()?;let mut after:Option<String>=None;let mut revision:Option<String>=None;
+ loop {let page=call(workers,id,session,json!({"action":"index-snapshot","after":after}))?;let current=page["revision"].as_str().ok_or("missing revision")?;
+  if let Some(expected)=&revision {if expected!=current{return Err("workspace changed during indexing".into())}}else{revision=Some(current.to_owned());call(workers,id,session,json!({"action":"index-begin","revision":current,"model":model}))?;}
+  for doc in page["documents"].as_array().ok_or("missing documents")? {let docid=doc["id"].as_str().ok_or("missing id")?;let title=doc["title"].as_str().ok_or("missing title")?;let mut offset=0u64;let mut body_empty=false;
+   loop {let chunks=call(workers,id,session,json!({"action":"index-chunks","revision":current,"id":docid,"offset":offset}))?;if chunks["revision"].as_str()!=Some(current){return Err("workspace changed during indexing".into())}if offset==0{body_empty=chunks["body_empty"].as_bool().ok_or("missing body status")?;}for chunk in chunks["chunks"].as_array().ok_or("missing chunks")? {let content=chunk["text"].as_str().ok_or("missing chunk")?;let vector=service.worker_encode(&format!("{title}\n{content}"),false)?;let record=json!({"id":docid,"title":title,"field":chunk["field"],"text":content,"start":chunk["start"],"end":chunk["end"],"start_utf16":chunk["start_utf16"],"end_utf16":chunk["end_utf16"],"vector":vector});call(workers,id,session,json!({"action":"index-add","records":[record]}))?;}match chunks["next"].as_u64(){Some(next)=>offset=next,None=>break}}
+   if body_empty&&!title.trim().is_empty(){let vector=service.worker_encode(title,false)?;call(workers,id,session,json!({"action":"index-add","records":[{"id":docid,"title":title,"field":"title","text":title,"start":null,"end":null,"vector":vector}]}))?;}
+  }
+  after=page["next"].as_str().map(str::to_owned);if after.is_none(){break}
+ }
+ call(workers,id,session,json!({"action":"index-commit"}))?;Ok(())
+}
+pub fn search(workers:&Workers,id:&str,service:&SemanticService,query:&str,ids:Option<&[String]>)->R<Value>{let session=workers.session(id)?;search_session(workers,id,&session,service,query,ids)}
+pub fn search_session(workers:&Workers,id:&str,session:&str,service:&SemanticService,query:&str,ids:Option<&[String]>)->R<Value>{let model=service.worker_model_identity()?;let vector=service.worker_encode(query,true)?;let response=call(workers,id,session,json!({"action":"index-search","model":model,"vector":vector,"ids":ids}))?;let mut results=Vec::new();for item in response["results"].as_array().ok_or("invalid worker results")?{let chunks=if item["field"]=="title"{vec![]}else{vec![json!({"text":item["text"],"field":item["field"],"start":item["start"],"end":item["end"],"start_utf16":item["start_utf16"],"end_utf16":item["end_utf16"],"score":item["score"]})]};results.push(json!({"id":item["id"],"title":item["title"],"score":item["score"],"chunks":chunks}));}Ok(json!({"revision":response["revision"],"results":results}))}
+#[cfg(feature="test-hook")]
+pub fn probe()->R<()> {use std::{fs,io::Read};let mut input=String::new();std::io::stdin().read_to_string(&mut input)?;let v:Value=serde_json::from_str(&input)?;let dir=fs::File::open(v["workspace"].as_str().ok_or("workspace")?)?;let service=SemanticService::start(v["exe"].as_str().ok_or("exe")?,v["model"].as_str().ok_or("model")?)?;let workers=Workers::default();let id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";workers.attach(id,&dir,std::path::Path::new(v["workspace"].as_str().ok_or("workspace")?))?;rebuild(&workers,id,&service)?;let result=search(&workers,id,&service,v["query"].as_str().ok_or("query")?,None)?;println!("{}",result);Ok(())}

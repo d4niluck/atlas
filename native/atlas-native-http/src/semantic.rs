@@ -14,15 +14,18 @@ fn cleanup_generations(dir:&Path,current:&str)->std::io::Result<()> {
 #[derive(Default)]
 struct State { revision:u64, indexed:u64, error:Option<String>, processing:Vec<String> }
 #[derive(Clone)]
-pub struct SemanticService { sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<Encoder>>, counter:Arc<AtomicU64> }
+pub struct SemanticService { identity:String, sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<Encoder>>, counter:Arc<AtomicU64> }
 
 impl SemanticService {
+ pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.model.lock().map_err(|_|"model unavailable")?.identity().to_owned())}
+ pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{self.model.lock().map_err(|_|"model unavailable")?.encode(text,query)}
+
  pub fn start(exe:&str,model_path:&str)->Result<Self,String>{Self::start_inner(exe,model_path,None,"cpu")}
  #[cfg(feature="test-hook")]
  pub fn start_with_hook(exe:&str,model_path:&str,ready:mpsc::Sender<()>,resume:mpsc::Receiver<()>)->Result<Self,String>{Self::start_inner(exe,model_path,Some((ready,resume)),"cpu")}
  pub fn start_device(exe:&str,model_path:&str,device:&str)->Result<Self,String>{Self::start_inner(exe,model_path,None,device)}
  fn start_inner(exe:&str,model_path:&str,mut hook:Option<(mpsc::Sender<()>,mpsc::Receiver<()>)>,device:&str)->Result<Self,String>{
-  let model=Arc::new(Mutex::new(Encoder::start_device(exe,model_path,device)?));
+  let encoder=Encoder::start_device(exe,model_path,device)?;let identity=encoder.identity().to_owned();let model=Arc::new(Mutex::new(encoder));
   let states:Arc<Mutex<HashMap<PathBuf,State>>>=Arc::new(Mutex::new(HashMap::new()));
   let (sender,receiver)=mpsc::channel::<PathBuf>();
   let worker_states=Arc::clone(&states);let worker_model=Arc::clone(&model);
@@ -43,9 +46,12 @@ impl SemanticService {
    let workspace_guard=atlas_native_storage_contract::workspace_lock(&dir);
    let mut states=worker_states.lock().unwrap();if let Some(s)=states.get_mut(&dir){match result {Ok(generation) if s.revision==rev && workspace_guard.is_ok()=>{match publish_sources(&dir.join(".atlas-semantic-native"),&generation){Ok(())=>{if let Err(e)=cleanup_generations(&dir.join(".atlas-semantic-native"),&generation){eprintln!("Atlas: cannot remove old search index: {e}");}s.indexed=rev;s.error=None;s.processing.clear()},Err(e)=>s.error=Some(e)}},Ok(generation)=>{if s.revision==rev && workspace_guard.is_err(){s.error=Some("Workspace unavailable".to_owned());}let _=std::fs::remove_dir_all(dir.join(".atlas-semantic-native").join(generation));},Err(e) if s.revision==rev=>s.error=Some(e),Err(_)=>{}}} else if let Ok(generation)=result {let _=std::fs::remove_dir_all(dir.join(".atlas-semantic-native").join(generation));}
   }});
-  Ok(Self {sender,states,model,counter:Arc::new(AtomicU64::new(0))})
+  Ok(Self {identity,sender,states,model,counter:Arc::new(AtomicU64::new(0))})
  }
 
+ pub fn protected_identity(&self)->&str{&self.identity}
+ pub fn protected_build(&self,mut next:impl FnMut()->Result<Option<(String,String,String,String)>,String>,previous:Option<(&atlas_faiss_probe::Index,&Value)>,should_continue:impl Fn()->bool)->Result<(Vec<u8>,Value),String>{let model=self.model.lock().map_err(|_|"model unavailable")?;let mut builder=atlas_joined_probe::MemoryBuilder::new(&model,previous)?;while let Some((id,title,body,description))=next()?{if !should_continue(){return Err("indexing cancelled".into())}builder.push(&model,&Source{id:&id,title:&title,body:&body,description:&description},&should_continue)?;}if !should_continue(){return Err("indexing cancelled".into())}builder.finish(&model)}
+ pub fn protected_search(&self,index:&atlas_faiss_probe::Index,meta:&Value,q:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{let model=loop{match self.model.try_lock(){Ok(v)=>break v,Err(std::sync::TryLockError::WouldBlock)=>{atlas_llama_probe::remaining_search_time()?;std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("model unavailable".into())}};let rows=atlas_joined_probe::search_memory(&model,index,meta,q,ids,128)?;Ok(rows.into_iter().map(|v|{let score=v["score"].clone();let chunks=if v["field"]=="title"{vec![]}else{vec![json!({"text":v["text"],"start":v["start"],"end":v["end"],"field":v["field"],"score":score})]};json!({"id":v["id"],"title":v["title"],"chunks":chunks,"score":score})}).collect())}
  pub fn ensure(&self,dir:&Path)->Result<(),String>{
   let pending={let mut states=self.states.lock().unwrap();if states.contains_key(dir){false}else{states.insert(dir.to_owned(),State{revision:self.counter.fetch_add(1,Ordering::Relaxed)+1,..State::default()});true}};
   if pending {self.sender.send(dir.to_owned()).map_err(|e|e.to_string())?}Ok(())

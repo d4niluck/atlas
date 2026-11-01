@@ -13,11 +13,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  println!("{port}"); io::stdout().flush()?;
  let agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).timeout_read(std::time::Duration::from_secs(30)).timeout_write(std::time::Duration::from_secs(30)).build();
  let rag_agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).timeout_read(std::time::Duration::from_secs(180)).timeout_write(std::time::Duration::from_secs(30)).build();
+ // Transfers can legitimately exceed the search timeout; wait for the backend result.
+ let transfer_agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).build();
  let active=Arc::new(AtomicUsize::new(0));
  for mut req in listener.incoming_requests() {
   if active.fetch_add(1,Ordering::SeqCst)>=16 { active.fetch_sub(1,Ordering::SeqCst); let _=req.respond(Response::empty(503)); continue; }
   let active=active.clone();
-  let root=root.clone(); let bootstrap=bootstrap.clone(); let token=token.clone(); let cookie=cookie.clone(); let consumed=consumed.clone(); let agent=agent.clone(); let rag_agent=rag_agent.clone();
+  let root=root.clone(); let bootstrap=bootstrap.clone(); let token=token.clone(); let cookie=cookie.clone(); let consumed=consumed.clone(); let agent=agent.clone(); let rag_agent=rag_agent.clone(); let transfer_agent=transfer_agent.clone();
   std::thread::spawn(move || {
    struct Guard(Arc<AtomicUsize>); impl Drop for Guard { fn drop(&mut self){self.0.fetch_sub(1,Ordering::SeqCst);} } let _guard=Guard(active);
   let host=format!("127.0.0.1:{port}"); let origin=format!("http://{host}");
@@ -31,8 +33,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
    let response=Response::empty(303).with_header(Header::from_bytes("Location","/").unwrap()).with_header(Header::from_bytes("Set-Cookie",format!("atlas_session={cookie}; HttpOnly; SameSite=Strict; Path=/")).unwrap()).with_header(Header::from_bytes("Cache-Control","no-store").unwrap());let _=req.respond(response);return;
   }
   if cookies.len()!=1 || !cookies[0].split(';').any(|v| v.trim()==format!("atlas_session={cookie}")) {let _=req.respond(Response::empty(403));return;}
+  let route=path.split('?').next().unwrap_or("");
+  // API paths use fixed ASCII names and hex IDs; encoded or ambiguous paths are never needed.
+  if route.contains('%')||route.contains('\\')||route.contains("//")||route.split('/').any(|part|part=="."||part=="..")||route.trim_end_matches('/')=="/api/workspaces/authorize" {let _=req.respond(Response::empty(403));return;}
+
   if path.starts_with("/api/") || path=="/api" {
-   let target=format!("http://127.0.0.1:{backend}{path}"); let selected=if path.split('?').next().unwrap_or("").ends_with("/rag/search") {&rag_agent} else {&agent}; let mut call=selected.request(req.method().as_str(),&target).set("X-Atlas-Token",&token);
+   let target=format!("http://127.0.0.1:{backend}{path}"); let route=path.split('?').next().unwrap_or("");let selected=if matches!(route.trim_end_matches('/'),"/api/workspaces/export"|"/api/workspaces/import"){&transfer_agent}else if route.ends_with("/rag/search") {&rag_agent} else {&agent}; let mut call=selected.request(req.method().as_str(),&target).set("X-Atlas-Token",&token);
    for h in req.headers() { if h.field.equiv("Content-Type") || h.field.equiv("Content-Length") {call=call.set(h.field.as_str().as_str(),h.value.as_str());} }
    let response=match call.send(req.as_reader()) {Ok(r)=>r,Err(ureq::Error::Status(_,r))=>r,Err(_)=>{let _=req.respond(Response::empty(502));return;}};
    let status=response.status(); let mut hs=Vec::new();

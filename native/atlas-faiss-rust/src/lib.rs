@@ -1,8 +1,10 @@
 use std::{ffi::{c_void,CString},path::Path};
-unsafe extern "C" {fn af_create()->*mut c_void;fn af_free(p:*mut c_void);fn af_count(p:*mut c_void)->i64;fn af_reconstruct(p:*mut c_void,id:i64,out:*mut f32)->i32;fn af_add(p:*mut c_void,v:*const f32,n:i64)->i32;fn af_search(p:*mut c_void,q:*const f32,ids:*const i64,n:i64,k:i64,scores:*mut f32,out:*mut i64)->i32;fn af_save(p:*mut c_void,path:*const i8)->i32;fn af_load(path:*const i8)->*mut c_void;}
+unsafe extern "C" {fn af_memory_write(p:*mut c_void)->*mut c_void;fn af_memory_size(w:*mut c_void)->i64;fn af_memory_copy(w:*mut c_void,out:*mut u8);fn af_memory_free(w:*mut c_void);fn af_memory_read(data:*const u8,n:i64)->*mut c_void;fn af_create()->*mut c_void;fn af_free(p:*mut c_void);fn af_count(p:*mut c_void)->i64;fn af_reconstruct(p:*mut c_void,id:i64,out:*mut f32)->i32;fn af_add(p:*mut c_void,v:*const f32,n:i64)->i32;fn af_search(p:*mut c_void,q:*const f32,ids:*const i64,n:i64,k:i64,scores:*mut f32,out:*mut i64)->i32;fn af_save(p:*mut c_void,path:*const i8)->i32;fn af_load(path:*const i8)->*mut c_void;}
 pub struct Index(*mut c_void);
 impl Drop for Index {fn drop(&mut self){unsafe{af_free(self.0)}}}
 impl Index {
+ pub fn to_memory(&self)->Result<Vec<u8>,&'static str>{let w=unsafe{af_memory_write(self.0)};if w.is_null(){return Err("serialize failed")}let n=unsafe{af_memory_size(w)};if !(0..=134217728).contains(&n){unsafe{af_memory_free(w)};return Err("index too large")}let mut out=vec![0u8;n as usize];unsafe{af_memory_copy(w,out.as_mut_ptr());af_memory_free(w)};Ok(out)}
+ pub fn from_memory(data:&[u8])->Result<Self,&'static str>{if data.len()>134217728{return Err("index too large")}let p=unsafe{af_memory_read(data.as_ptr(),data.len() as i64)};if p.is_null(){Err("deserialize failed")}else{Ok(Self(p))}}
  pub fn count(&self)->i64{unsafe{af_count(self.0)}}
  pub fn new()->Result<Self,&'static str>{let p=unsafe{af_create()};if p.is_null(){Err("create failed")}else{Ok(Self(p))}}
  pub fn reconstruct(&self,id:i64)->Result<[f32;512],&'static str>{let mut out=[0.;512];if unsafe{af_reconstruct(self.0,id,out.as_mut_ptr())}!=0{return Err("reconstruct failed")}Ok(out)}

@@ -11,6 +11,7 @@
   },
   "permissions": [
     "core:default",
+    "allow-select-workspace-directory",
     "allow-open-external-url",
     "allow-download-model",
     "allow-model-download-status",

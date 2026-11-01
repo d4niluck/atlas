@@ -61,9 +61,12 @@ dependencies = [
 name = "atlas-native-http"
 version = "0.1.0"
 dependencies = [
+ "atlas-faiss-probe",
  "atlas-joined-probe",
  "atlas-llama-probe",
  "atlas-native-storage-contract",
+ "atlas-sqlcipher-proof",
+ "libc",
  "percent-encoding",
  "rusqlite",
  "serde_json",
@@ -83,6 +86,22 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "atlas-sqlcipher-proof"
+version = "0.1.0"
+dependencies = [
+ "atlas-faiss-probe",
+ "docx-lite",
+ "libc",
+ "pdf-extract",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tiny_http",
+ "url",
  "uuid",
 ]
 
@@ -575,7 +594,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
+ "openssl-sys",
  "pkg-config",
+ "sqlcipher-src",
  "vcpkg",
 ]
 
@@ -673,6 +694,28 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "openssl-src"
+version = "300.6.1+3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "openssl-src",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "pdf-extract"
@@ -904,6 +947,12 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+
+[[package]]
+name = "sqlcipher-src"
+version = "419.0.6+sqlcipher-4.19.0-sqlite-3.53.4-libtomcrypt-1.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab732d48ebf2a1449e94d071b26544f99845834c75c3c210e927ace097b49aa4"
 
 [[package]]
 name = "sqlite-wasm-rs"

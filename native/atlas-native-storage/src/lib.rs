@@ -1,3 +1,5 @@
+mod snapshot;
+pub use snapshot::{snapshot_workspace,snapshot_workspace_named,publish_snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{env, fs, io::Write, path::{Path, Component}, collections::{HashMap,HashSet}};
@@ -105,7 +107,10 @@ fn index_file(tx:&rusqlite::Transaction<'_>,id:&str,title:&str,text:&str,descrip
  tx.execute("DELETE FROM search_chunks WHERE object_id=?",[id])?;tx.execute("INSERT INTO search_chunks VALUES(?,-1,'title',?)",params![id,title])?;
  for(field,value) in [("body",text),("description",description)]{for(start,part) in chunks(value){tx.execute("INSERT INTO search_chunks VALUES(?,?,?,?)",params![id,start as i64,field,part])?;}}Ok(())
 }
-fn file_db(root:&Path)->R<Connection>{let db=root.join("atlas.sqlite3");if !db.is_file(){return Err("missing db".into())}Ok(Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?)}
+fn file_db(root:&Path)->R<Connection>{if root.is_symlink(){return Err("invalid workspace".into())}let absolute=if root.is_absolute(){Some(root.canonicalize()?)}else{None};let root=absolute.as_deref().unwrap_or(root);let db=root.join("atlas.sqlite3");if !db.is_file(){return Err("missing db".into())}Ok(Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?)}
+pub fn validate_database_files(root:&Path)->R<()> {for name in ["atlas.sqlite3","atlas.sqlite3-wal","atlas.sqlite3-shm","atlas.sqlite3-journal"]{match fs::symlink_metadata(root.join(name)){Ok(meta) if meta.file_type().is_symlink()||!meta.is_file()=>return Err("unsafe database file".into()),Ok(_)=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}}Ok(())}
+/// Exclusive session ownership shared with protection conversion. Never waits on another process.
+pub fn workspace_session_lock(root:&Path)->R<fs::File>{use std::os::unix::fs::OpenOptionsExt;if root.is_symlink()||!root.is_dir(){return Err("invalid workspace".into())}let file=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(root.join(".atlas-session.lock"))?;if !file.metadata()?.is_file(){return Err("invalid session lock".into())}file.try_lock().map_err(|_|"workspace session is already active")?;Ok(file)}
 /// Callers serialize every operation on this workspace, including journal recovery.
 /// This is advisory: older Atlas backends do not honor it.
 pub fn workspace_lock(root:&Path)->R<fs::File>{
@@ -120,7 +125,7 @@ pub fn add_file(root:&Path, name:&str,bytes:&[u8])->R<String>{add_file_stream(ro
 pub fn add_file_stream(root:&Path, name:&str,reader:&mut impl std::io::Read)->R<String>{
  file_name(name)?;let files=root.join("files");if files.is_symlink() || !files.canonicalize()?.starts_with(root.canonicalize()?){return Err("unsafe files directory".into())}
  let id=uuid::Uuid::new_v4().to_string();let dir=files.join(&id);fs::create_dir(&dir)?;let target=dir.join(name);
- let result=(||->R<()>{let mut f=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut f)?;drop(f);let (text,status)=text_info(name,&target);let mut conn=file_db(root)?;let tx=conn.transaction()?;let relative=format!("files/{id}/{name}");tx.execute("INSERT INTO objects(id,kind,title,path,text_status) VALUES(?,'file',?,?,?)",params![id,name,relative,status])?;index_file(&tx,&id,name,&text,"")?;tx.commit()?;Ok(())})();
+ let result=(||->R<()>{let mut f=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut f)?;f.sync_all()?;drop(f);let (text,status)=text_info(name,&target);let mut conn=file_db(root)?;let tx=conn.transaction()?;let relative=format!("files/{id}/{name}");tx.execute("INSERT INTO objects(id,kind,title,path,text_status) VALUES(?,'file',?,?,?)",params![id,name,relative,status])?;index_file(&tx,&id,name,&text,"")?;tx.commit()?;Ok(())})();
  if let Err(e)=result{let _=fs::remove_file(&target);let _=fs::remove_dir(&dir);return Err(e)}Ok(id)
 }
 pub fn set_file_description(root:&Path,id:&str,description:&str)->R<()>{let mut conn=file_db(root)?;let tx=conn.transaction()?;let (title,body):(String,String)=tx.query_row("SELECT objects.title,COALESCE(search_index.body,'') FROM objects JOIN search_index ON search_index.object_id=objects.id WHERE objects.id=? AND objects.kind='file' AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;tx.execute("UPDATE objects SET description=? WHERE id=?",params![description,id])?;index_file(&tx,id,&title,&body,description)?;tx.commit()?;Ok(())}
@@ -225,8 +230,8 @@ let mut pairs:HashMap<String,Vec<String>>=HashMap::new();for edge in edges{let f
  Ok(())
 }
 pub fn execute(a:&[String])->R<Value>{
- if a.len()<3{return Err("missing args".into())}let root=Path::new(&a[2]);let db=root.join("atlas.sqlite3");if a[1]=="create-workspace" { create_workspace(root)?; return Ok(json!({"ok":true})); } if !db.is_file(){return Err("missing db".into())}
- let mut conn=Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;migrate(&mut conn)?;recover(&mut conn,root)?;
+ if a.len()<3{return Err("missing args".into())}let root=Path::new(&a[2]);if a[1]=="create-workspace" { create_workspace(root)?; return Ok(json!({"ok":true})); } if root.is_symlink(){return Err("invalid workspace".into())}let absolute=if root.is_absolute(){Some(root.canonicalize()?)}else{None};let root=absolute.as_deref().unwrap_or(root);let db=root.join("atlas.sqlite3");if !db.is_file(){return Err("missing db".into())}
+ let mut conn=Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;migrate(&mut conn)?;recover(&mut conn,root)?;
  match a[1].as_str(){
  "delete-objects"=>{let ids:Vec<String>=serde_json::from_str(a.get(3).ok_or("missing ids")?)?;return delete_objects(root,&ids)},
  "restore-objects"=>{let ids:Vec<String>=serde_json::from_str(a.get(3).ok_or("missing ids")?)?;return restore_objects(root,&ids)},
