@@ -73,7 +73,7 @@
 /* Keep both image and description reachable even in a short preview window. */
 .editor.file-editor:has(.image-preview-scroll){overflow:auto}
 .editor.file-editor:has(.image-preview-scroll) > .editor-top,
-.editor.file-editor:has(.image-preview-scroll) > h1,
+.editor.file-editor:has(.image-preview-scroll) > .file-preview-title,
 .editor.file-editor:has(.image-preview-scroll) > .file-description{flex-shrink:0}
 .editor.file-editor:has(.image-preview-scroll) > .file-description{max-height:none;overflow:visible}
 .editor.file-editor .image-preview-scroll{flex:1 0 160px}

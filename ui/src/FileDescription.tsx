@@ -33,6 +33,7 @@ export const FileDescription = forwardRef<FileDescriptionHandle,Props>(function 
   const update=(next:string)=>{value.current=next;setText(next);version.current++;onDirty(true);if(timer.current)clearTimeout(timer.current);timer.current=setTimeout(()=>{void flush().catch(e=>onError(String(e)))},1200)};
   return <details className="file-description" open={open} onToggle={e=>setOpen(e.currentTarget.open)}>
     <summary aria-label="Описание для поиска" title="Описание для поиска"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M4 4h16v12H8l-4 4zM8 8h8M8 12h6"/></svg></summary>
+    <p className="file-description-label">Описание для поиска</p>
     {suggestDescription&&!text.trim()&&<p>Текст файла недоступен для поиска. Добавьте описание, чтобы его было легче найти.</p>}
     {highlight?.start!=null&&highlight.end!=null&&loaded?<SearchExcerpt text={text} start={highlight.start} end={highlight.end}/>:<textarea aria-label="Описание для поиска" value={text} disabled={!loaded} onChange={e=>update(e.target.value)} placeholder="Добавьте описание файла"/>}
   </details>;

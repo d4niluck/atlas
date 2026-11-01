@@ -1,3 +1,4 @@
+mod rag_model;
 mod direct_export;
 mod external_copy;
 mod external_registry;
@@ -79,7 +80,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
    let wid=parts[2];let id=parts[4];let valid_id=|s:&str|!s.is_empty()&&s.chars().all(|c|c.is_ascii_hexdigit()||c=='-');
    if (wid=="default" && root.join(".default-deleted").exists()) || (wid!="default" && (wid.len()!=32||!valid_id(wid)))||!valid_id(id){return answer(req,404,json!({"error":"Not found"}))}
    let dir=workspace_paths::resolve(root,default,wid);let _serial=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};if portable_worker::busy(wid){return answer(req,409,json!({"error":"Идёт копирование пространства"}))}let _guard=match atlas_native_storage_contract::workspace_lock(&dir){Ok(g)=>g,Err(_)=>return answer(req,404,json!({"error":"Not found"}))};let found=(|| -> Result<(std::fs::File,String),Box<dyn std::error::Error>> {if !valid_workspace(&dir){return Err("unsafe".into())}let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;let (path,title):(String,String)=db.query_row("SELECT path,title FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;let target=dir.join(path).canonicalize()?;if !target.starts_with(dir.canonicalize()?){return Err("unsafe".into())}Ok((std::fs::File::open(target)?,title))} )();
-   drop(_guard);drop(_serial);match found {Ok((file,title))=>{let (content_type,safe)=mime(&title);let encoded=percent_encoding::utf8_percent_encode(&title,percent_encoding::NON_ALPHANUMERIC).to_string();let disposition=format!("{}; filename*=UTF-8''{}",if safe {"inline"}else{"attachment"},encoded);let mut response=Response::from_file(file);response.add_header(Header::from_bytes("Content-Type",content_type).unwrap());response.add_header(Header::from_bytes("Content-Disposition",disposition).unwrap());response.add_header(Header::from_bytes("X-Content-Type-Options","nosniff").unwrap());response.add_header(Header::from_bytes("Content-Security-Policy","sandbox; default-src 'none'").unwrap());let _=req.respond(response);return},Err(_)=>return answer(req,404,json!({"error":"Not found"}))}
+   drop(_guard);drop(_serial);match found {Ok((file,title))=>{let (content_type,safe)=mime(&title);let encoded=percent_encoding::utf8_percent_encode(&title,percent_encoding::NON_ALPHANUMERIC).to_string();let disposition=format!("{}; filename*=UTF-8''{}",if safe {"inline"}else{"attachment"},encoded);let range=req.headers().iter().find(|h|h.field.equiv("Range")).map(|h|h.value.as_str().to_owned());let size=match file.metadata(){Ok(m)=>m.len(),Err(_)=>return answer(req,500,json!({"error":"Файл недоступен"}))};let (start,end,status)=match range {None=>(0,size,200),Some(value)=>match protected::parse_range(&value,size){Some((a,b))=>(a,b,206),None=>return answer(req,416,json!({"error":"Неверный диапазон"}))}};let mut file=file;if std::io::Seek::seek(&mut file,std::io::SeekFrom::Start(start)).is_err(){return answer(req,500,json!({"error":"Файл недоступен"}))}let mut headers=vec![Header::from_bytes("Accept-Ranges","bytes").unwrap()];if status==206{headers.push(Header::from_bytes("Content-Range",format!("bytes {}-{}/{}",start,end-1,size)).unwrap())}let mut response=Response::new(StatusCode(status),headers,std::io::Read::take(file,end-start),Some((end-start) as usize),None);response.add_header(Header::from_bytes("Content-Type",content_type).unwrap());response.add_header(Header::from_bytes("Content-Disposition",disposition).unwrap());response.add_header(Header::from_bytes("X-Content-Type-Options","nosniff").unwrap());response.add_header(Header::from_bytes("Content-Security-Policy","sandbox; default-src 'none'").unwrap());let _=req.respond(response);return},Err(_)=>return answer(req,404,json!({"error":"Not found"}))}
  }
  if parts.len()>=3 && ((parts[0..2]==["api","w"])||(parts[0..2]==["api","workspaces"]&&parts.len()==4&&parts[3]=="close")||(parts[0..2]==["api","workspaces"]&&parts.len()==3&&matches!(method.as_str(),"PATCH"|"DELETE"))) && portable_worker::busy(parts[2]) {return answer(req,409,json!({"error":"Идёт копирование пространства"}))}
  let upload=(method=="POST" && parts.len()==4 && parts[3]=="files") || (method=="PUT" && parts.len()==5 && parts[3]=="files");
@@ -174,7 +175,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
     let mut started=atlas_llama_probe::Generator::start_device(&choice.exe,path.to_string_lossy().as_ref(),&requested_device);
     if started.is_err() && requested_device=="metal" && previous_device.is_none() {started=atlas_llama_probe::Generator::start_device(&choice.exe,path.to_string_lossy().as_ref(),"cpu");active_device="cpu".into();warning="GPU Apple недоступен, используется CPU".into();}
     let result=started.and_then(|g|{let tmp=choice.dir.join(".rag-choice.tmp");match std::fs::write(&tmp,&name).and_then(|_|std::fs::rename(&tmp,choice.dir.join("rag-choice"))){Ok(())=>Ok(g),Err(_)=>{drop(g);Err("Не удалось сохранить выбор модели".into())}}});
-    let state=match result {Ok(g)=>{if previous_device.is_none() {device.set_llm(Some(&active_device),&warning);}if let Ok(mut selected)=choice.selected.lock(){*selected=name;}RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g)))},Err(e)=>{let fallback=previous.filter(|_|had_old).map(|n|choice.dir.join(if n=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}));match fallback.and_then(|p|atlas_llama_probe::Generator::start_device(&choice.exe,p.to_string_lossy().as_ref(),&device.llm_requested()).ok()){Some(g)=>{if let Ok(mut warning)=choice.warning.lock(){*warning=Some("Не удалось загрузить выбранную модель; восстановлена предыдущая".into());}RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g)))},None=>{device.set_llm(None,"Не удалось загрузить модель ответа");RagState::Failed(e)}}}};
+    let state=match result {Ok(g)=>{if previous_device.is_none() {device.set_llm(Some(&active_device),&warning);}if let Ok(mut selected)=choice.selected.lock(){*selected=name;}RagState::Ready(std::sync::Arc::new(rag_model::RagModel::new(g,choice.exe.clone(),path.to_string_lossy().into_owned(),active_device.clone())))},Err(e)=>{let fallback=previous.filter(|_|had_old).map(|n|choice.dir.join(if n=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}));match fallback.and_then(|p|atlas_llama_probe::Generator::start_device(&choice.exe,p.to_string_lossy().as_ref(),&device.llm_requested()).ok()){Some(g)=>{if let Ok(mut warning)=choice.warning.lock(){*warning=Some("Не удалось загрузить выбранную модель; восстановлена предыдущая".into());}RagState::Ready(std::sync::Arc::new(rag_model::RagModel::new(g,choice.exe.clone(),choice.dir.join(if choice.selected.lock().map(|s|s.as_str()=="e4b").unwrap_or(false){"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}).to_string_lossy().into_owned(),device.llm_requested())))},None=>{device.set_llm(None,"Не удалось загрузить модель ответа");RagState::Failed(e)}}}};
     if let Ok(mut slot)=rag.lock(){*slot=state}
    });return Ok((202,json!({"ok":true})))
   }
@@ -214,7 +215,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
      };
 
      if let Some(generator)=generator {
-      let generator=loop {match generator.try_lock(){Ok(g)=>break g,Err(std::sync::TryLockError::WouldBlock)=>{if atlas_llama_probe::remaining_search_time().is_err(){return Ok((503,json!({"error":"Превышено время ожидания модели"})))}std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("generator unavailable".into())}};
+      let generator=generator.acquire()?;
       if !agentic {let first=select(&candidates,5,0.70);if !first.is_empty(){let generated=generator.answer(query,&first);if !accept_answer(&mut rag_answer,&mut rag_sources,first,generated){rag_error=Some("Не удалось сформировать ответ. Найденные фрагменты доступны ниже.".into())}}}
       let mut retry=agentic||rag_sources.is_empty();if !retry {if let Some(a)=rag_answer.as_ref(){retry=match generator.answer_quality(query,a,&rag_sources){Ok(v)=>v!="sufficient",Err(_)=>{rag_error=Some("Не удалось проверить полноту ответа".into());false}}}}
       if retry && !agentic {let expanded=select(&candidates,8,0.65);if expanded.len()>rag_sources.len(){let generated=generator.answer(query,&expanded);if accept_answer(&mut rag_answer,&mut rag_sources,expanded,generated){if let Some(a)=rag_answer.as_ref(){retry=match generator.answer_quality(query,a,&rag_sources){Ok(v)=>v!="sufficient",Err(_)=>{rag_error=Some("Не удалось проверить полноту ответа".into());false}}}}else{rag_error=Some("Не удалось расширить ответ; показан предыдущий результат".into());retry=false}}}
@@ -266,16 +267,16 @@ fn merge_agentic(groups:&[Vec<Value>],candidates:Vec<Value>)->Vec<Value>{
 }
 #[cfg(test)] mod agentic_tests;
 #[derive(Clone)]
-enum RagState { Disabled, Loading, Ready(std::sync::Arc<std::sync::Mutex<atlas_llama_probe::Generator>>), Failed(String) }
+enum RagState { Disabled, Loading, Ready(std::sync::Arc<rag_model::RagModel>), Failed(String) }
 #[derive(Clone)]
 enum ModelState { Disabled, Loading, Ready(semantic::SemanticService), Failed(String) }
 fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
- let mut v=json!({"agentic":false,"model":model,"embedding":selected.0,"llm":selected.1});
- if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){if saved["agentic"].is_boolean(){v["agentic"]=saved["agentic"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v
+ let mut v=json!({"agentic":false,"model":model,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":true,"idle_enabled":true,"idle_minutes":15});
+ if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v
 }
 fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{
- if !b["agentic"].is_boolean(){return Err("Неизвестный режим поиска".into())}let model=b["model"].as_str().filter(|s|*s=="e2b"||*s=="e4b").ok_or("Неизвестная модель")?;let embedding=b["embedding"].as_str().ok_or("Неизвестное устройство")?;let llm=b["llm"].as_str().ok_or("Неизвестное устройство")?;
+ for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","idle_enabled"] {if !b[key].is_boolean(){return Err("Неизвестный режим поиска".into())}} if !b["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){return Err("Время ожидания должно быть от 1 до 1440 минут".into())}let model=b["model"].as_str().filter(|s|*s=="e2b"||*s=="e4b").ok_or("Неизвестная модель")?;let embedding=b["embedding"].as_str().ok_or("Неизвестное устройство")?;let llm=b["llm"].as_str().ok_or("Неизвестное устройство")?;
  let old=app_settings(choice,device);if old["model"]!=model && !choice.dir.join(if model=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"}).is_file(){return Err("Выбранная модель ответа не загружена".into())}
  if old["embedding"]!=embedding || old["llm"]!=llm {device.validate(embedding,llm)?;}
  std::fs::create_dir_all(&choice.dir).map_err(|e|e.to_string())?;let tmp=choice.dir.join(format!(".settings-{}",uuid::Uuid::new_v4()));let result=(|| -> Result<(),String>{let f=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e|e.to_string())?;serde_json::to_writer(&f,b).map_err(|e|e.to_string())?;f.sync_all().map_err(|e|e.to_string())?;std::fs::rename(&tmp,choice.dir.join("settings.json")).map_err(|e|e.to_string())?;Ok(())})();if result.is_err(){let _=std::fs::remove_file(tmp);}result
@@ -344,14 +345,15 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  let initial=args.iter().position(|v|v=="--rag-model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).or_else(||args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from)).unwrap_or_default();let model_dir=args.iter().position(|v|v=="--rag-model-dir").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).unwrap_or_else(||initial.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());let exe=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned().unwrap_or_default();let selected=std::fs::read_to_string(model_dir.join("settings.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).and_then(|v|v["model"].as_str().map(str::to_owned)).or_else(||std::fs::read_to_string(model_dir.join("rag-choice")).ok()).filter(|v|v=="e2b"||v=="e4b").unwrap_or_else(||"e2b".to_owned());let startup=model_dir.join(if selected=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"});let choice=std::sync::Arc::new(ModelChoice{exe,dir:model_dir,selected:std::sync::Mutex::new(selected),warning:std::sync::Mutex::new(None)});
  let device=std::sync::Arc::new(device::DeviceSettings::new(choice.dir.clone(),choice.exe.clone()));
  let startup_device=device.selected_pair();
+ let search_config=app_settings(&choice,&device);let use_embedding=search_config["semantic_enabled"]==true||search_config["rag_enabled"]==true;let use_rag=search_config["rag_enabled"]==true;
  let serial=std::sync::Arc::new(std::sync::Mutex::new(()));
- let embedding_path=args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).cloned();
+ let embedding_path=if use_embedding {args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).cloned()}else{None};
  let executable=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned();
- if executable.is_none() || (embedding_path.is_none() && !startup.is_file()) {device.set_embedding(None,"Модель поиска не загружена");device.set_llm(None,"Модель ответа не загружена");device.mark_ready();}
+ if executable.is_none() || (embedding_path.is_none() && !(use_rag && startup.is_file())) {device.set_embedding(None,"Модель поиска не загружена");device.set_llm(None,"Модель ответа не загружена");device.mark_ready();}
  if embedding_path.is_some() && executable.is_none(){return Err("model and llama-server paths are both required".into())}
- if let Some(exe)=executable {if embedding_path.is_some() || startup.is_file(){
+ if let Some(exe)=executable {if embedding_path.is_some() || (use_rag && startup.is_file()){
   if embedding_path.is_some(){*semantic.lock().map_err(|_|"model state unavailable")?=ModelState::Loading;}
-  if startup.is_file(){*rag.lock().map_err(|_|"generator state unavailable")?=RagState::Loading;}
+  if (use_rag && startup.is_file()){*rag.lock().map_err(|_|"generator state unavailable")?=RagState::Loading;}
   let state=semantic.clone();let rag_state=rag.clone();let device=device.clone();let startup_serial=serial.clone();let startup_default=default.clone();let startup_registry=dir.clone();
   std::thread::spawn(move || {
    let (requested_embedding,requested_llm)=startup_device;
@@ -359,17 +361,26 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
    let mut embedding=embedding_path.as_ref().map(|p|semantic::SemanticService::start_device(&exe,p,&embedding_device));
    let mut embedding_message=String::new();
    if embedding_device=="metal" && embedding.as_ref().is_some_and(|r|r.is_err()) {embedding_device="cpu".into();embedding_message="GPU Apple недоступен для поиска, используется CPU".into();embedding=embedding_path.as_ref().map(|p|semantic::SemanticService::start_device(&exe,p,&embedding_device));}
-   let mut generator=if startup.is_file(){Some(atlas_llama_probe::Generator::start_device(&exe,startup.to_string_lossy().as_ref(),&llm_device))}else{None};
+   let mut generator=if (use_rag && startup.is_file()){Some(atlas_llama_probe::Generator::start_device(&exe,startup.to_string_lossy().as_ref(),&llm_device))}else{None};
    let mut llm_message=String::new();
    if llm_device=="metal" && generator.as_ref().is_some_and(|r|r.is_err()) {llm_device="cpu".into();llm_message="GPU Apple недоступен для модели ответа, используется CPU".into();generator=Some(atlas_llama_probe::Generator::start_device(&exe,startup.to_string_lossy().as_ref(),&llm_device));}
    device.set_embedding(if embedding.as_ref().is_some_and(|r|r.is_ok()){Some(&embedding_device)}else{None},if embedding.is_none(){"Модель поиска не загружена"}else if embedding.as_ref().is_some_and(|r|r.is_err()){"Не удалось загрузить модель поиска"}else{&embedding_message});
    device.set_llm(if generator.as_ref().is_some_and(|r|r.is_ok()){Some(&llm_device)}else{None},if generator.is_none(){"Модель ответа не загружена"}else if generator.as_ref().is_some_and(|r|r.is_err()){"Не удалось загрузить модель ответа"}else{&llm_message});
    if let Some(result)=embedding {if let Ok(_guard)=startup_serial.lock(){if let Ok(mut slot)=state.lock(){*slot=match result {Ok(service)=>{if !startup_registry.join(".default-deleted").exists() && valid_workspace(&startup_default){let _=service.ensure(&startup_default);}ModelState::Ready(service)},Err(e)=>ModelState::Failed(e)}}}}
-   if let Some(result)=generator {if let Ok(mut slot)=rag_state.lock(){*slot=match result {Ok(g)=>RagState::Ready(std::sync::Arc::new(std::sync::Mutex::new(g))),Err(e)=>RagState::Failed(e)}}}
+   if let Some(result)=generator {if let Ok(mut slot)=rag_state.lock(){*slot=match result {Ok(g)=>RagState::Ready(std::sync::Arc::new(rag_model::RagModel::new(g,exe.clone(),startup.to_string_lossy().into_owned(),llm_device.clone()))),Err(e)=>RagState::Failed(e)}}}
    device.mark_ready();
   });
  }}
 
+ let timer_semantic=semantic.clone();let timer_rag=rag.clone();let timer_choice=choice.clone();let timer_device=device.clone();
+ std::thread::spawn(move || loop {
+  std::thread::sleep(std::time::Duration::from_secs(5));
+  let config=app_settings(&timer_choice,&timer_device);
+  if config["idle_enabled"]!=true {continue}
+  let age=std::time::Duration::from_secs(config["idle_minutes"].as_u64().unwrap_or(15)*60);
+  if let Ok(state)=timer_semantic.lock(){if let ModelState::Ready(model)=&*state{model.unload_if_idle(age);}}
+  if let Ok(state)=timer_rag.lock(){if let RagState::Ready(model)=&*state{model.unload_if_idle(age);}}
+ });
  let workers=std::sync::Arc::new(workspace_worker::Workers::default());let external_states=std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
  let protected=std::sync::Arc::new(protected::Protected::new());
  let server=Server::http(format!("127.0.0.1:{port}"))?;println!("{}",server.server_addr().to_ip().ok_or("invalid address")?.port()); let active=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));for req in server.incoming_requests(){if active.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|if n<32 {Some(n+1)}else{None}).is_err(){answer(req,503,json!({"error":"Server busy"}));continue}let slot=RequestSlot(active.clone());let dir=dir.clone();let default=default.clone();let token=token.clone();let serial=serial.clone();let semantic=semantic.clone();let rag=rag.clone();let choice=choice.clone();let device=device.clone();let workers=workers.clone();let external_states=external_states.clone();let protected=protected.clone();std::thread::spawn(move || {let _slot=slot;handle(req,&dir,&default,&token,&serial,&semantic,&rag,&choice,&device,&workers,&external_states,&protected)});} Ok(())

@@ -13,3 +13,8 @@
 .error{z-index:11}
 
 .file-description:not([open]){width:38px;height:38px;overflow:hidden;margin:4px 0 8px}.file-description summary{width:38px;height:38px;padding:9px;justify-content:center}.file-description p{margin:0 12px 10px;font-size:13px}.file-description[open]{max-width:480px}
+
+.file-preview-title{position:relative;padding-left:48px;min-height:46px}.file-preview-title .file-description{position:absolute;top:0;left:0;z-index:2;margin:0;max-height:none;background:var(--card, #26242e)}.file-preview-title .file-description[open]{width:min(480px,calc(100vw - 90px));box-shadow:0 8px 24px #0003}.file-description-label{font-weight:600}
+:root[data-theme=light] .file-preview-title .file-description{background:#fff}
+
+.editor .file-preview-title{margin:35px 0 18px;display:flex;align-items:center;min-height:38px;flex-shrink:0}.editor .file-preview-title h1{margin:0}.file-preview-title .file-description{top:50%;transform:translateY(-19px)}

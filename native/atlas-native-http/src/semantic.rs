@@ -11,21 +11,28 @@ fn cleanup_generations(dir:&Path,current:&str)->std::io::Result<()> {
  Ok(())
 }
 
+struct ModelSlot { encoder:Option<Encoder>, exe:String, path:String, device:String, last_used:std::time::Instant }
+struct ModelGuard<'a>(std::sync::MutexGuard<'a,ModelSlot>);
+impl std::ops::Deref for ModelGuard<'_> {type Target=Encoder;fn deref(&self)->&Encoder {self.0.encoder.as_ref().expect("loaded encoder")}}
+impl Drop for ModelGuard<'_> {fn drop(&mut self){self.0.last_used=std::time::Instant::now();}}
+fn acquire(slot:&Mutex<ModelSlot>)->Result<ModelGuard<'_>,String> {let mut guard=loop {match slot.try_lock(){Ok(g)=>break g,Err(std::sync::TryLockError::WouldBlock)=>{atlas_llama_probe::remaining_search_time()?;std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("model unavailable".into())}};if guard.encoder.is_none(){guard.encoder=Some(Encoder::start_device(&guard.exe,&guard.path,&guard.device)?);}Ok(ModelGuard(guard))}
+
 #[derive(Default)]
 struct State { revision:u64, indexed:u64, error:Option<String>, processing:Vec<String> }
 #[derive(Clone)]
-pub struct SemanticService { identity:String, sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<Encoder>>, counter:Arc<AtomicU64> }
+pub struct SemanticService { identity:String, sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<ModelSlot>>, counter:Arc<AtomicU64> }
 
 impl SemanticService {
- pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.model.lock().map_err(|_|"model unavailable")?.identity().to_owned())}
- pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{self.model.lock().map_err(|_|"model unavailable")?.encode(text,query)}
+ pub fn unload_if_idle(&self,age:std::time::Duration)->bool {if let Ok(mut slot)=self.model.try_lock(){if slot.last_used.elapsed()>=age {slot.encoder.take();return true}}false}
+ pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.identity.clone())}
+ pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{acquire(&self.model)?.encode(text,query)}
 
  pub fn start(exe:&str,model_path:&str)->Result<Self,String>{Self::start_inner(exe,model_path,None,"cpu")}
  #[cfg(feature="test-hook")]
  pub fn start_with_hook(exe:&str,model_path:&str,ready:mpsc::Sender<()>,resume:mpsc::Receiver<()>)->Result<Self,String>{Self::start_inner(exe,model_path,Some((ready,resume)),"cpu")}
  pub fn start_device(exe:&str,model_path:&str,device:&str)->Result<Self,String>{Self::start_inner(exe,model_path,None,device)}
  fn start_inner(exe:&str,model_path:&str,mut hook:Option<(mpsc::Sender<()>,mpsc::Receiver<()>)>,device:&str)->Result<Self,String>{
-  let encoder=Encoder::start_device(exe,model_path,device)?;let identity=encoder.identity().to_owned();let model=Arc::new(Mutex::new(encoder));
+  let encoder=Encoder::start_device(exe,model_path,device)?;let identity=encoder.identity().to_owned();let model=Arc::new(Mutex::new(ModelSlot{encoder:Some(encoder),exe:exe.to_owned(),path:model_path.to_owned(),device:device.to_owned(),last_used:std::time::Instant::now()}));
   let states:Arc<Mutex<HashMap<PathBuf,State>>>=Arc::new(Mutex::new(HashMap::new()));
   let (sender,receiver)=mpsc::channel::<PathBuf>();
   let worker_states=Arc::clone(&states);let worker_model=Arc::clone(&model);
@@ -38,7 +45,7 @@ impl SemanticService {
     let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     drop(stmt);drop(db);drop(guard);
     let sources:Vec<_>=rows.iter().map(|(id,title,body,description)|Source{id,title,body,description}).collect();
-    let model=worker_model.lock().unwrap();prepare_sources_cancellable(&model,&sources,&dir.join(".atlas-semantic-native"),||worker_states.lock().unwrap().get(&dir).is_some_and(|s|s.revision==rev))
+    let model=acquire(&worker_model)?;prepare_sources_cancellable(&model,&sources,&dir.join(".atlas-semantic-native"),||worker_states.lock().unwrap().get(&dir).is_some_and(|s|s.revision==rev))
    })();
    if let Some((ready,resume))=hook.take(){let _=ready.send(());let _=resume.recv();}
    // Keep generation files alive while another query reads them.
@@ -50,8 +57,8 @@ impl SemanticService {
  }
 
  pub fn protected_identity(&self)->&str{&self.identity}
- pub fn protected_build(&self,mut next:impl FnMut()->Result<Option<(String,String,String,String)>,String>,previous:Option<(&atlas_faiss_probe::Index,&Value)>,should_continue:impl Fn()->bool)->Result<(Vec<u8>,Value),String>{let model=self.model.lock().map_err(|_|"model unavailable")?;let mut builder=atlas_joined_probe::MemoryBuilder::new(&model,previous)?;while let Some((id,title,body,description))=next()?{if !should_continue(){return Err("indexing cancelled".into())}builder.push(&model,&Source{id:&id,title:&title,body:&body,description:&description},&should_continue)?;}if !should_continue(){return Err("indexing cancelled".into())}builder.finish(&model)}
- pub fn protected_search(&self,index:&atlas_faiss_probe::Index,meta:&Value,q:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{let model=loop{match self.model.try_lock(){Ok(v)=>break v,Err(std::sync::TryLockError::WouldBlock)=>{atlas_llama_probe::remaining_search_time()?;std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("model unavailable".into())}};let rows=atlas_joined_probe::search_memory(&model,index,meta,q,ids,128)?;Ok(rows.into_iter().map(|v|{let score=v["score"].clone();let chunks=if v["field"]=="title"{vec![]}else{vec![json!({"text":v["text"],"start":v["start"],"end":v["end"],"field":v["field"],"score":score})]};json!({"id":v["id"],"title":v["title"],"chunks":chunks,"score":score})}).collect())}
+ pub fn protected_build(&self,mut next:impl FnMut()->Result<Option<(String,String,String,String)>,String>,previous:Option<(&atlas_faiss_probe::Index,&Value)>,should_continue:impl Fn()->bool)->Result<(Vec<u8>,Value),String>{let model=acquire(&self.model)?;let mut builder=atlas_joined_probe::MemoryBuilder::new(&model,previous)?;while let Some((id,title,body,description))=next()?{if !should_continue(){return Err("indexing cancelled".into())}builder.push(&model,&Source{id:&id,title:&title,body:&body,description:&description},&should_continue)?;}if !should_continue(){return Err("indexing cancelled".into())}builder.finish(&model)}
+ pub fn protected_search(&self,index:&atlas_faiss_probe::Index,meta:&Value,q:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{let model=acquire(&self.model)?;let rows=atlas_joined_probe::search_memory(&model,index,meta,q,ids,128)?;Ok(rows.into_iter().map(|v|{let score=v["score"].clone();let chunks=if v["field"]=="title"{vec![]}else{vec![json!({"text":v["text"],"start":v["start"],"end":v["end"],"field":v["field"],"score":score})]};json!({"id":v["id"],"title":v["title"],"chunks":chunks,"score":score})}).collect())}
  pub fn ensure(&self,dir:&Path)->Result<(),String>{
   let pending={let mut states=self.states.lock().unwrap();if states.contains_key(dir){false}else{states.insert(dir.to_owned(),State{revision:self.counter.fetch_add(1,Ordering::Relaxed)+1,..State::default()});true}};
   if pending {self.sender.send(dir.to_owned()).map_err(|e|e.to_string())?}Ok(())
@@ -67,8 +74,32 @@ impl SemanticService {
  pub fn status(&self,dir:&Path)->Value{let states=self.states.lock().unwrap();match states.get(dir){None=>json!({"available":false,"message":"Подготовка семантического поиска","processing_ids":[],"failed_ids":[]}),Some(s)=>json!({"available":s.indexed==s.revision&&s.indexed>0&&s.error.is_none(),"message":s.error.clone().unwrap_or_else(||if s.indexed!=s.revision {"Подготовка семантического поиска".to_string()} else {String::new()}),"processing_ids":s.processing,"failed_ids":if s.error.is_some(){s.processing.clone()}else{vec![]}})}}
  pub fn search(&self,dir:&Path,query:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{
   let rev={let states=self.states.lock().unwrap();let s=states.get(dir).ok_or("index unavailable")?;if s.indexed==0||s.indexed!=s.revision||s.error.is_some(){return Err("index unavailable".into())}s.revision};
-  let model=loop {match self.model.try_lock(){Ok(g)=>break g,Err(std::sync::TryLockError::WouldBlock)=>{atlas_llama_probe::remaining_search_time()?;std::thread::sleep(std::time::Duration::from_millis(25))},Err(_)=>return Err("model unavailable".into())}};let filter=ids.map(|v|v.iter().map(String::as_str).collect::<Vec<_>>());let rows=atlas_joined_probe::search(&model,&dir.join(".atlas-semantic-native"),query,filter.as_deref(),128)?;
+  let model=acquire(&self.model)?;let filter=ids.map(|v|v.iter().map(String::as_str).collect::<Vec<_>>());let rows=atlas_joined_probe::search(&model,&dir.join(".atlas-semantic-native"),query,filter.as_deref(),128)?;
   let states=self.states.lock().unwrap();let state=states.get(dir).ok_or("index unavailable")?;if state.revision!=rev||state.indexed!=rev{return Err("index changed".into())}
   Ok(rows.into_iter().map(|v|{let score=v["score"].clone();let chunks=if v["field"]=="title"{vec![]}else{vec![json!({"text":v["text"],"start":v["start"],"end":v["end"],"field":v["field"],"score":score})]};json!({"id":v["id"],"title":v["title"],"chunks":chunks,"score":score})}).collect())
+ }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+ use super::*;
+ #[test]
+ fn locked_model_is_not_unloaded() {
+  let service=SemanticService{identity:String::new(),sender:mpsc::channel().0,states:Arc::new(Mutex::new(HashMap::new())),model:Arc::new(Mutex::new(ModelSlot{encoder:None,exe:String::new(),path:String::new(),device:String::new(),last_used:std::time::Instant::now()})),counter:Arc::new(AtomicU64::new(0))};
+  let held=service.model.lock().unwrap();
+  assert!(!service.unload_if_idle(std::time::Duration::ZERO));
+  drop(held);
+  assert!(service.unload_if_idle(std::time::Duration::ZERO));
+ }
+ #[test]
+ #[ignore = "requires local embedding model and llama-server"]
+ fn real_model_unloads_and_reloads() {
+  let exe=std::env::var("ATLAS_TEST_LLAMA_SERVER").unwrap();let path=std::env::var("ATLAS_TEST_EMBEDDING_MODEL").unwrap();
+  let service=SemanticService::start_device(&exe,&path,"cpu").unwrap();
+  assert_eq!(service.worker_encode("test",true).unwrap().len(),512);
+  assert!(service.unload_if_idle(std::time::Duration::ZERO));
+  assert!(service.model.lock().unwrap().encoder.is_none());
+  assert_eq!(service.worker_encode("test",true).unwrap().len(),512);
+  assert!(service.model.lock().unwrap().encoder.is_some());
  }
 }

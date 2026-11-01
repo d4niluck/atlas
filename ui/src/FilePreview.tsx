@@ -1,37 +1,29 @@
 /// <reference types="vite/client" />
 import {useEffect, useRef, useState} from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import {MarkdownPre} from './MermaidPre';
 import {getDocument, GlobalWorkerOptions} from './pdfCompat';
 import type {PDFDocumentProxy, RenderTask} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import './file-preview-layout.css';
-import {decodePlainText} from './filePreviewText';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
-import {readPreviewWindow} from './preview-window';
 
-export function PlainFilePreview({url}: {url: string}) {
-  const [value, setValue] = useState<string | null>(null);
-  const [status, setStatus] = useState('Загрузка файла…');
-  const [truncated, setTruncated] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    setValue(null); setTruncated(false); setStatus('Загрузка файла…');
-    (async () => {
-      try {
-        const response = await fetch(url, {signal: controller.signal});
-        if (!response.ok) throw new Error();
-        const part = await readPreviewWindow(response);
-        const text = decodePlainText(new TextEncoder().encode(part.text));
-        setTruncated(part.truncated);
-        if (controller.signal.aborted) return;
-        if (text === null) setStatus('Предпросмотр этого файла недоступен. Скачайте его, чтобы открыть.');
-        else setValue(text);
-      } catch { if (!controller.signal.aborted) setStatus('Не удалось открыть файл.'); }
-    })();
-    return () => controller.abort();
-  }, [url]);
-  return value === null ? <p role="status">{status}</p> : <><span role="status">{truncated && "Показано начало большого файла. Полный файл можно скачать."}</span><pre className="file-preview-text">{value}</pre></>;
+export function PlainFilePreview({url, markdown=false}: {url:string; markdown?:boolean}) {
+ const [page,setPage]=useState(0),[total,setTotal]=useState<number|null>(null),[value,setValue]=useState(''),[status,setStatus]=useState('Открываем файл…');
+ useEffect(()=>{const abort=new AbortController();setStatus('Открываем файл…');(async()=>{try{
+ const step=65536,start=page*step,end=start+step,base=Math.max(0,start-3);
+ let res=await fetch(url,{headers:{Range:`bytes=${base}-${end+2}`},signal:abort.signal});if(res.status===416&&page===0)res=await fetch(url,{signal:abort.signal});if(!res.ok||!res.body)throw Error();
+ const length=res.headers.get('Content-Range')?.split('/')[1]??res.headers.get('Content-Length');if(length!==null)setTotal(Number(length));
+ const reader=res.body.getReader();let pos=res.status===206?base:0;const chunks:Uint8Array[]=[];
+ while(true){const part=await reader.read();if(part.done)break;const from=Math.max(0,base-pos),to=Math.min(part.value.length,end+3-pos);if(to>from)chunks.push(part.value.slice(from,to));pos+=part.value.length;if(pos>=end+3){await reader.cancel();break;}}
+ const bytes=new Uint8Array(chunks.reduce((n,c)=>n+c.length,0));let cursor=0;for(const chunk of chunks){bytes.set(chunk,cursor);cursor+=chunk.length}
+ let left=start-base,right=Math.min(bytes.length,end-base);while(left<bytes.length&&(bytes[left]&192)===128)left++;while(right<bytes.length&&(bytes[right]&192)===128)right++;
+ const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(left,right));if(!abort.signal.aborted){setValue(text);setStatus('')}
+ }catch{if(!abort.signal.aborted)setStatus('Не удалось открыть файл.')}})();return()=>abort.abort()},[url,page]);
+ return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{value}</pre>}</>;
 }
 
 export function PdfPreview({url, title}: {url:string; title:string}) {
