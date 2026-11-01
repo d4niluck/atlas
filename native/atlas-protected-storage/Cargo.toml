@@ -3,6 +3,7 @@ name="atlas-sqlcipher-proof"
 version="0.1.0"
 edition="2021"
 [dependencies]
+atlas-native-storage-contract={path="../atlas-native-storage"}
 rusqlite={version="=0.41.1",features=["bundled-sqlcipher-vendored-openssl","modern_sqlite","blob","backup"]}
 serde_json="1"
 atlas-faiss-probe={path="../atlas-faiss-rust"}

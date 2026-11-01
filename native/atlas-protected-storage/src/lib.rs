@@ -139,7 +139,57 @@ fn lock_source(root:&std::fs::File,name:&std::ffi::CStr)->Result<std::fs::File,S
 fn check_sidecars(root:&std::fs::File)->Result<(),String>{use std::os::fd::AsRawFd;for name in [c"atlas.sqlite3-wal",c"atlas.sqlite3-journal"]{let mut st=std::mem::MaybeUninit::<libc::stat>::uninit();if unsafe{libc::fstatat(root.as_raw_fd(),name.as_ptr(),st.as_mut_ptr(),libc::AT_SYMLINK_NOFOLLOW)}==0 {let st=unsafe{st.assume_init()};if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_size>0{return Err("Сначала закройте исходное пространство".into())}}else if std::io::Error::last_os_error().raw_os_error()!=Some(libc::ENOENT){return Err("Не удалось проверить исходное пространство".into())}}Ok(())}
 #[cfg(unix)] fn source_stamp(m:&std::fs::Metadata)->(u64,u64,u64,i64,i64,i64,i64){use std::os::unix::fs::MetadataExt;(m.dev(),m.ino(),m.len(),m.mtime(),m.mtime_nsec(),m.ctime(),m.ctime_nsec())}
 impl Vault {
- pub fn import_plain(source:&Path,destination:&Path,password:&str)->Result<Self,String>{
+ /// Write an unlocked vault to a new ordinary workspace. The caller owns publication
+ /// and must discard the unpublished directory on failure.
+ pub fn export_plain(&self, root:&Path)->Result<(),String>{
+  use rusqlite::OptionalExtension;
+  if root.exists(){return Err("Папка назначения уже существует".into())}
+  atlas_native_storage_contract::create_workspace(root).map_err(|e|e.to_string())?;
+  if let Some(name)=root.file_name().and_then(|s|s.to_str()).filter(|s|s.starts_with(".atlas-unprotect-")){let marker=root.join(".atlas-conversion-stage");std::fs::write(&marker,name).map_err(|e|e.to_string())?;std::fs::File::open(&marker).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;std::fs::File::open(root).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;}
+  let mut db=Connection::open(root.join("atlas.sqlite3")).map_err(|e|e.to_string())?;
+  let tx=db.transaction().map_err(|e|e.to_string())?;
+  let mut st=self.db.prepare("SELECT id,kind,title,text_status,description FROM objects ORDER BY rowid").map_err(|e|e.to_string())?;
+  let rows=st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?))).map_err(|e|e.to_string())?;
+  for row in rows {let(id,kind,title,status,description)=row.map_err(|e|e.to_string())?;
+   if id.is_empty()||!id.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'){return Err("Недопустимый идентификатор".into())}
+   let relative=if kind=="note"{format!("notes/{id}.md")}else if kind=="file"{if title.is_empty()||title=="."||title==".."||title.contains('/')||title.contains('\\')||title.contains('\0'){return Err("Недопустимое имя файла".into())}std::fs::create_dir(root.join("files").join(&id)).map_err(|e|e.to_string())?;format!("files/{id}/{title}")}else{return Err("Неизвестный тип объекта".into())};
+   let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(root.join(&relative)).map_err(|e|e.to_string())?;
+   let mut blocks=self.db.prepare("SELECT data FROM blocks WHERE id=? ORDER BY n").map_err(|e|e.to_string())?;let mut block_rows=blocks.query([&id]).map_err(|e|e.to_string())?;while let Some(block)=block_rows.next().map_err(|e|e.to_string())?{let bytes:Vec<u8>=block.get(0).map_err(|e|e.to_string())?;file.write_all(&bytes).map_err(|e|e.to_string())?;}file.sync_all().map_err(|e|e.to_string())?;
+   tx.execute("INSERT INTO objects(id,kind,title,path,text_status,description) VALUES(?,?,?,?,?,?)",params![id,kind,title,relative,status,description]).map_err(|e|e.to_string())?;
+  }
+  drop(st);
+  let mut st=self.db.prepare("SELECT id,title,body FROM search_index").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;while let Some(r)=rows.next().map_err(|e|e.to_string())?{tx.execute("INSERT INTO search_index VALUES(?,?,?)",params![r.get::<_,String>(0).map_err(|e|e.to_string())?,r.get::<_,String>(1).map_err(|e|e.to_string())?,r.get::<_,String>(2).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;}drop(rows);drop(st);
+  let mut st=self.db.prepare("SELECT object_id,start,field,content FROM search_chunks").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;while let Some(r)=rows.next().map_err(|e|e.to_string())?{tx.execute("INSERT INTO search_chunks VALUES(?,?,?,?)",params![r.get::<_,String>(0).map_err(|e|e.to_string())?,r.get::<_,i64>(1).map_err(|e|e.to_string())?,r.get::<_,String>(2).map_err(|e|e.to_string())?,r.get::<_,String>(3).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;}drop(rows);drop(st);
+  let board:String=self.db.query_row("SELECT value FROM board WHERE singleton=1",[],|r|r.get(0)).map_err(|e|e.to_string())?;tx.execute("INSERT INTO board VALUES(1,?)",[board]).map_err(|e|e.to_string())?;
+  let mut st=self.db.prepare("SELECT id,value FROM hidden_edges").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;let mut edges=Vec::new();while let Some(r)=rows.next().map_err(|e|e.to_string())?{let id:String=r.get(0).map_err(|e|e.to_string())?;let raw:String=r.get(1).map_err(|e|e.to_string())?;let edge:serde_json::Value=serde_json::from_str(&raw).map_err(|e|e.to_string())?;tx.execute("INSERT INTO pending_edges VALUES(?,?)",params![id,raw]).map_err(|e|e.to_string())?;edges.push(edge);}drop(rows);drop(st);
+  let mut st=self.db.prepare("SELECT id,deleted_at,object FROM trash").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;while let Some(r)=rows.next().map_err(|e|e.to_string())?{let id:String=r.get(0).map_err(|e|e.to_string())?;let time:i64=r.get(1).map_err(|e|e.to_string())?;let raw:Option<String>=r.get(2).map_err(|e|e.to_string())?;let snapshot:serde_json::Value=serde_json::from_str(raw.as_deref().ok_or("Отсутствует объект корзины")?).map_err(|e|e.to_string())?;let object=snapshot.get("object").filter(|v|!v.is_null()).cloned().ok_or("Отсутствует объект корзины")?;let stacks=snapshot["stacks"].as_array().cloned().unwrap_or_default();let relevant:Vec<_>=edges.iter().filter(|e|e["from"]==id||e["to"]==id).cloned().collect();let saved=serde_json::json!({"objects":[object],"edges":relevant,"stacks":stacks}).to_string();tx.execute("INSERT INTO trash VALUES(?,?,?)",params![id,time,saved]).map_err(|e|e.to_string())?;}drop(rows);drop(st);
+  let mut st=self.db.prepare("SELECT id,entry FROM search_history ORDER BY id").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;while let Some(r)=rows.next().map_err(|e|e.to_string())?{let id:i64=r.get(0).map_err(|e|e.to_string())?;let raw:String=r.get(1).map_err(|e|e.to_string())?;let v:serde_json::Value=serde_json::from_str(&raw).map_err(|e|e.to_string())?;let opt=|key:&str|if v[key].is_null(){None}else{Some(v[key].to_string())};tx.execute("INSERT INTO search_history(id,query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![id,v["query"].as_str().unwrap_or(""),v["mode"].as_str().unwrap_or(""),v["results"].to_string(),v["created_at"].as_f64().unwrap_or(0.0),opt("object_ids"),v["scope_known"].as_bool().unwrap_or(false),v["answer"].as_str(),opt("sources"),v["error"].as_str(),v["agentic"].as_bool()]).map_err(|e|e.to_string())?;}drop(rows);drop(st);
+  tx.commit().map_err(|e|e.to_string())?;drop(db);
+  let name:String=self.db.query_row("SELECT name FROM workspace_info WHERE id=1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+  std::fs::write(root.join(".workspace.json"),serde_json::json!({"name":name}).to_string()).map_err(|e|e.to_string())?;
+  if let Some(raw)=self.db.query_row("SELECT value FROM faiss_metadata WHERE singleton=1",[],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())? {let folder=root.join(".atlas-semantic-native");std::fs::create_dir(&folder).map_err(|e|e.to_string())?;let generation="gen-export";let target=folder.join(generation);std::fs::create_dir(&target).map_err(|e|e.to_string())?;let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(target.join("index.faiss")).map_err(|e|e.to_string())?;let mut st=self.db.prepare("SELECT data FROM faiss_blocks ORDER BY n").map_err(|e|e.to_string())?;let mut rows=st.query([]).map_err(|e|e.to_string())?;while let Some(r)=rows.next().map_err(|e|e.to_string())?{let block:Vec<u8>=r.get(0).map_err(|e|e.to_string())?;file.write_all(&block).map_err(|e|e.to_string())?;}file.sync_all().map_err(|e|e.to_string())?;std::fs::write(target.join("metadata.json"),raw).map_err(|e|e.to_string())?;std::fs::write(folder.join("current"),generation).map_err(|e|e.to_string())?;}
+  Ok(())
+ }
+ /// Export all object payloads, including trashed ones, by stable object ID.
+ /// The caller supplies a newly created private directory and is responsible for publication.
+ pub fn export_payloads(&self, destination:&Path)->Result<usize,String>{
+  use std::os::unix::fs::OpenOptionsExt;
+  if destination.is_symlink()||!destination.is_dir(){return Err("Недопустимая папка назначения".into())}
+  let mut ids=self.db.prepare("SELECT id FROM objects ORDER BY id").map_err(|e|e.to_string())?;
+  let ids=ids.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+  for id in &ids {
+   if id.is_empty()||!id.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'){return Err("Недопустимый идентификатор".into())}
+   let path=destination.join(id);
+   let mut out=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path).map_err(|e|e.to_string())?;
+   let mut blocks=self.db.prepare("SELECT data FROM blocks WHERE id=?1 ORDER BY n").map_err(|e|e.to_string())?;
+   let mut rows=blocks.query([id]).map_err(|e|e.to_string())?;
+   while let Some(row)=rows.next().map_err(|e|e.to_string())? {let block:Vec<u8>=row.get(0).map_err(|e|e.to_string())?;out.write_all(&block).map_err(|e|e.to_string())?;}
+   out.sync_all().map_err(|e|e.to_string())?;
+  }
+  Ok(ids.len())
+ }
+ pub fn import_plain(source:&Path,destination:&Path,password:&str)->Result<Self,String>{let (vault,_,_)=Self::import_plain_with_locks(source,destination,password)?;Ok(vault)}
+ pub fn import_plain_with_locks(source:&Path,destination:&Path,password:&str)->Result<(Self,std::fs::File,std::fs::File),String>{
   use rusqlite::OptionalExtension;
   if source.is_symlink()||!source.is_dir(){return Err("Недопустимая папка источника".into())}if destination.exists()||destination.is_symlink(){return Err("Файл назначения уже существует".into())}
   let parent=destination.parent().ok_or("Нет папки назначения")?;if parent.is_symlink()||!parent.is_dir(){return Err("Недопустимая папка назначения".into())}
@@ -181,7 +231,7 @@ impl Vault {
    src.execute_batch("ROLLBACK").map_err(|e|e.to_string())?;let after_version:i64=src.query_row("PRAGMA data_version",[],|r|r.get(0)).map_err(|e|e.to_string())?;check_sidecars(&root_fd)?;let reopened=open_source_relative(&root_fd,"atlas.sqlite3")?;if data_version!=after_version||source_stamp(&source_db.metadata().map_err(|e|e.to_string())?)!=db_before||source_stamp(&reopened.metadata().map_err(|e|e.to_string())?)!=db_before{return Err("Источник изменился во время копирования".into())}
    drop(dst);std::fs::hard_link(&stage,destination).map_err(|e|e.to_string())?;Ok(())
   })();
-  let _=std::fs::remove_file(&stage);result?;Self::open(destination,password)
+  let _=std::fs::remove_file(&stage);result?;Ok((Self::open(destination,password)?,_session_lock,_source_lock))
  }
 }
 

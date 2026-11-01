@@ -94,6 +94,7 @@ name = "atlas-sqlcipher-proof"
 version = "0.1.0"
 dependencies = [
  "atlas-faiss-probe",
+ "atlas-native-storage-contract",
  "docx-lite",
  "libc",
  "pdf-extract",

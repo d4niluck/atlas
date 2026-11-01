@@ -39,10 +39,24 @@ name = "atlas-faiss-probe"
 version = "0.1.0"
 
 [[package]]
+name = "atlas-native-storage-contract"
+version = "0.1.0"
+dependencies = [
+ "docx-lite",
+ "libc",
+ "pdf-extract",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "atlas-sqlcipher-proof"
 version = "0.1.0"
 dependencies = [
  "atlas-faiss-probe",
+ "atlas-native-storage-contract",
  "docx-lite",
  "libc",
  "pdf-extract",
