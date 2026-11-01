@@ -240,11 +240,10 @@ fn main() {
         let mut backend_args=vec!["--root".into(),workspace.to_string_lossy().into_owned(),"--port".into(),"0".into(),"--token-stdin".into()];
         if let Some(default)=legacy_default { backend_args.extend(["--default-workspace".into(),default.to_string_lossy().into_owned()]); }
         let rag_model=data.join("models/gemma-4-e2b-it-q4.gguf");
-        let rag_e4b_model=data.join("models/gemma-4-e4b-it-q4.gguf");
         if model.is_file() { backend_args.extend(["--model-path".into(),model.to_string_lossy().into_owned()]); }
         if rag_model.is_file() { backend_args.extend(["--rag-model-path".into(),rag_model.to_string_lossy().into_owned()]); }
         backend_args.extend(["--rag-model-dir".into(),data.join("models").to_string_lossy().into_owned()]);
-        if model.is_file() || rag_model.is_file() || rag_e4b_model.is_file() { backend_args.extend(["--llama-server".into(),resources.join("llama/llama-server").to_string_lossy().into_owned()]); }
+        backend_args.extend(["--llama-server".into(),resources.join("llama/llama-server").to_string_lossy().into_owned()]);
         let (backend,backend_port)=launch(&resources.join("atlas-backend"),&backend_args,&format!("{token}\n"),&BACKEND)?;
         app.manage(TransferBackend{port:backend_port,token:token.clone()});
         BACKEND.store(backend.id() as i32,Ordering::Relaxed);

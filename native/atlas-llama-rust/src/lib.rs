@@ -89,11 +89,14 @@ impl Encoder {
  pub fn identity(&self)->&str {&self.identity}
  pub fn diagnostic(&self)->&str {&self.diagnostic}
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"cpu")}
- pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
+ pub fn model_identity(model:&str,device:&str)->Result<String,String>{
     let mut hash=Sha256::new();
     let mut f=std::fs::File::open(model).map_err(|e|e.to_string())?;let mut buf=[0u8;65536];loop {let n=f.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}hash.update(&buf[..n]);}
     hash.update(format!("atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;{device};ctx=2048").as_bytes());
-    let identity=format!("{:x}",hash.finalize());
+    Ok(format!("{:x}",hash.finalize()))
+ }
+ pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
+    let identity=Self::model_identity(model,device)?;let mut buf=[0u8;65536];
     let mut binary_hash=Sha256::new();let mut bin=std::fs::File::open(exe).map_err(|e|e.to_string())?;loop {let n=bin.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}binary_hash.update(&buf[..n]);}let diagnostic=format!("{:x}",binary_hash.finalize());
     let key=KeyFile::new()?;
     let address=key.dir.join("model.sock");
