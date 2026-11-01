@@ -9,7 +9,7 @@ mod rag_e4b_model_download;
 
 static DOWNLOAD_GATE:std::sync::Mutex<()>=std::sync::Mutex::new(());
 fn ensure_downloads_finished(statuses:&[String])->Result<(),String>{if statuses.iter().any(|s|s.starts_with("downloading")){Err("Дождитесь завершения загрузки модели перед перезапуском Atlas.".into())}else{Ok(())}}
-fn check_downloads(app:&tauri::AppHandle)->Result<(),String>{let dir=model_data_dir(app)?;ensure_downloads_finished(&[model_download::status(dir.clone()),vision_model_download::status(dir.clone()),rag_model_download::status(dir.clone()),vision_model_download::status(dir.clone()),rag_e4b_model_download::status(dir)])}
+fn check_downloads(app:&tauri::AppHandle)->Result<(),String>{let dir=model_data_dir(app)?;ensure_downloads_finished(&[model_download::status(dir.clone()),vision_model_download::status(dir.clone()),rag_model_download::status(dir.clone()),rag_e4b_model_download::status(dir)])}
 #[tauri::command]
 fn prepare_restart(app:tauri::AppHandle)->Result<(),String>{let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось проверить загрузки")?;check_downloads(&app)}
 
@@ -17,6 +17,10 @@ fn model_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> 
     use tauri::Manager;
     match std::env::var_os("ATLAS_TEST_DATA_DIR") { Some(path) => Ok(path.into()), None => app.path().app_data_dir().map_err(|e|e.to_string()) }
 }
+#[tauri::command]
+fn models_intro_seen(app:tauri::AppHandle)->Result<bool,String>{Ok(model_data_dir(&app)?.join("models-intro-seen").is_file())}
+#[tauri::command]
+fn dismiss_models_intro(app:tauri::AppHandle)->Result<(),String>{let dir=model_data_dir(&app)?;std::fs::create_dir_all(&dir).map_err(|e|e.to_string())?;std::fs::write(dir.join("models-intro-seen"),b"1").map_err(|e|e.to_string())}
 #[tauri::command]
 fn download_model(app: tauri::AppHandle) -> Result<(), String> { let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось начать загрузку")?;model_download::start(model_data_dir(&app)?) }
 #[tauri::command]
@@ -104,7 +108,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| { tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External("http://127.0.0.1:5173".parse()?)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0, 800.0).build()?; Ok(()) })
-        .invoke_handler(tauri::generate_handler![select_workspace_directory, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
+        .invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
         .run(tauri::generate_context!())
         .expect("failed to start Atlas");
 }
@@ -205,7 +209,7 @@ fn main() {
         let mut workspace=data.join("workspaces");
         let mut legacy_default=None;
         {
-            let legacy=if std::env::var_os("ATLAS_TEST_DATA_DIR").is_some() {data.join("legacy/atlas")} else {app.path().home_dir()?.join("Documents/Agent/TODO/atlas")};
+            let legacy=if std::env::var_os("ATLAS_TEST_DATA_DIR").is_some() {data.join("legacy/atlas")} else {fs::read_to_string(data.join("legacy-workspace-root")).ok().map(|value|std::path::PathBuf::from(value.trim())).filter(|path|path.is_absolute()).unwrap_or_else(||data.join("legacy/atlas"))};
             let default=legacy.join("demo-workspace"); let registry=legacy.join(".demo-workspace-workspaces");
             if registry.is_dir() && (default.join("atlas.sqlite3").is_file() || registry.join(".default-deleted").is_file()) {workspace=registry;legacy_default=Some(default);}
         }
@@ -257,7 +261,7 @@ fn main() {
         let origin=format!("http://127.0.0.1:{port}");let url=format!("{origin}/bootstrap/{bootstrap}").parse()?;
         WebviewWindowBuilder::new(app,"main",WebviewUrl::External(url)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0,800.0).on_navigation(move |url| url.scheme()=="http" && url.host_str()==Some("127.0.0.1") && url.port_or_known_default()==Some(port)).build()?;
         Ok(())
-    }).invoke_handler(tauri::generate_handler![select_workspace_directory, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
+    }).invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
 }
 #[cfg(all(test,not(debug_assertions),unix))]
 mod restart_group_contract_tests {

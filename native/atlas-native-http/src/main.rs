@@ -289,7 +289,7 @@ enum RagState { Disabled, Loading, Ready(std::sync::Arc<rag_model::RagModel>), F
 enum ModelState { Disabled, Loading, Ready(semantic::SemanticService), Failed(String) }
 fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
- let mut v=json!({"agentic":false,"model":model,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":true,"image_enabled":false,"idle_enabled":true,"idle_minutes":15});
+ let mut v=json!({"agentic":false,"model":model,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"idle_enabled":true,"idle_minutes":15});
  if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}v
 }
 fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{

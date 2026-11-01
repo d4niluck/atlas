@@ -11,6 +11,10 @@
   },
   "permissions": [
     "core:default",
+    "allow-models-intro-seen",
+    "allow-dismiss-models-intro",
+    "allow-download-vision-model",
+    "allow-vision-model-download-status",
     "allow-select-workspace-directory",
     "allow-open-external-url",
     "allow-download-model",
