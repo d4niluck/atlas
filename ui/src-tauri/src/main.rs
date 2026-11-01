@@ -36,14 +36,27 @@ async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Resu
     use tauri::Manager;
     let auth=app.try_state::<TransferBackend>().ok_or("Выбор папки недоступен в этом режиме.")?;
     let port=auth.port;let token=auth.token.clone();
+    #[cfg(target_os="macos")]
+    let path = {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let Some(mtm) = objc2::MainThreadMarker::new() else { let _=sender.send(None); return; };
+            let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+            panel.setCanChooseFiles(false);
+            panel.setCanChooseDirectories(true);
+            panel.setAllowsMultipleSelection(false);
+            panel.setCanCreateDirectories(true);
+            let selected = if panel.runModal() == 1 { panel.URL().and_then(|url| url.path()).map(|path| path.to_string()) } else { None };
+            let _=sender.send(selected);
+        }).map_err(|_| "Не удалось открыть выбор папки.")?;
+        tauri::async_runtime::spawn_blocking(move || receiver.recv().ok().flatten()).await.map_err(|_| "Не удалось открыть выбор папки.")?
+    };
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(target_os="macos")]
         {
             use std::io::{Read,Write};
-            let output=std::process::Command::new("/usr/bin/osascript").args(["-e","POSIX path of (choose folder with prompt \"Выберите папку\")"]).output().map_err(|_|"Не удалось открыть выбор папки.")?;
-            if !output.status.success(){if String::from_utf8_lossy(&output.stderr).contains("(-128)"){return Ok(None)}return Err("Не удалось выбрать папку.".into())}
-            let raw=String::from_utf8(output.stdout).map_err(|_|"Не удалось прочитать путь к папке.")?;
-            let path=raw.strip_suffix('\n').unwrap_or(&raw);
+            let Some(path)=path else {return Ok(None)};
+            let path=path.as_str();
             if !std::path::Path::new(path).is_absolute(){return Err("Не удалось прочитать путь к папке.".into())}
             let body=serde_json::json!({"operation":operation,"path":path}).to_string();
             let mut socket=std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST,port)).map_err(|_|"Не удалось связаться с Atlas.")?;

@@ -77,3 +77,8 @@
 .editor.file-editor:has(.image-preview-scroll) > .file-description{flex-shrink:0}
 .editor.file-editor:has(.image-preview-scroll) > .file-description{max-height:none;overflow:visible}
 .editor.file-editor .image-preview-scroll{flex:1 0 160px}
+
+.image-preview-scroll .preview-image { margin:auto; }
+.image-preview-scroll .preview-image:not(.zoomed) { cursor:zoom-in; }
+.image-preview-scroll .preview-image.zoomed { max-width:none; height:auto; }
+.image-zoom-controls { display:flex; justify-content:center; align-items:center; gap:10px; flex-shrink:0; padding:8px; }
