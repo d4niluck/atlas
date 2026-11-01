@@ -65,5 +65,15 @@
 .card.image-expanded > .card-icon, .card.image-expanded > div { display:none; }
 
 .editor.note-editor:not(.fullscreen),.editor.file-editor:not(.fullscreen){overflow:hidden;min-height:300px;max-height:85vh}
-.editor-resize{height:18px;flex:none;margin:6px -10px -18px;display:grid;place-items:center;cursor:ns-resize;touch-action:none}.editor-resize span{width:44px;height:4px;border-radius:4px;background:#a29aae}.editor-resize:focus-visible{outline:2px solid #b194fa;border-radius:5px}:root[data-theme=light] .editor-resize span{background:#665a72}
 .save-status{margin-left:auto;color:#d1c9df}:root[data-theme=light] .save-status{color:#51475e}
+
+.editor.note-editor:not(.fullscreen),.editor.file-editor:not(.fullscreen){overflow:auto}
+.image-preview-scroll{flex:1 1 0;min-height:0;overflow:auto}.image-preview-scroll .preview-image{display:block;max-width:100%;max-height:none;object-fit:contain}
+.editor.file-editor > .file-description{flex-shrink:0}
+/* Keep both image and description reachable even in a short preview window. */
+.editor.file-editor:has(.image-preview-scroll){overflow:auto}
+.editor.file-editor:has(.image-preview-scroll) > .editor-top,
+.editor.file-editor:has(.image-preview-scroll) > h1,
+.editor.file-editor:has(.image-preview-scroll) > .file-description{flex-shrink:0}
+.editor.file-editor:has(.image-preview-scroll) > .file-description{max-height:none;overflow:visible}
+.editor.file-editor .image-preview-scroll{flex:1 0 160px}

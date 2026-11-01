@@ -62,7 +62,7 @@ export function PdfPreview({url, title}: {url:string; title:string}) {
   }, [document, page]);
   return <div className="pdf-preview" aria-label={title}>
     {error ? <p role="alert">{error}</p> : !document ? <p role="status">Открываем PDF…</p> : <>
-      <div className="pdf-preview-controls"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>←</button><span>{page} / {document.numPages}</span><button disabled={page >= document.numPages} onClick={() => setPage(page + 1)}>→</button></div>
+      <div className="pdf-preview-controls"><button aria-label="Предыдущая страница" disabled={page <= 1} onClick={() => setPage(page - 1)}>←</button><span>{page} / {document.numPages}</span><button aria-label="Следующая страница" disabled={page >= document.numPages} onClick={() => setPage(page + 1)}>→</button></div>
       <canvas ref={canvas}/>
     </>}
   </div>;
