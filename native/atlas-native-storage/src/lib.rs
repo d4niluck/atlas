@@ -1,3 +1,4 @@
+pub mod pdf;
 mod snapshot;
 pub use snapshot::{snapshot_workspace,snapshot_workspace_named,publish_snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -100,7 +101,7 @@ fn text_info(name:&str,path:&Path)->(String,&'static str){
  let ext=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
  let result:R<String>=match ext.as_str(){
   "txt"|"md"=>fs::read_to_string(path).map_err(|e|e.into()),
-  "pdf"=>pdf_extract::extract_text_by_pages(path).map(|pages|pages.join("\n")).map_err(|e|e.into()),
+  "pdf"=>pdf::extract_pdf_path(path),
   "docx"=>(||{let doc=docx_lite::parse_document_from_path(path)?;let mut text:Vec<String>=doc.paragraphs.iter().map(|p|p.to_text()).collect();for table in &doc.tables{for row in &table.rows{for cell in &row.cells{text.push(cell.paragraphs.iter().map(|p|p.to_text()).collect::<Vec<_>>().join("\n"));}}}Ok(text.join("\n"))})(),
   _=>return (String::new(),"unsupported")
  };
