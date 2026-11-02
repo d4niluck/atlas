@@ -97,15 +97,15 @@ pub fn create_workspace(root:&Path)->R<()> {
  fs::write(root.join(".atlas-owned"),"atlas-workspace-v1")?;Ok(())
 }
 fn file_name(name:&str)->R<()> {if name.is_empty() || name=="." || name==".." || name.contains('/') || name.contains('\\') || name.contains('\0') {return Err("invalid filename".into())}Ok(())}
-fn text_info(name:&str,path:&Path)->(String,&'static str){
+fn text_info(name:&str,path:&Path)->R<(String,&'static str)>{
  let ext=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
  let result:R<String>=match ext.as_str(){
   "txt"|"md"=>fs::read_to_string(path).map_err(|e|e.into()),
   "pdf"=>pdf::extract_pdf_path(path),
   "docx"=>(||{let doc=docx_lite::parse_document_from_path(path)?;let mut text:Vec<String>=doc.paragraphs.iter().map(|p|p.to_text()).collect();for table in &doc.tables{for row in &table.rows{for cell in &row.cells{text.push(cell.paragraphs.iter().map(|p|p.to_text()).collect::<Vec<_>>().join("\n"));}}}Ok(text.join("\n"))})(),
-  _=>return (String::new(),"unsupported")
+  _=>return Ok((String::new(),"unsupported"))
  };
- let text=result.unwrap_or_default();let status=if text.trim().is_empty(){"unavailable"}else{"available"};(text,status)
+ let text=if ext=="pdf"{result?}else{result.unwrap_or_default()};let status=if text.trim().is_empty(){"unavailable"}else{"available"};Ok((text,status))
 }
 
 fn index_file(tx:&rusqlite::Transaction<'_>,id:&str,title:&str,text:&str,description:&str)->R<()> {
@@ -131,7 +131,7 @@ pub fn add_file(root:&Path, name:&str,bytes:&[u8])->R<String>{add_file_stream(ro
 pub fn add_file_stream(root:&Path, name:&str,reader:&mut impl std::io::Read)->R<String>{
  file_name(name)?;let files=root.join("files");if files.is_symlink() || !files.canonicalize()?.starts_with(root.canonicalize()?){return Err("unsafe files directory".into())}
  let id=uuid::Uuid::new_v4().to_string();let dir=files.join(&id);fs::create_dir(&dir)?;let target=dir.join(name);
- let result=(||->R<()>{let mut f=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut f)?;f.sync_all()?;drop(f);let (text,status)=text_info(name,&target);let mut conn=file_db(root)?;let tx=conn.transaction()?;let relative=format!("files/{id}/{name}");tx.execute("INSERT INTO objects(id,kind,title,path,text_status) VALUES(?,'file',?,?,?)",params![id,name,relative,status])?;index_file(&tx,&id,name,&text,"")?;tx.commit()?;Ok(())})();
+ let result=(||->R<()>{let mut f=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut f)?;f.sync_all()?;drop(f);let (text,status)=text_info(name,&target)?;let mut conn=file_db(root)?;let tx=conn.transaction()?;let relative=format!("files/{id}/{name}");tx.execute("INSERT INTO objects(id,kind,title,path,text_status) VALUES(?,'file',?,?,?)",params![id,name,relative,status])?;index_file(&tx,&id,name,&text,"")?;tx.commit()?;Ok(())})();
  if let Err(e)=result{let _=fs::remove_file(&target);let _=fs::remove_dir(&dir);return Err(e)}Ok(id)
 }
 pub fn set_file_description(root:&Path,id:&str,description:&str)->R<()>{let mut conn=file_db(root)?;let tx=conn.transaction()?;let (title,body):(String,String)=tx.query_row("SELECT objects.title,COALESCE(search_index.body,'') FROM objects JOIN search_index ON search_index.object_id=objects.id WHERE objects.id=? AND objects.kind='file' AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;tx.execute("UPDATE objects SET description=? WHERE id=?",params![description,id])?;index_file(&tx,id,&title,&body,description)?;tx.commit()?;Ok(())}
@@ -140,7 +140,7 @@ pub fn replace_file_stream(root:&Path,id:&str,name:&str,reader:&mut impl std::io
  file_name(name)?;let mut conn=file_db(root)?;let old_path:String=conn.query_row("SELECT path FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;
  let original=safe_path(root,&old_path)?;let files_root=safe_path(root,&format!("files/{id}"))?;if !original.starts_with(&files_root){return Err("invalid file path".into())}
  let revision=uuid::Uuid::new_v4().to_string();let dir=files_root.join(&revision);fs::create_dir(&dir)?;let target=dir.join(name);
- let result=(||->R<()>{let mut file=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut file)?;file.sync_all()?;drop(file);let(text,status)=text_info(name,&target);let relative=format!("files/{id}/{revision}/{name}");
+ let result=(||->R<()>{let mut file=fs::OpenOptions::new().create_new(true).write(true).open(&target)?;std::io::copy(reader,&mut file)?;file.sync_all()?;drop(file);let(text,status)=text_info(name,&target)?;let relative=format!("files/{id}/{revision}/{name}");
  let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;let (current,description):(String,String)=tx.query_row("SELECT path,description FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;if current!=old_path{return Err("file changed during replacement".into())}
  tx.execute("UPDATE objects SET title=?,path=?,text_status=? WHERE id=?",params![name,relative,status,id])?;index_file(&tx,id,name,&text,&description)?;tx.commit()?;Ok(())})();
  if let Err(e)=result{let _=fs::remove_file(&target);let _=fs::remove_dir(&dir);return Err(e)}
@@ -201,7 +201,7 @@ pub fn copy_file_from(dest:&Path,source:&Path,id:&str,expected:&str)->R<String>{
  use sha2::{Digest,Sha256};use std::io::Read;
  let prefix=format!("[{}]",[id,"file",&title,&description].iter().map(|v|serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join(", "));
  let mut hash=Sha256::new();hash.update(prefix.as_bytes());let mut copied=fs::File::open(&target)?;let mut buf=[0u8;65536];loop{let n=copied.read(&mut buf)?;if n==0{break}hash.update(&buf[..n]);}if format!("{:x}",hash.finalize())!=expected{return Err("source changed".into())}
- let (text,status)=text_info(name,&target);let relative=format!("files/{new_id}/{name}");
+ let (text,status)=text_info(name,&target)?;let relative=format!("files/{new_id}/{name}");
  let mut db=file_db(dest)?;let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
  tx.execute("INSERT INTO objects(id,kind,title,path,text_status,description) VALUES(?,'file',?,?,?,?)",params![new_id,title,relative,status,description])?;
  index_file(&tx,&new_id,&title,&text,&description)?;tx.commit()?;Ok(())

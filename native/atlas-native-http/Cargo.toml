@@ -7,6 +7,7 @@ atlas-sqlcipher-proof = { path = "../atlas-protected-storage" }
 tiny_http = "0.12"
 libc = "0.2"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.41.1", features = ["bundled", "modern_sqlite"] }
 atlas-native-storage-contract = { path = "../atlas-native-storage" }
 uuid = { version = "1", features = ["v4"] }

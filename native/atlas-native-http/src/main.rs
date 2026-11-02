@@ -1,3 +1,4 @@
+mod stream_metadata;
 mod protected_external_guard;
 #[cfg(any(test,feature="test-hook",feature="protected-external"))]
 mod protected_worker_ipc;
