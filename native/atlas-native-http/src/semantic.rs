@@ -31,6 +31,7 @@ impl SemanticService {
  pub fn unload_if_idle(&self,age:std::time::Duration)->bool {if let Ok(mut slot)=self.model.try_lock(){if slot.last_used.elapsed()>=age {slot.encoder.take();return true}}false}
  pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.identity.read().map_err(|_|"model unavailable")?.clone())}
  pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{acquire(&self.model)?.encode(text,query)}
+ pub fn index_enabled(&self)->bool{self.enabled.load(Ordering::Acquire)}
  pub fn worker_images_enabled(&self)->bool{self.model.lock().map(|m|m.images).unwrap_or(false)}
  pub fn worker_encode_image(&self,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>{acquire(&self.model)?.encode_image(bytes,mime)}
 
@@ -88,7 +89,7 @@ impl SemanticService {
   if self.enabled.load(Ordering::Acquire) {self.sender.send(dir.to_owned()).map_err(|e|e.to_string())?;}Ok(())
  }
  pub fn revision(&self,dir:&Path)->Option<u64>{let states=self.states.lock().ok()?;let s=states.get(dir)?;if s.indexed>0 && s.indexed==s.revision && s.error.is_none(){Some(s.revision)}else{None}}
- pub fn status(&self,dir:&Path)->Value{let states=self.states.lock().unwrap();match states.get(dir){None=>json!({"available":true,"message":"","processing_ids":[],"failed_ids":[]}),Some(s)=>json!({"available":s.indexed==s.revision&&s.indexed>0&&s.error.is_none(),"message":s.error.clone().unwrap_or_else(||if s.indexed!=s.revision {"Подготовка семантического поиска".to_string()} else {String::new()}),"processing_ids":s.processing,"failed_ids":if s.error.is_some(){s.processing.clone()}else{vec![]}})}}
+ pub fn status(&self,dir:&Path)->Value{let states=self.states.lock().unwrap();match states.get(dir){None=>json!({"available":true,"message":"","processing_ids":[],"failed_ids":[]}),Some(s)=>json!({"available":s.indexed==s.revision&&s.indexed>0&&s.error.is_none(),"message":s.error.clone().unwrap_or_else(||if s.indexed!=s.revision {"Подготовка семантического поиска".to_string()} else {String::new()}),"indexing":self.index_enabled()&&s.indexed!=s.revision&&s.error.is_none(),"processing_ids":s.processing,"failed_ids":if s.error.is_some(){s.processing.clone()}else{vec![]}})}}
  pub fn search(&self,dir:&Path,query:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{
   let rev={let states=self.states.lock().unwrap();let s=states.get(dir).ok_or("index unavailable")?;if s.indexed==0||s.indexed!=s.revision||s.error.is_some(){return Err("index unavailable".into())}s.revision};
   let model=acquire(&self.model)?;let filter=ids.map(|v|v.iter().map(String::as_str).collect::<Vec<_>>());let rows=atlas_joined_probe::search(&model,&dir.join(".atlas-semantic-native"),query,filter.as_deref(),128)?;
@@ -103,6 +104,12 @@ mod lifecycle_tests {
  #[test]
  fn locked_model_is_not_unloaded() {
   let service=SemanticService{identity:Arc::new(std::sync::RwLock::new(String::new())),sender:mpsc::channel().0,states:Arc::new(Mutex::new(HashMap::new())),model:Arc::new(Mutex::new(ModelSlot{images:false,enabled:true,encoder:None,exe:String::new(),path:String::new(),device:String::new(),last_used:std::time::Instant::now()})),enabled:Arc::new(std::sync::atomic::AtomicBool::new(true)),counter:Arc::new(AtomicU64::new(0))};
+  let dir=PathBuf::from("/tmp/atlas-status-test");
+  service.states.lock().unwrap().insert(dir.clone(),State{revision:2,indexed:1,error:None,processing:vec![]});
+  assert_eq!(service.status(&dir)["indexing"],true);
+  service.enabled.store(false,Ordering::Release);assert_eq!(service.status(&dir)["indexing"],false);
+  service.enabled.store(true,Ordering::Release);service.states.lock().unwrap().get_mut(&dir).unwrap().error=Some("error".into());assert_eq!(service.status(&dir)["indexing"],false);
+  service.states.lock().unwrap().remove(&dir);assert_ne!(service.status(&dir)["indexing"],true);
   let held=service.model.lock().unwrap();
   assert!(!service.unload_if_idle(std::time::Duration::ZERO));
   drop(held);

@@ -19,3 +19,13 @@ pub fn register_protected(root:&Path,id:&str,name:&str,identity:&str)->R<()> {
  }
  save(root,&entries)
 }
+
+// Switch the existing registration only if it still names the verified source.
+pub fn switch_path(root:&Path,id:&str,identity:&str,expected:&Path,target:&Path,new_identity:&str)->R<()> {
+ let _guard=lock().lock().map_err(|_|"registry unavailable")?;
+ let mut entries=load(root)?;
+ let entry=entries.iter_mut().find(|e|e["id"]==id).ok_or("unknown workspace")?;
+ if entry["identity"].as_str()!=Some(identity)||entry["path"].as_str()!=expected.to_str(){return Err("Исходное пространство изменилось".into())}
+ entry["path"]=json!(target.to_str().ok_or("invalid target")?);entry["identity"]=json!(new_identity);
+ save(root,&entries)
+}

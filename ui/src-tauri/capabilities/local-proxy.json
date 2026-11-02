@@ -16,6 +16,7 @@
     "allow-download-vision-model",
     "allow-vision-model-download-status",
     "allow-select-workspace-directory",
+    "allow-save-workspace-file",
     "allow-open-external-url",
     "allow-download-model",
     "allow-model-download-status",

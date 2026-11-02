@@ -14,3 +14,5 @@
 .workspace-home-row{position:relative}.workspace-home-row .portable-name:not(:disabled)::after{content:"";position:absolute;inset:0;cursor:pointer}.portable-row-actions{position:relative;z-index:1;pointer-events:none}.portable-row-actions button{pointer-events:auto}
 
 .atlas-version{position:fixed;right:16px;bottom:12px;color:#c7c0cf;font-size:12px;pointer-events:none}:root[data-theme=light] .atlas-version{color:#605569}
+
+.workspace-transfer-choice>div{flex-direction:column;align-items:stretch}.workspace-transfer-choice>div>button{width:100%}
