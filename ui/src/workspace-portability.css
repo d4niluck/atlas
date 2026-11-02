@@ -14,3 +14,5 @@
 .workspace-home-row{position:relative}.workspace-home-row .portable-name:not(:disabled)::after{content:"";position:absolute;inset:0;cursor:pointer}.portable-row-actions{position:relative;z-index:1;pointer-events:none}.portable-row-actions button{pointer-events:auto}
 
 .atlas-version{position:fixed;right:16px;bottom:12px;color:#c7c0cf;font-size:12px;pointer-events:none}:root[data-theme=light] .atlas-version{color:#605569}
+
+.portable-workspace{flex:0 1 42%}.portable-connect-slot{flex:0 0 112px;margin-right:auto;position:relative;z-index:1;pointer-events:none}.workspace-home-row .portable-connect-slot button{pointer-events:auto;border:1px solid #554f60;border-radius:8px;background:#302d39;color:#f1edf7;padding:8px 10px;white-space:nowrap}:root[data-theme=light] .workspace-home-row .portable-connect-slot button{background:#fff;border-color:#d8cce2;color:#30283a}@media(max-width:600px){.portable-workspace{flex:auto}.portable-connect-slot{flex:auto;margin-right:0}}
