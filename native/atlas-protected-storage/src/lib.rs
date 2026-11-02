@@ -8,7 +8,18 @@ fn check_snapshot_sidecars_at(dir:&std::fs::File,base:&str)->Result<(),String>{u
 fn same_file(a:&std::fs::Metadata,b:&std::fs::Metadata)->bool{use std::os::unix::fs::MetadataExt;!b.file_type().is_symlink()&&a.is_file()&&b.is_file()&&a.dev()==b.dev()&&a.ino()==b.ino()}
 #[cfg(feature="test-hook")]
 fn vault_open_barrier(stage:&str) { if let Some(dir)=std::env::var_os("ATLAS_TEST_VAULT_OPEN_BARRIER_DIR") { let dir=std::path::Path::new(&dir); let _=std::fs::write(dir.join(format!("{stage}-ready")), b"ready"); let start=std::time::Instant::now(); while !dir.join(format!("{stage}-resume")).exists() && start.elapsed()<std::time::Duration::from_secs(15) { std::thread::sleep(std::time::Duration::from_millis(10)); } } }
-fn chunks(s:&str)->Vec<(usize,String)>{let chars:Vec<char>=s.chars().collect();let mut out=vec![];let mut start=0;while start<chars.len(){let mut end=(start+400).min(chars.len());let word=|c:char|c.is_alphanumeric()||c=='_';if end<chars.len()&&word(chars[end-1])&&word(chars[end]){let mut i=end;while i>start&&word(chars[i-1]){i-=1}if i>start{end=i}else{while end<chars.len()&&word(chars[end]){end+=1}}}out.push((start,chars[start..end].iter().collect()));start=end}out}
+fn chunks(s:&str)->impl Iterator<Item=(usize,&str)> {
+ let mut rest=s;let mut offset=0usize;
+ std::iter::from_fn(move || {
+  if rest.is_empty(){return None} let mut it=rest.char_indices().peekable();let mut count=0;let mut end=rest.len();let mut last_break=(0,0);let mut last_word=false;
+  let word=|c:char|c.is_alphanumeric()||c=='_';
+  while count<400 {match it.next(){Some((i,c))=>{count+=1;last_word=word(c);end=i+c.len_utf8();if !last_word{last_break=(end,count)}},None=>break}}
+  if count==400&&last_word&&it.peek().is_some_and(|(_,c)|word(*c)) {
+   if last_break.0>0{(end,count)=last_break}else{while let Some(&(i,c))=it.peek(){if !word(c){break}it.next();end=i+c.len_utf8();count+=1;}}
+  }
+  let result=(offset,&rest[..end]);rest=&rest[end..];offset+=count;Some(result)
+ })
+}
 fn update_chunks(tx:&rusqlite::Transaction<'_>,id:&str,title:&str,body:&str,description:&str)->Result<(),String>{tx.execute("DELETE FROM search_chunks WHERE object_id=?1",[id]).map_err(|e|e.to_string())?;tx.execute("INSERT INTO search_chunks VALUES (?1,-1,'title',?2)",params![id,title]).map_err(|e|e.to_string())?;for(field,text)in [("body",body),("description",description)]{for(start,part) in chunks(text){tx.execute("INSERT INTO search_chunks VALUES (?1,?2,?3,?4)",params![id,start as i64,field,part]).map_err(|e|e.to_string())?;}}Ok(())}
 pub struct Vault { db:Connection, source_file:std::fs::File }
 impl Vault {
@@ -284,3 +295,13 @@ impl Vault {
 pub mod publication;
 
 pub mod protected_marker;
+
+#[cfg(test)] mod streaming_chunk_tests {
+ use super::*;
+ #[test] fn streaming_chunks_match_previous_algorithm() {
+  fn previous(s:&str)->Vec<(usize,String)>{let a:Vec<char>=s.chars().collect();let mut out=vec![];let mut start=0;while start<a.len(){let mut end=(start+400).min(a.len());let word=|c:char|c.is_alphanumeric()||c=='_';if end<a.len()&&word(a[end-1])&&word(a[end]){let mut i=end;while i>start&&word(a[i-1]){i-=1}if i>start{end=i}else{while end<a.len()&&word(a[end]){end+=1}}}out.push((start,a[start..end].iter().collect()));start=end;}out}
+  let cases=vec![String::new(),"я".repeat(399),"я".repeat(400),"я".repeat(401),"слово_тест💻 ".repeat(100),format!("{} {} {}", "x".repeat(399),"я".repeat(1200),"конец"),format!("{} aя", "x".repeat(398))];
+  for input in cases {let expected=previous(&input);let actual:Vec<_>=chunks(&input).map(|(offset,text)|(offset,text.to_owned())).collect();assert_eq!(actual,expected,"input length {}",input.len());}
+ }
+
+}

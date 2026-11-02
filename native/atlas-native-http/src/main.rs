@@ -64,7 +64,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
  let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
  // Models downloaded after launch become available without starting their processes.
  {let _creation_guard=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};
- if parts.len()>=4 && parts[0..2]==["api","w"] && parts[3]=="semantic" {
+ if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="semantic" || (method=="POST" && (parts[3]=="search" || parts[3]=="rag"))) {
   let config=app_settings(choice,device);let path=choice.dir.join("embeddinggemma-2.gguf");
   if config["semantic_enabled"]==true && path.is_file() && !choice.exe.is_empty() {
    if let Ok(mut slot)=model.lock(){if matches!(*slot,ModelState::Disabled){let selected=device.selected_pair().0;match semantic::SemanticService::start_lazy(&choice.exe,&path.to_string_lossy(),&selected){Ok(service)=>{*slot=match service.set_images(config["image_enabled"]==true){Ok(())=>ModelState::Ready(service),Err(e)=>ModelState::Failed(e)}},Err(e)=>*slot=ModelState::Failed(e)}}}

@@ -19,12 +19,17 @@ fn write_atomic(target:&Path,text:&str)->R<()> {
         if result.is_err(){let _=fs::remove_file(&temp);}return result;
     } Err("no temporary file available".into())
 }
-fn chunks(s:&str)->Vec<(usize,String)>{
-    let a:Vec<char>=s.chars().collect(); let mut out=vec![];let mut start=0;
-    while start<a.len(){let mut end=(start+400).min(a.len());let word=|c:char|c.is_alphanumeric()||c=='_';
-        if end<a.len()&&word(a[end-1])&&word(a[end]) {let mut i=end;while i>start&&word(a[i-1]){i-=1}if i>start{end=i}else{while end<a.len()&&word(a[end]){end+=1}}}
-        out.push((start,a[start..end].iter().collect()));start=end;
-    }out
+fn chunks(s:&str)->impl Iterator<Item=(usize,&str)> {
+ let mut rest=s;let mut offset=0usize;
+ std::iter::from_fn(move || {
+  if rest.is_empty(){return None} let mut it=rest.char_indices().peekable();let mut count=0;let mut end=rest.len();let mut last_break=(0,0);let mut last_word=false;
+  let word=|c:char|c.is_alphanumeric()||c=='_';
+  while count<400 {match it.next(){Some((i,c))=>{count+=1;last_word=word(c);end=i+c.len_utf8();if !last_word{last_break=(end,count)}},None=>break}}
+  if count==400&&last_word&&it.peek().is_some_and(|(_,c)|word(*c)) {
+   if last_break.0>0{(end,count)=last_break}else{while let Some(&(i,c))=it.peek(){if !word(c){break}it.next();end=i+c.len_utf8();count+=1;}}
+  }
+  let result=(offset,&rest[..end]);rest=&rest[end..];offset+=count;Some(result)
+ })
 }
 fn recover(conn:&mut Connection,root:&Path)->R<()> {
     let pending={let mut s=conn.prepare("SELECT object_id,title,text FROM note_journal")?;let rows=s.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?; rows.collect::<Result<Vec<_>,_>>()?};
@@ -252,6 +257,12 @@ pub fn run()->R<()>{let args:Vec<String>=env::args().collect();println!("{}",exe
 #[cfg(test)]
 mod tests {
  use super::*;
+ #[test] fn streaming_chunks_match_previous_algorithm() {
+  fn previous(s:&str)->Vec<(usize,String)>{let a:Vec<char>=s.chars().collect();let mut out=vec![];let mut start=0;while start<a.len(){let mut end=(start+400).min(a.len());let word=|c:char|c.is_alphanumeric()||c=='_';if end<a.len()&&word(a[end-1])&&word(a[end]){let mut i=end;while i>start&&word(a[i-1]){i-=1}if i>start{end=i}else{while end<a.len()&&word(a[end]){end+=1}}}out.push((start,a[start..end].iter().collect()));start=end;}out}
+  let cases=vec![String::new(),"я".repeat(399),"я".repeat(400),"я".repeat(401),"слово_тест💻 ".repeat(100),format!("{} {} {}", "x".repeat(399),"я".repeat(1200),"конец"),format!("{} aя", "x".repeat(398))];
+  for input in cases {let expected=previous(&input);let actual:Vec<_>=chunks(&input).map(|(offset,text)|(offset,text.to_owned())).collect();assert_eq!(actual,expected,"input length {}",input.len());}
+ }
+
  #[test] fn pair_key_preserves_commas_in_ids() { assert_eq!(pair_key("x,y", "z").unwrap(), "[\"x,y\", \"z\"]"); }
  #[test] fn stale_temporary_file_does_not_block_write() {
   let dir=std::env::temp_dir().join(format!("atlas-stale-test-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
