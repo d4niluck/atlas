@@ -18,4 +18,6 @@ atlas-faiss-probe={path="../atlas-faiss-rust"}
 atlas-joined-probe={path="../atlas-joined-probe"}
 atlas-llama-probe={path="../atlas-llama-rust"}
 [features]
+default=["protected-external"]
+protected-external=[]
 test-hook=["atlas-native-storage-contract/test-hook","atlas-joined-probe/test-hook","atlas-sqlcipher-proof/test-hook"]

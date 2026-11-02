@@ -6,3 +6,14 @@ fn save(root:&Path,entries:&[Value])->R<()> {use std::{io::Write,os::unix::fs::O
 pub fn entries(root:&Path)->R<Vec<Value>> {let _guard=lock().lock().map_err(|_|"registry unavailable")?;load(root)}
 pub fn register(root:&Path,id:&str,name:&str,identity:&str)->R<()> {let _guard=lock().lock().map_err(|_|"registry unavailable")?;let mut entries=load(root)?;if let Some(entry)=entries.iter_mut().find(|e|e["id"]==id){if entry["identity"]!=identity{return Err("Выбрано другое пространство".into())}entry["name"]=json!(name)}else{if entries.iter().any(|e|e["identity"]==identity){return Err("Пространство уже добавлено; откройте существующую запись".into())}entries.push(json!({"id":id,"name":name,"identity":identity}))}save(root,&entries)}
 pub fn forget(root:&Path,id:&str)->R<bool>{let _guard=lock().lock().map_err(|_|"registry unavailable")?;let mut entries=load(root)?;let old=entries.len();entries.retain(|entry|entry["id"]!=id);if old!=entries.len(){save(root,&entries)?;Ok(true)}else{Ok(false)}}
+#[cfg(any(feature="test-hook",feature="protected-external"))]
+pub fn register_protected(root:&Path,id:&str,name:&str,identity:&str)->R<()> {
+ let _guard=lock().lock().map_err(|_|"registry unavailable")?;let mut entries=load(root)?;
+ if let Some(entry)=entries.iter_mut().find(|entry|entry["id"]==id) {
+  if entry["identity"]!=identity||entry["protected"]!=true{return Err("Выбрано другое пространство".into())}entry["name"]=json!(name);
+ } else {
+  if entries.iter().any(|entry|entry["identity"]==identity){return Err("Пространство уже добавлено; откройте существующую запись".into())}
+  entries.push(json!({"id":id,"name":name,"identity":identity,"protected":true}));
+ }
+ save(root,&entries)
+}
