@@ -32,7 +32,7 @@ RUN git clone --depth 1 --branch b12001 https://github.com/ggml-org/llama.cpp.gi
 # Immutable PDFium release, verified against the exact file tested on Ubuntu.
 RUN curl -fsSL --retry 3 -o pdfium.tgz 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/pdfium-linux-x64.tgz' \
  && echo 'e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659  pdfium.tgz' | sha256sum -c - \
- && mkdir pdfium && tar -xzf pdfium.tgz -C pdfium
+ && mkdir pdfium && python3 -c 'import tarfile; tarfile.open("pdfium.tgz", "r:gz").extractall("pdfium", filter="data")'
 COPY . /src/
 WORKDIR /src/ui
 RUN npm ci --no-audit --no-fund && npm run build
