@@ -25,7 +25,7 @@ RUN git clone --depth 1 --branch b12001 https://github.com/ggml-org/llama.cpp.gi
  && test "$(git -C llama rev-parse HEAD)" = eb4e244be77a906a183cd4a00fd51d9ad3200955 \
  && cmake -S llama -B llama-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DGGML_NATIVE=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON \
-    -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
+    -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON \
  && cmake --build llama-build --target llama-server -j "$BUILD_JOBS"
 # Immutable PDFium release, verified against the exact file tested on Ubuntu.
