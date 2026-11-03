@@ -103,3 +103,5 @@
 @media(max-width: 480px) { .app > .processing { padding: 5px 8px; } .app > .processing .processing-details { max-width: none; } .app > .processing .processing-filename { max-width: 45vw; } }
 
 .model-download-button{background:#4f3b67;color:#fff;border:1px solid #806e98;border-radius:8px;padding:8px 12px;margin:8px 0;cursor:pointer}:root[data-theme=light] .model-download-button{background:#e9ddf5;color:#30213e;border-color:#bfa9d4}.model-download-button:focus-visible{outline:3px solid #ac8ed2;outline-offset:2px}
+
+.trash-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
