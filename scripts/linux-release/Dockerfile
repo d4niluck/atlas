@@ -60,7 +60,6 @@ RUN set -eu; \
  cp /build/llama/LICENSE "$res/licenses/llama/"; \
  cp /build/pdfium/LICENSE "$res/licenses/pdfium/"; \
  cp -a /build/pdfium/licenses/. "$res/licenses/pdfium/"; \
- ln -s Atlas "$out/lib/atlas"; \
  printf 'Atlas commit: %s\nUbuntu snapshot: %s\nFAISS: 75c755c5a1fc854756aaf3bd1131213aeb21d8d1\nllama.cpp: eb4e244be77a906a183cd4a00fd51d9ad3200955\nPDFium: 158.0.8125.0 (SHA-256 e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659)\n' "$SOURCE_COMMIT" "$APT_SNAPSHOT" > "$out/BUILD-INFO.txt"; \
  rustc --version >> "$out/BUILD-INFO.txt"; node --version >> "$out/BUILD-INFO.txt"; \
  dpkg-query -W -f='${Package} ${Version}\n' | LC_ALL=C sort > "$out/BUILD-PACKAGES.txt"; \
