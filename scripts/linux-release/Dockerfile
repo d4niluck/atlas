@@ -3,7 +3,6 @@
 FROM --platform=linux/amd64 ubuntu@sha256:157dc3d6e4a3e4f2c68d12df9df9ed6e808b59af6d4c3757b432b4f519916725 AS builder
 ARG APT_SNAPSHOT=20261103T000000Z
 ARG BUILD_JOBS=2
-ARG SOURCE_COMMIT=unknown
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get -o APT::Update::Error-Mode=any update \
  && apt-get install -y --no-install-recommends ca-certificates \
@@ -41,6 +40,7 @@ RUN mkdir -p ui/src-tauri/resources \
  && LIBRARY_PATH=/build/faiss-build/faiss CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path native/atlas-native-http/Cargo.toml \
  && CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path native/atlas-native-proxy/Cargo.toml \
  && CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path ui/src-tauri/Cargo.toml
+ARG SOURCE_COMMIT=unknown
 RUN set -eu; \
  out=/out/Atlas; res="$out/lib/Atlas/resources"; \
  mkdir -p "$out/bin" "$res/llama" "$res/ui" "$res/licenses/faiss" "$res/licenses/llama" "$res/licenses/pdfium"; \
