@@ -20,7 +20,7 @@ docker buildx build --platform linux/amd64 --progress plain \
   --build-arg "SOURCE_COMMIT=$commit" --build-arg BUILD_JOBS=2 \
   --file "$dockerfile" --output "type=local,dest=$work/result" "$work/context"
 printf 'Packaging...\n'
-tar -C "$work/result" -czf "$work/atlas.tar.gz" Atlas
+COPYFILE_DISABLE=1 tar -C "$work/result" -czf "$work/atlas.tar.gz" Atlas
 # Hard-link within one directory gives exclusive publication, without replacing another file.
 ln "$work/atlas.tar.gz" "$output"
 printf 'Created %s\n' "$output"
