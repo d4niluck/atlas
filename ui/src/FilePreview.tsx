@@ -54,7 +54,7 @@ export function PdfPreview({url, title, search}: {url:string; title:string; sear
     void locatePdfFragment(document,search.text,search.start,()=>searchSequence.current!==seq,
       (p,n)=>setSearchStatus(`Ищем страницу в PDF… ${p} / ${n}`))
       .then(found=>{if(searchSequence.current!==seq)return;if(!found){setSearchStatus('Не удалось найти страницу фрагмента.');return;}setMatch(found);setPage(found.page);setSearchStatus(found.ambiguous?(found.partial?'Найдено несколько частичных совпадений; проверьте страницу.':'Найдено несколько совпадений; показана ближайшая страница.'):found.partial?'Найдено частичное совпадение; проверьте страницу.':'');})
-      .catch(()=>{if(searchSequence.current===seq)setSearchStatus('Не удалось найти страницу фрагмента.');});
+      .catch(()=>{if(searchSequence.current===seq)setSearchStatus('Не удалось прочитать PDF. Попробуйте открыть файл заново.');});
     return()=>{searchSequence.current++};
   },[document,search]);
   useEffect(() => {

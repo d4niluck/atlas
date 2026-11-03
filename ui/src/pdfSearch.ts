@@ -9,7 +9,7 @@ export function pdfAnchors(value:string):string[] {
 }
 type TextItem={str:string;transform:number[];width:number;height:number;hasEOL?:boolean};
 export type PdfTextItem=TextItem;
-type PdfDocument={numPages:number;getPage:(page:number)=>Promise<{getTextContent:()=>Promise<{items:unknown[]}>}>};
+type PdfDocument={numPages:number;getPage:(page:number)=>Promise<{isPureXfa?:boolean;streamTextContent:()=>ReadableStream<{items:unknown[]}>}>};
 export type PdfMatch={page:number;items:TextItem[];matches:number[];score:number;offset:number;ambiguous:boolean;partial:boolean};
 /** Asynchronous per-page extraction; stale requests are cancelled by caller. */
 export async function locatePdfFragment(pdf:PdfDocument,text:string,targetOffset:number|null,cancelled:()=>boolean,progress:(page:number,total:number)=>void):Promise<PdfMatch|null> {
@@ -19,8 +19,14 @@ export async function locatePdfFragment(pdf:PdfDocument,text:string,targetOffset
  for(let page=1;page<=pdf.numPages;page++){
   if(cancelled())return null;
   const obj=await pdf.getPage(page);if(cancelled())return null;
-  const content=await obj.getTextContent();if(cancelled())return null;
-  const items=content.items.filter((v):v is TextItem=>typeof (v as TextItem).str==='string');
+  // XFA forms do not provide PDF text geometry; never guess a destination.
+  if(obj.isPureXfa)return null;
+  // Older macOS WKWebView does not provide ReadableStream async iteration,
+  // which PDF.js getTextContent() uses internally. Read via the standard reader.
+  const reader=obj.streamTextContent().getReader();const items:TextItem[]=[];let completed=false;
+  try {while(!cancelled()){const part=await reader.read();if(part.done){completed=true;break}for(const value of part.value.items)if(typeof (value as TextItem).str==='string')items.push(value as TextItem)}}
+  finally {if(!completed)try{await reader.cancel()}catch{}reader.releaseLock()}
+  if(cancelled())return null;
   const pieces=items.map(item=>normalizePdfText(item.str));const joined=pieces.join('');const positions:number[]=[];
   const pageLength=items.reduce((s,item)=>s+Array.from(item.str).length+(item.hasEOL?1:0),0);
   const preferred=targetOffset===null?0:Math.max(0,targetOffset-offset)*(joined.length/Math.max(1,pageLength));
