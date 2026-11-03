@@ -4,7 +4,7 @@ import argparse, json, os, pathlib, signal, subprocess, tempfile, time, shutil
 from urllib.request import Request,urlopen,install_opener,build_opener,ProxyHandler
 from urllib.error import HTTPError
 install_opener(build_opener(ProxyHandler({})))
-p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['empty','typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');args=p.parse_args()
 root=pathlib.Path(tempfile.mkdtemp(prefix='atlas-search-contract-'));models=root/'models';models.mkdir();(models/'embeddinggemma-2-q8.gguf').write_bytes(b'fake-encoder-file')
 (models/'gemma-4-e2b-it-q4.gguf').write_bytes(b'fake-llm')
 if args.images:(models/'embeddinggemma-2-mmproj-q8.gguf').write_bytes(b'fake-vision')
@@ -46,7 +46,39 @@ try:
  if 'external' in args.workspace:
   disk=root/'disk';disk.mkdir();cap=ok(200,request('/api/workspaces/authorize',{'operation':'export','path':str(disk)}))['capability'];made=ok(201,request('/api/workspaces/create-external',{'capability':cap,'name':'External','protected':args.workspace=='protected-external','password':password}));wid=ok(200,request('/api/workspaces/attach',{'capability':made['capability'],**({'password':password,'test_protected':True} if args.workspace=='protected-external' else {})}))['id']
  a=ok(201,request('/api/w/'+wid+'/notes',{'title':'Документ индексирования','text':'Индексация заметок работает аккуратно. Уникальныйключ первая запись.'}));b=ok(201,request('/api/w/'+wid+'/notes',{'title':'Вторая заметка','text':'Уникальныйключ вторая запись.'}));aid=a['id'];bid=b['id']
- if args.case=='typo-common':
+ if args.case=='empty':
+  search('semantic','начальная проверка')
+  time.sleep(1)
+  before=log.read_text() if log.exists() else ''
+  empty=ok(201,request('/api/w/'+wid+'/notes',{'title':'Новая заметка','text':''}))['id']
+  board=ok(200,request('/api/w/'+wid+'/board'))
+  ok(200,request('/api/w/'+wid+'/board',board,'PUT'))
+  time.sleep(1.5)
+  search('semantic','повторная проверка')
+  new=log.read_text()[len(before):] if log.exists() else ''
+  assert 'Новая заметка' not in new,('empty note embedded after creation',new)
+  assert empty in ids(search('lexical','Новая заметка')),'empty note title missing from lexical search'
+  ok(200,request('/api/w/'+wid+'/notes/'+empty,{'title':'Важная тема','text':'Особенный текст для проверки'},'PUT'))
+  search('semantic','Особенный текст для проверки')
+  deadline=time.monotonic()+10
+  while time.monotonic()<deadline:
+   text=log.read_text() if log.exists() else ''
+   if 'Особенный текст для проверки' in text: break
+   time.sleep(.2)
+  assert 'Особенный текст для проверки' in text,'edited note not indexed'
+  pasted=ok(201,request('/api/w/'+wid+'/notes',{'title':'Новая заметка','text':'Содержимое из буфера 392'}))['id']
+  named=ok(201,request('/api/w/'+wid+'/notes',{'title':'Особый заголовок 675','text':''}))['id']
+  search('semantic','Особый заголовок 675')
+  final=log.read_text() if log.exists() else ''
+  assert 'Содержимое из буфера 392' in final,'pasted note not indexed'
+  assert 'Особый заголовок 675' in final,'named blank note title not indexed'
+  newline=ok(201,request('/api/w/'+wid+'/notes',{'title':'Новая заметка','text':'\n'}))['id']
+  search('semantic','Новое содержимое')
+  final=log.read_text() if log.exists() else ''
+  inputs=[json.loads(row).get('input','') for row in final.splitlines()]
+  assert 'title: none | text: Новая заметка' not in inputs, 'whitespace note encoded'
+  print('PASS empty creation, edit, pasted text, custom title and whitespace')
+ elif args.case=='typo-common':
   special=ok(201,request('/api/w/'+wid+'/notes',{'title':'Целевой','text':'общий орхидея описание'}))['id']
   for n in range(140):ok(201,request('/api/w/'+wid+'/notes',{'title':'Отвлекающий '+str(n),'text':'общий совершенно другой материал '+str(n)}))
   rows=search('lexical','общий орхидия');assert special in ids(rows),'typo candidate is lost when common word has many matches'

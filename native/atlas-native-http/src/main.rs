@@ -283,7 +283,7 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
   }
   Ok((404,json!({"error":"Not found"})))
  })();match run{Ok((status,value))=>{
- if status<300 && method!="GET" && parts.len()>=4 && parts[0..2]==["api","w"] && !parts.ends_with(&["draft"]) && !parts.ends_with(&["search-visibility"]) && !(parts[3]=="note-drafts"&&value["count"].as_u64()==Some(0)) && matches!(parts[3],"notes"|"files"|"objects"|"trash"|"note-drafts") {
+ if status<300 && method!="GET" && parts.len()>=4 && parts[0..2]==["api","w"] && !(method=="POST" && parts[3]=="notes" && prepared.as_ref().and_then(|v|v.as_ref().ok()).is_some_and(|v|v["title"]=="Новая заметка" && v["text"].as_str().is_some_and(|text|text.chars().all(|c|matches!(c,' '| '\t' | '\r' | '\n'))))) && !parts.ends_with(&["draft"]) && !parts.ends_with(&["search-visibility"]) && !(parts[3]=="note-drafts"&&value["count"].as_u64()==Some(0)) && matches!(parts[3],"notes"|"files"|"objects"|"trash"|"note-drafts") {
   if let Some(service)=semantic {let wid=parts[2];let dir=workspace_paths::resolve(root,default,wid);let id=value.get("id").and_then(Value::as_str).or_else(||if parts.len()>=5 && parts[3]!="note-drafts" && !matches!(parts[4],"delete-many"|"restore-many"|"copy"){Some(parts[4])}else{None});let _=service.enqueue(&dir,id);}
  }
  answer(req,status,value)},Err(e) if e.to_string()=="duplicate edge"=>answer(req,409,json!({"error":"Эти карточки уже связаны"})),Err(_) if parts.len()==4 && parts[0..2]==["api","workspaces"] && parts[3]=="protection" =>answer(req,400,json!({"error":"Не удалось изменить защиту пространства. Проверьте доступ к диску и попробуйте снова."})),Err(_)=>answer(req,400,json!({"error":"Invalid request"}))}
@@ -309,7 +309,7 @@ fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  // Downloads must not silently change the running model before settings are applied.
  let default_variant=choice.default_embedding_variant.get_or_init(||if choice.dir.join("embeddinggemma-2.gguf").is_file() && !choice.dir.join("embeddinggemma-2-q8.gguf").is_file(){"bf16"}else{"q8"});
  let mut v=json!({"agentic":false,"model":model,"embedding_variant":*default_variant,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"idle_enabled":true,"idle_minutes":15});
- if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}v
+ if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}if !cfg!(target_os="macos"){v["embedding"]=json!("cpu");v["llm"]=json!("cpu");}v
 }
 fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{
  if !matches!(b["embedding_variant"].as_str(),Some("bf16"|"q8")){return Err("Неизвестная модель поиска".into())}
@@ -461,6 +461,18 @@ mod recovery_contract {
   assert_eq!(app_settings(&choice,&device)["embedding_variant"],"bf16");
   std::fs::write(dir.join("embeddinggemma-2-q8.gguf"),b"new").unwrap();
   assert_eq!(app_settings(&choice,&device)["embedding_variant"],"bf16", "download must not change selection behind running encoder");
+  std::fs::remove_dir_all(dir).unwrap();
+ }
+}
+#[cfg(test)] mod fresh_search_settings_regression {
+ use super::*;
+ #[test] fn agentic_is_off_for_new_install_but_preserves_explicit_user_choice() {
+  let dir=std::env::temp_dir().join(format!("atlas-fresh-settings-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();
+  let choice=ModelChoice{exe:String::new(),dir:dir.clone(),selected:std::sync::Mutex::new("e2b".into()),warning:std::sync::Mutex::new(None),default_embedding_variant:std::sync::OnceLock::new()};
+  let device=device::DeviceSettings::new(dir.clone(),String::new());
+  assert_eq!(app_settings(&choice,&device)["agentic"],false);
+  std::fs::write(dir.join("settings.json"),r#"{"agentic":true}"#).unwrap();
+  assert_eq!(app_settings(&choice,&device)["agentic"],true);
   std::fs::remove_dir_all(dir).unwrap();
  }
 }

@@ -1,4 +1,10 @@
-.editor-top .search-visibility{display:inline-flex;align-items:center;justify-content:center;padding:6px;color:#c9c4d2;background:transparent;border-color:transparent}
-.editor-top .search-visibility[aria-pressed=true]{color:#eadbff;border-color:#796594;background:#443858}
+.editor-top .search-visibility{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:5px 7px;color:#c9c4d2;background:transparent;border:1px solid transparent;font-size:12px;white-space:nowrap}
+.editor-top .search-visibility-track{display:inline-flex;width:27px;height:16px;align-items:center;padding:2px;border-radius:10px;background:#686775;transition:background .15s}
+.editor-top .search-visibility-knob{display:block;width:12px;height:12px;border-radius:50%;background:white;transition:transform .15s}
+.editor-top .search-visibility[aria-checked=true] .search-visibility-track{background:#a383d6}
+.editor-top .search-visibility[aria-checked=true] .search-visibility-knob{transform:translateX(11px)}
 :root[data-theme=light] .editor-top .search-visibility{color:#5f5868;background:transparent;border-color:transparent}
-:root[data-theme=light] .editor-top .search-visibility[aria-pressed=true]{color:#58417a;background:#ede4f8;border-color:#d8c6ec}
+:root[data-theme=light] .editor-top .search-visibility[aria-checked=true] .search-visibility-track{background:#7756a8}
+.board-busy-layer{position:fixed;inset:0;z-index:5;display:grid;place-items:center;background:transparent}
+.board-busy-indicator{opacity:0;animation:board-busy-show 0s .8s forwards;padding:9px 14px;border-radius:9px;background:#302a3d;color:#f2edf8;font-size:13px}
+@keyframes board-busy-show{to{opacity:1}}

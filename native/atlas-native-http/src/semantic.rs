@@ -7,7 +7,7 @@ use sha2::{Digest,Sha256};
 fn source_fingerprint(db:&Connection)->Result<String,String>{
  let mut hash=Sha256::new();
  // Hash all source fields under the workspace lock to detect a commit before enqueue.
- for query in ["SELECT objects.id, objects.title, COALESCE(search_index.body,''), objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id ORDER BY objects.id", "SELECT id,title,path,'' FROM objects WHERE kind='file' ORDER BY id", "SELECT id,CAST(deleted_at AS TEXT),'','' FROM trash ORDER BY id"] {
+ for query in ["SELECT objects.id, objects.title, COALESCE(search_index.body,''), objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE NOT (objects.kind='note' AND objects.title='Новая заметка' AND trim(COALESCE(search_index.body,''), char(9)||char(10)||char(13)||' ')='') ORDER BY objects.id", "SELECT id,title,path,'' FROM objects WHERE kind='file' ORDER BY id", "SELECT id,CAST(deleted_at AS TEXT),'','' FROM trash ORDER BY id"] {
   let mut statement=db.prepare(query).map_err(|e|e.to_string())?;let mut rows=statement.query([]).map_err(|e|e.to_string())?;while let Some(row)=rows.next().map_err(|e|e.to_string())?{for i in 0..4{let value:String=row.get(i).map_err(|e|e.to_string())?;hash.update((value.len() as u64).to_le_bytes());hash.update(value.as_bytes());}}hash.update([0xff]);
  }Ok(format!("{:x}",hash.finalize()))
 }
@@ -78,7 +78,7 @@ impl SemanticService {
    let result=(||->Result<(String,String,String,bool,Option<String>),String>{
     let guard=atlas_native_storage_contract::workspace_lock(&dir).map_err(|e|e.to_string())?;
     let db=Connection::open(dir.join("atlas.sqlite3")).map_err(|e|e.to_string())?;
-    let mut stmt=db.prepare("SELECT objects.id, objects.title, COALESCE(search_index.body,''), objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id ORDER BY objects.id").map_err(|e|e.to_string())?;
+    let mut stmt=db.prepare("SELECT objects.id, objects.title, COALESCE(search_index.body,''), objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE NOT (objects.kind='note' AND objects.title='Новая заметка' AND trim(COALESCE(search_index.body,''), char(9)||char(10)||char(13)||' ')='') ORDER BY objects.id").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     drop(stmt);
     let mut image_stmt=db.prepare("SELECT id,title,path FROM objects WHERE kind='file' ORDER BY id").map_err(|e|e.to_string())?;

@@ -27,3 +27,9 @@
 .rag-model-choice select { max-width: 100%; color: #e8e9ef; background: #24252e; border: 1px solid #666174; border-radius: 6px; padding: .3rem; }
 
 :root[data-theme=light] .rag-model-choice select { color: #292333; background: #f5f0fa; border-color: #81748f; }
+
+/* Keep the answer, its sources and hits in one scrollable reading area. */
+.search-panel > .search-output { flex:1 1 0; min-height:80px; overflow-y:auto; overflow-x:hidden; }
+.search-output > .results { max-height:none; overflow:visible; }
+.rag-answer .markdown-content { overflow-wrap:anywhere; }
+.rag-answer .markdown-content pre { overflow-x:auto; }
