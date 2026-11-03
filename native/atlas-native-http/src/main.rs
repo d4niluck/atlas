@@ -1,3 +1,4 @@
+mod history;
 mod worker_overlay;
 mod stream_metadata;
 mod protected_external_guard;
@@ -22,7 +23,6 @@ mod semantic;
 use std::{env, io::{self, BufRead, Read}};
 use tiny_http::{Header, Response, Server, StatusCode, Request};
 use serde_json::{json,Value};
-use rusqlite::OptionalExtension;
 
 fn valid(headers: &[Header], token: &str) -> bool {
     fn one<'a>(headers: &'a [Header], name: &'static str) -> Result<Option<&'a str>, ()> {
@@ -178,14 +178,8 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
    if resource[2]=="search-text"&&method=="GET" {let value:Option<String>=db.query_row("SELECT search_index.body FROM search_index JOIN objects ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;return Ok((200,json!({"id":id,"text":value.unwrap_or_default()})))}
   }
   if resource==["history"]&&method=="GET" {
-   let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;let mut stmt=db.prepare("SELECT query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic FROM search_history ORDER BY id DESC")?;let mut rows=stmt.query([])?;let mut items=vec![];
-   while let Some(row)=rows.next()? {let query:String=row.get(0)?;let mode:String=row.get(1)?;let raw:String=row.get(2)?;let created_at:f64=row.get(3)?;let scope:Option<String>=row.get(4)?;let known:bool=row.get(5)?;let answer:Option<String>=row.get(6)?;let sources:Option<String>=row.get(7)?;let error:Option<String>=row.get(8)?;let history_agentic:Option<bool>=row.get(9)?;let mut results:Vec<Value>=serde_json::from_str(&raw)?;
-    for result in &mut results {let id=result["id"].as_str().unwrap_or("");let src=db.query_row("SELECT objects.title, COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;let saved=result.get("_source_hash").and_then(Value::as_str).map(str::to_owned);let stale=src.as_ref().map_or(true,|(t,b,d)|saved.as_deref()!=Some(source_hash(t,b,d).as_str())||result["title"].as_str()!=Some(t));result.as_object_mut().ok_or("invalid result")?.remove("_source_hash");result["missing"]=json!(src.is_none());result["stale"]=json!(stale);
-     if let Some(chunks)=result["chunks"].as_array_mut(){for chunk in chunks {let text=src.as_ref().map(|(_,b,d)|if chunk["field"]=="description"{d}else{b});let chars:Vec<char>=text.map(|x|x.chars().collect()).unwrap_or_default();let start=chunk["start"].as_u64().map(|x|x as usize);let end=chunk["end"].as_u64().map(|x|x as usize);let valid=match (start,end){(Some(a),Some(b)) if a<=b&&b<=chars.len()=>chars[a..b].iter().collect::<String>()==chunk["text"].as_str().unwrap_or(""),_=>false};chunk["stale"]=json!(stale||!valid);}}
-    }items.push(json!({"query":query,"mode":mode,"results":results,"created_at":created_at,"order_exact":true,"scope_known":known,"answer":answer,"error":error,"agentic":history_agentic,"sources":sources.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"object_ids":scope.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}));
-   }
-   for item in &mut items {if let Some(sources)=item["sources"].as_array_mut(){for source in sources {let id=source["id"].as_str().unwrap_or("");let found=db.query_row("SELECT COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;let text=found.as_ref().map(|(body,description)|if source["field"]=="description"{description}else{body});let chars:Vec<char>=text.map(|s|s.chars().collect()).unwrap_or_default();let start=source["start"].as_u64().map(|x|x as usize);let end=source["end"].as_u64().map(|x|x as usize);let matches=match (start,end){(Some(a),Some(b)) if a<=b&&b<=chars.len()=>chars[a..b].iter().collect::<String>()==source["text"].as_str().unwrap_or(""),_=>false};source["missing"]=json!(found.is_none());source["stale"]=json!(!matches);}}}
-   return Ok((200,json!({"items":items})))
+   let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;
+   return Ok((200,json!({"items":history::read(&db)?})))
   }
   if resource==["rag","model"]&&method=="POST" {
    if device.restart_only(){return Ok((409,json!({"error":"Не удалось завершить работу модели. Перезапустите Atlas, чтобы повторить загрузку."})))}

@@ -126,15 +126,16 @@ fn history_span_matches(text:&str,offsets:&std::collections::HashMap<usize,usize
  let (Some(start),Some(end))=(span["start"].as_u64().and_then(|v|usize::try_from(v).ok()),span["end"].as_u64().and_then(|v|usize::try_from(v).ok()))else{return false};
  if start>end{return false}let (Some(&a),Some(&b))=(offsets.get(&start),offsets.get(&end))else{return false};text.get(a..b)==span["text"].as_str()
 }
-pub(crate) fn enrich_history(vault:&Vault,mut entries:Vec<Value>)->Result<Vec<Value>,String>{
+pub(crate) fn enrich_history(vault:&Vault,entries:Vec<Value>)->Result<Vec<Value>,String>{enrich_history_with(entries,|id|vault.history_source(id))}
+pub(crate) fn enrich_history_with(mut entries:Vec<Value>,mut load:impl FnMut(&str)->Result<Option<(String,String,String)>,String>)->Result<Vec<Value>,String>{
  // Visit each source once and hold at most one extracted document at a time.
  let mut refs=std::collections::HashMap::<String,Vec<(usize,bool,usize)>>::new();
  for (entry_idx,entry) in entries.iter().enumerate(){
-  for (index,result) in entry["results"].as_array().into_iter().flatten().enumerate(){refs.entry(result["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,false,index));}
-  for (index,source) in entry["sources"].as_array().into_iter().flatten().enumerate(){refs.entry(source["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,true,index));}
+  for (index,result) in entry["results"].as_array().into_iter().flatten().enumerate(){if !result.is_object()||result["chunks"].as_array().is_some_and(|chunks|chunks.iter().any(|chunk|!chunk.is_object())){return Err("invalid history result".into())}refs.entry(result["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,false,index));}
+  for (index,source) in entry["sources"].as_array().into_iter().flatten().enumerate(){if !source.is_object(){return Err("invalid history source".into())}refs.entry(source["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,true,index));}
  }
  for (id,positions) in refs {
-  let current=vault.history_source(&id)?;let hash=current.as_ref().map(|(title,body,description)|super::source_hash(title,body,description));
+  let current=load(&id)?;let hash=current.as_ref().map(|(title,body,description)|super::source_hash(title,body,description));
   let (body,description)=current.as_ref().map(|(_,body,description)|(body.as_str(),description.as_str())).unwrap_or(("",""));
   let mut body_points=Vec::new();let mut description_points=Vec::new();
   let mut collect=|span:&Value|{let points=if span["field"]=="description"{&mut description_points}else{&mut body_points};for field in ["start","end"]{if let Some(v)=span[field].as_u64().and_then(|v|usize::try_from(v).ok()){points.push(v)}}};

@@ -30,3 +30,6 @@
   flex: none;
   white-space: nowrap;
 }
+
+.search-panel .history-retry { color:#eeeaf4; background:#30313a; border:1px solid #696574; border-radius:8px; padding:7px 12px; }
+:root[data-theme=light] .search-panel .history-retry { color:#302b36; background:#f0edf3; border-color:#9d96a5; }

@@ -12,16 +12,20 @@ export function historyPreview(mode: Entry['mode'], answer?: string) {
 export function SearchHistory({prefix, revision, onSelect}: {prefix: string; revision: number; onSelect: (entry: Entry) => void}) {
   const [items, setItems] = useState<Entry[]>([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     setError('');
+    setLoading(true);
     fetch(prefix + '/history').then(response => {
       if (!response.ok) throw new Error('Не удалось загрузить историю');
       return response.json() as Promise<{items: Entry[]}>;
-    }).then(data => {if (active) setItems(data.items)}).catch(() => {if (active) setError('Не удалось загрузить историю')});
+    }).then(data => {if (active) setItems(data.items)}).catch(() => {if (active) setError('Не удалось загрузить историю')}).finally(() => {if (active) setLoading(false)});
     return () => {active = false};
-  }, [prefix, revision]);
-  if (error) return <p role="alert">{error}</p>;
+  }, [prefix, revision, attempt]);
+  if (error) return <div role="alert"><p>{error}</p><button className="history-retry" type="button" onClick={() => setAttempt(value => value + 1)}>Повторить</button></div>;
+  if (loading) return <p role="status">Загружаем историю…</p>;
   if (!items.length) return <p>История пуста</p>;
   return <div className="results">{items.map((item, index) => <button className="result history-entry" key={`${item.created_at}-${index}`} onClick={() => onSelect(item)} title={`Открыть ответ и результаты: ${countHistoryResults(item.results)}`}><strong>{item.query}</strong><span className="history-detail"><span className="history-preview">{historyPreview(item.mode, item.answer)}</span><span className="history-count">Результатов: {countHistoryResults(item.results)}</span></span></button>)}</div>;
 }
