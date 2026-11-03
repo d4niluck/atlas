@@ -1,0 +1,4 @@
+.editor-top .search-visibility{display:inline-flex;align-items:center;justify-content:center;padding:6px;color:#c9c4d2;background:transparent;border-color:transparent}
+.editor-top .search-visibility[aria-pressed=true]{color:#eadbff;border-color:#796594;background:#443858}
+:root[data-theme=light] .editor-top .search-visibility{color:#5f5868;background:transparent;border-color:transparent}
+:root[data-theme=light] .editor-top .search-visibility[aria-pressed=true]{color:#58417a;background:#ede4f8;border-color:#d8c6ec}

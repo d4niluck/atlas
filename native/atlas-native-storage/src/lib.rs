@@ -1,4 +1,5 @@
 pub mod pdf;
+pub mod search;
 mod snapshot;
 pub use snapshot::{snapshot_workspace,snapshot_workspace_named,publish_snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -152,11 +153,28 @@ fn board_from_db(conn:&Connection)->R<Value>{
    let mut b:Value=serde_json::from_str(saved.as_deref().unwrap_or("{\"objects\":[],\"edges\":[],\"stacks\":[]}"))?;
    let positions:HashMap<String,Value>=b["objects"].as_array().ok_or("invalid board")?.iter().filter_map(|o|o["id"].as_str().map(|id|(id.to_owned(),o.clone()))).collect();
    let mut stmt=conn.prepare("SELECT id,title,kind,text_status FROM objects WHERE id NOT IN (SELECT id FROM trash) ORDER BY rowid")?;
-   let objects=stmt.query_map([],|r|{let id:String=r.get(0)?;let p=positions.get(&id);Ok(json!({"id":id,"title":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"text_status":r.get::<_,Option<String>>(3)?,"x":p.and_then(|v|v.get("x")).cloned().unwrap_or(json!(0)),"y":p.and_then(|v|v.get("y")).cloned().unwrap_or(json!(0)),"imageExpanded":p.and_then(|v|v.get("imageExpanded")).and_then(Value::as_bool).unwrap_or(false)}))})?.collect::<Result<Vec<_>,_>>()?;
+   let objects=stmt.query_map([],|r|{let id:String=r.get(0)?;let p=positions.get(&id);Ok(json!({"id":id,"title":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"text_status":r.get::<_,Option<String>>(3)?,"x":p.and_then(|v|v.get("x")).cloned().unwrap_or(json!(0)),"y":p.and_then(|v|v.get("y")).cloned().unwrap_or(json!(0)),"imageExpanded":p.and_then(|v|v.get("imageExpanded")).and_then(Value::as_bool).unwrap_or(false),"searchExcluded":p.and_then(|v|v.get("searchExcluded")).and_then(Value::as_bool).unwrap_or(false)}))})?.collect::<Result<Vec<_>,_>>()?;
    let ids:HashSet<&str>=objects.iter().filter_map(|o|o["id"].as_str()).collect();
    let edges:Vec<Value>=b["edges"].as_array().ok_or("invalid edges")?.iter().filter(|e|e["from"].as_str().is_some_and(|s|ids.contains(s))&&e["to"].as_str().is_some_and(|s|ids.contains(s))).cloned().collect();
    let stacks:Vec<Value>=b["stacks"].as_array().ok_or("invalid stacks")?.iter().map(|s|{let mut s=s.clone();let members=s["ids"].as_array().map(|v|v.iter().filter(|x|x.as_str().is_some_and(|id|ids.contains(id))).cloned().collect::<Vec<_>>()).unwrap_or_default();s["ids"]=json!(members);s}).collect();
    b["objects"]=json!(objects);b["edges"]=json!(edges);b["stacks"]=json!(stacks);Ok(b)
+}
+/// Resolve the default search scope before limiting search results. Explicit scopes bypass exclusions.
+pub fn search_scope(root:&Path,ids:Option<Vec<String>>)->R<Option<Vec<String>>>{
+ if ids.is_some(){return Ok(ids)}
+ let conn=Connection::open(root.join("atlas.sqlite3"))?;
+ let board=board_from_db(&conn)?;
+ let objects=board["objects"].as_array().ok_or("invalid board")?;if !objects.iter().any(|o|o["searchExcluded"]==true){return Ok(None)}
+ Ok(Some(objects.iter().filter(|o|o["searchExcluded"]!=true).filter_map(|o|o["id"].as_str().map(str::to_owned)).collect()))
+}
+pub fn search_visibility(root:&Path,id:&str,excluded:Option<bool>)->R<bool>{
+ let mut conn=Connection::open(root.join("atlas.sqlite3"))?;
+ let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+ let mut board=board_from_db(&tx)?;
+ let object=board["objects"].as_array_mut().ok_or("invalid board")?.iter_mut().find(|o|o["id"]==id).ok_or("object missing")?;
+ let current=object["searchExcluded"].as_bool().unwrap_or(false);
+ if let Some(value)=excluded {object["searchExcluded"]=json!(value);tx.execute("INSERT OR REPLACE INTO board(id,data) VALUES(1,?)",[serde_json::to_string(&board)?])?;}
+ tx.commit()?;Ok(excluded.unwrap_or(current))
 }
 fn revision(conn:&Connection,root:&Path,id:&str,only_file:bool)->R<String>{
  use sha2::{Digest,Sha256};use std::io::Read;use std::os::unix::fs::MetadataExt;
@@ -245,8 +263,9 @@ pub fn execute(a:&[String])->R<Value>{
  "purge-trash"=>{purge_trash(root)?;return Ok(json!({"ok":true}))},
  "create-note"=>{let title=a.get(3).ok_or("missing title")?;let text=a.get(4).ok_or("missing text")?;let id=uuid::Uuid::new_v4().to_string();let path=format!("notes/{id}.md");let target=safe_path(root,&path)?;write_atomic(&target,text)?;
  let result=(||->R<()>{let tx=conn.transaction()?;tx.execute("INSERT INTO objects(id,kind,title,path) VALUES(?,'note',?,?)",params![id,title,path])?;tx.execute("INSERT INTO search_index(object_id,title,body) VALUES(?,?,?)",params![id,title,text])?;tx.execute("INSERT INTO search_chunks(object_id,start,field,content) VALUES(?,-1,'title',?)",params![id,title])?;for (start,part) in chunks(text){tx.execute("INSERT INTO search_chunks(object_id,start,field,content) VALUES(?,?,'body',?)",params![id,start as i64,part])?;}tx.commit()?;Ok(())})();if let Err(e)=result{fs::remove_file(target)?;return Err(e)}return Ok(json!({"id":id}));},
- "put-board"=>{let board:Value=serde_json::from_str(a.get(3).ok_or("missing board")?)?;for key in ["objects","edges","stacks"] {if !board[key].is_array(){return Err("invalid board".into())}}
+ "put-board"=>{let mut board:Value=serde_json::from_str(a.get(3).ok_or("missing board")?)?;for key in ["objects","edges","stacks"] {if !board[key].is_array(){return Err("invalid board".into())}}
  let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;validate_edges(&tx,board["edges"].as_array().unwrap())?;
+ let previous=board_from_db(&tx)?;for object in board["objects"].as_array_mut().unwrap(){if let Some(old)=previous["objects"].as_array().and_then(|a|a.iter().find(|v|v["id"]==object["id"])){object["searchExcluded"]=old["searchExcluded"].clone();}else{object["searchExcluded"]=json!(false);}}
  tx.execute("INSERT OR REPLACE INTO board(id,data) VALUES(1,?)",[serde_json::to_string(&board)?])?;tx.commit()?;return Ok(json!({"ok":true}));},
  "recover-note-drafts"=>{return Ok(json!({"count":recover_note_drafts(root)?}));},
  "save-note-draft"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?;save_note_draft(root,id,title,text)?;return Ok(json!({"ok":true}));},
@@ -296,3 +315,16 @@ pub fn list_note_drafts(root:&Path)->R<Vec<(String,String,String)>>{let db=file_
 pub fn recover_note_drafts(root:&Path)->R<usize>{let drafts=list_note_drafts(root)?;let mut count=0;for (id,title,text) in drafts{execute(&["atlas".into(),"update-note".into(),root.to_string_lossy().into_owned(),id.clone(),title.clone(),text.clone()])?;clear_note_draft(root,&id,&title,&text)?;count+=1;}Ok(count)}
 
 pub fn has_note_drafts(root:&Path)->R<bool>{let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(false)}Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM note_drafts JOIN objects ON objects.id=note_drafts.object_id WHERE objects.id NOT IN (SELECT id FROM trash))",[],|r|r.get(0))?)}
+#[cfg(test)] mod search_visibility_tests {
+ use super::*;
+ #[test] fn excluded_is_preserved_by_stale_board_and_restored_after_trash(){
+  let root=std::env::temp_dir().join(format!("atlas-visibility-{}",uuid::Uuid::new_v4()));create_workspace(&root).unwrap();
+  let args=|action:&str,more:Vec<String>| {let mut a=vec!["atlas".into(),action.into(),root.to_string_lossy().into_owned()];a.extend(more);execute(&a).unwrap()};
+  let id=args("create-note",vec!["Title".into(),"alpha".into()])["id"].as_str().unwrap().to_owned();
+  let old=args("get-board",vec![]);assert!(!search_visibility(&root,&id,None).unwrap());
+  assert!(search_visibility(&root,&id,Some(true)).unwrap());assert!(search_scope(&root,None).unwrap().unwrap().is_empty());assert_eq!(search_scope(&root,Some(vec![id.clone()])).unwrap(),Some(vec![id.clone()]));
+  args("put-board",vec![old.to_string()]);assert!(search_visibility(&root,&id,None).unwrap());
+  delete_objects(&root,&[id.clone()]).unwrap();let board=args("get-board",vec![]);args("put-board",vec![board.to_string()]);restore_objects(&root,&[id.clone()]).unwrap();assert!(search_visibility(&root,&id,None).unwrap());
+  assert!(!search_visibility(&root,&id,Some(false)).unwrap());assert_eq!(search_scope(&root,None).unwrap(),None);fs::remove_dir_all(root).unwrap();
+ }
+}
