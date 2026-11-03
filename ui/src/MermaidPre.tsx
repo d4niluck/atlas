@@ -45,6 +45,13 @@ function MermaidDiagram({source}: {source:string}) {
 
 /** Only fenced Mermaid blocks are rendered; all other Markdown code stays unchanged. */
 export function MarkdownPre({children, node: _node, ...props}:React.HTMLAttributes<HTMLPreElement> & {node?:unknown}) {
+ if (isValidElement<{className?:string;children?:React.ReactNode; 'data-atlas-search-range'?:string}>(children)) {
+  const range=children.props['data-atlas-search-range']?.match(/^(\d+):(\d+)$/);
+  if(range && typeof children.props.children==='string') {
+   const source=children.props.children;const start=Number(range[1]),end=Number(range[2]);
+   return <pre {...props}><code className={children.props.className}>{source.slice(0,start)}<mark>{source.slice(start,end)}</mark>{source.slice(end)}</code></pre>;
+  }
+ }
  if (isValidElement<{className?:string;children?:React.ReactNode}>(children) && /(?:^|\s)language-mermaid(?:\s|$)/i.test(children.props.className || '')) {
   return <MermaidDiagram source={String(children.props.children || '').replace(/\n$/, '')}/>;
  }

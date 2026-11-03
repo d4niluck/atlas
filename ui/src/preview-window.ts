@@ -4,15 +4,17 @@ export async function readPreviewWindow(response: Response, around = 0): Promise
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Не удалось прочитать файл');
   const decoder = new TextDecoder('utf-8', {fatal:true});
-  let position = 0, text = '', truncated = false;
+  let position = 0, text = '', head = '', truncated = false;
   while (true) {
     const part = await reader.read();
     const decoded = part.done ? decoder.decode() : decoder.decode(part.value, {stream:true});
-    const start = Math.max(0, offset - position), end = Math.min(decoded.length, offset + limit - position);
-    if (end > start) text += decoded.slice(start, end);
-    position += decoded.length;
+    const chars = Array.from(decoded);
+    if (position < limit) head += chars.slice(0,limit-position).join('');
+    const start = Math.max(0, offset - position), end = Math.min(chars.length, offset + limit - position);
+    if (end > start) text += chars.slice(start, end).join('');
+    position += chars.length;
     if (position > offset + limit) { truncated = true; await reader.cancel(); break; }
-    if (part.done) break;
+    if (part.done) { if(position<=limit)return {text:head, offset:0, truncated:false}; break; }
   }
   return {text, offset, truncated: truncated || offset > 0};
 }
