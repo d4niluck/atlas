@@ -1,3 +1,4 @@
+mod worker_overlay;
 mod stream_metadata;
 mod protected_external_guard;
 #[cfg(any(test,feature="test-hook",feature="protected-external"))]
@@ -291,7 +292,7 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
  }
  answer(req,status,value)},Err(e) if e.to_string()=="duplicate edge"=>answer(req,409,json!({"error":"Эти карточки уже связаны"})),Err(_) if parts.len()==4 && parts[0..2]==["api","workspaces"] && parts[3]=="protection" =>answer(req,400,json!({"error":"Не удалось изменить защиту пространства. Проверьте доступ к диску и попробуйте снова."})),Err(_)=>answer(req,400,json!({"error":"Invalid request"}))}
 }
-struct ModelChoice {exe:String,dir:std::path::PathBuf,selected:std::sync::Mutex<String>,warning:std::sync::Mutex<Option<String>>}
+struct ModelChoice {exe:String,dir:std::path::PathBuf,selected:std::sync::Mutex<String>,warning:std::sync::Mutex<Option<String>>,default_embedding_variant:std::sync::OnceLock<&'static str>}
 fn exclude_image_chunks(mut rows:Vec<Value>)->Vec<Value>{
  rows.retain_mut(|row|{let title=row["title"].as_str().unwrap_or("").to_ascii_lowercase();let image=[".png",".jpg",".jpeg",".gif",".webp",".bmp",".tif",".tiff"].iter().any(|suffix|title.ends_with(suffix));if let Some(chunks)=row["chunks"].as_array_mut(){let had_image=chunks.iter().any(|c|c["field"]=="image");chunks.retain(|c|c["field"]!="image");if image {chunks.iter().any(|c|c["field"]=="description"&&c["text"].as_str().is_some_and(|s|!s.trim().is_empty()))}else{!had_image||!chunks.is_empty()}}else{!image}});rows
 }
@@ -309,9 +310,10 @@ enum RagState { Disabled, Loading, Ready(std::sync::Arc<rag_model::RagModel>), F
 enum ModelState { Disabled, Loading, Ready(semantic::SemanticService), Failed(String) }
 fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
- let mut v=json!({"agentic":false,"model":model,"embedding_variant":"q8","embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"idle_enabled":true,"idle_minutes":15});
- if choice.dir.join("embeddinggemma-2.gguf").is_file() && !choice.dir.join("embeddinggemma-2-q8.gguf").is_file(){v["embedding_variant"]=json!("bf16");}
- if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}else if choice.dir.join("embeddinggemma-2.gguf").is_file() && !choice.dir.join("embeddinggemma-2-q8.gguf").is_file(){v["embedding_variant"]=json!("bf16");}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}v
+ // Downloads must not silently change the running model before settings are applied.
+ let default_variant=choice.default_embedding_variant.get_or_init(||if choice.dir.join("embeddinggemma-2.gguf").is_file() && !choice.dir.join("embeddinggemma-2-q8.gguf").is_file(){"bf16"}else{"q8"});
+ let mut v=json!({"agentic":false,"model":model,"embedding_variant":*default_variant,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"idle_enabled":true,"idle_minutes":15});
+ if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}v
 }
 fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{
  if !matches!(b["embedding_variant"].as_str(),Some("bf16"|"q8")){return Err("Неизвестная модель поиска".into())}
@@ -385,7 +387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  let token=io::stdin().lock().lines().next().ok_or("missing token")??;if token.is_empty(){return Err("empty token".into())}
  let semantic=std::sync::Arc::new(std::sync::Mutex::new(ModelState::Disabled));
  let rag=std::sync::Arc::new(std::sync::Mutex::new(RagState::Disabled));
- let initial=args.iter().position(|v|v=="--rag-model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).or_else(||args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from)).unwrap_or_default();let model_dir=args.iter().position(|v|v=="--rag-model-dir").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).unwrap_or_else(||initial.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());let exe=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned().unwrap_or_default();let selected=std::fs::read_to_string(model_dir.join("settings.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).and_then(|v|v["model"].as_str().map(str::to_owned)).or_else(||std::fs::read_to_string(model_dir.join("rag-choice")).ok()).filter(|v|v=="e2b"||v=="e4b").unwrap_or_else(||"e2b".to_owned());let startup=model_dir.join(if selected=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"});let choice=std::sync::Arc::new(ModelChoice{exe,dir:model_dir,selected:std::sync::Mutex::new(selected),warning:std::sync::Mutex::new(None)});
+ let initial=args.iter().position(|v|v=="--rag-model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).or_else(||args.iter().position(|v|v=="--model-path").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from)).unwrap_or_default();let model_dir=args.iter().position(|v|v=="--rag-model-dir").and_then(|i|args.get(i+1)).map(std::path::PathBuf::from).unwrap_or_else(||initial.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());let exe=args.iter().position(|v|v=="--llama-server").and_then(|i|args.get(i+1)).cloned().unwrap_or_default();let selected=std::fs::read_to_string(model_dir.join("settings.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).and_then(|v|v["model"].as_str().map(str::to_owned)).or_else(||std::fs::read_to_string(model_dir.join("rag-choice")).ok()).filter(|v|v=="e2b"||v=="e4b").unwrap_or_else(||"e2b".to_owned());let startup=model_dir.join(if selected=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"});let choice=std::sync::Arc::new(ModelChoice{exe,dir:model_dir,selected:std::sync::Mutex::new(selected),warning:std::sync::Mutex::new(None),default_embedding_variant:std::sync::OnceLock::new()});
  let device=std::sync::Arc::new(device::DeviceSettings::new(choice.dir.clone(),choice.exe.clone()));
  let startup_device=device.selected_pair();
  let search_config=app_settings(&choice,&device);let use_embedding=search_config["semantic_enabled"]==true||search_config["rag_enabled"]==true;let use_rag=search_config["rag_enabled"]==true;
@@ -450,5 +452,19 @@ mod recovery_contract {
  #[test] fn excludes_visual_matches_but_keeps_descriptions(){
   let rows=vec![json!({"id":"a","chunks":[{"field":"image","text":""}]}),json!({"id":"b","chunks":[{"field":"image","text":""},{"field":"description","text":"кот"}]}),json!({"id":"c","chunks":[{"field":"body","text":"текст"}]})];
   let filtered=exclude_image_chunks(rows);assert_eq!(filtered.len(),2);assert_eq!(filtered[0]["chunks"].as_array().unwrap().len(),1);assert_eq!(filtered[0]["chunks"][0]["field"],"description");let titles=exclude_image_chunks(vec![json!({"id":"x","title":"cat.png","chunks":[]}),json!({"id":"y","title":"cat.png","chunks":[{"field":"description","text":"кот"}]})]);assert_eq!(titles.len(),1);assert_eq!(titles[0]["id"],"y");
+ }
+}
+
+#[cfg(test)] mod variant_migration_regression {
+ use super::*;
+ #[test] fn late_q8_download_does_not_change_active_legacy_selection() {
+  let dir=std::env::temp_dir().join(format!("atlas-variant-migration-{}",uuid::Uuid::new_v4())); std::fs::create_dir(&dir).unwrap();
+  std::fs::write(dir.join("settings.json"),"{}").unwrap();std::fs::write(dir.join("embeddinggemma-2.gguf"),b"old").unwrap();
+  let choice=ModelChoice{exe:String::new(),dir:dir.clone(),selected:std::sync::Mutex::new("e2b".into()),warning:std::sync::Mutex::new(None),default_embedding_variant:std::sync::OnceLock::new()};
+  let device=device::DeviceSettings::new(dir.clone(),String::new());
+  assert_eq!(app_settings(&choice,&device)["embedding_variant"],"bf16");
+  std::fs::write(dir.join("embeddinggemma-2-q8.gguf"),b"new").unwrap();
+  assert_eq!(app_settings(&choice,&device)["embedding_variant"],"bf16", "download must not change selection behind running encoder");
+  std::fs::remove_dir_all(dir).unwrap();
  }
 }

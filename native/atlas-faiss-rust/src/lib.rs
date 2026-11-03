@@ -17,3 +17,5 @@ impl Index {
  #[test] fn roundtrip_and_filter_before_topk(){let mut idx=Index::new().unwrap();let mut a=[0.;512];a[0]=1.;let mut b=[0.;512];b[0]=0.8;b[1]=0.6;let mut c=[0.;512];c[1]=1.;idx.add(&[a,b,c]).unwrap();assert_eq!(idx.search(&a,&[1,2],1).unwrap()[0].0,1);assert!(idx.search(&a,&[],1).unwrap().is_empty());let path=std::env::temp_dir().join(format!("atlas-faiss-probe-{}",std::process::id()));idx.save(&path).unwrap();let restored=Index::load(&path).unwrap();assert_eq!(restored.search(&a,&[0,1,2],2).unwrap().iter().map(|x|x.0).collect::<Vec<_>>(),vec![0,1]);std::fs::remove_file(path).unwrap();}
  #[test] fn python_roundtrip_when_requested(){if std::env::var_os("ATLAS_FAISS_CROSS_TEST").is_none(){return} let index=Index::load(Path::new("/private/tmp/atlas-faiss-python.index")).unwrap();let mut q=[0.;512];q[0]=1.;assert_eq!(index.search(&q,&[0,1],1).unwrap()[0].0,0);index.save(Path::new("/private/tmp/atlas-faiss-rust.index")).unwrap();}
 }
+
+pub mod overlay;

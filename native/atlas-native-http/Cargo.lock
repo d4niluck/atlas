@@ -44,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "atlas-faiss-probe",
  "atlas-llama-probe",
+ "libc",
  "serde_json",
  "sha2",
 ]

@@ -1,3 +1,4 @@
+pub mod protected_overlay;
 mod chunk;
 pub fn worker_chunks(text:&str)->Vec<serde_json::Value>{chunk::chunks(text,1000)}
 use atlas_faiss_probe::Index;
@@ -92,3 +93,5 @@ pub fn search(model:&Encoder,dir:&Path,q:&str,filter:Option<&[&str]>,k:usize)->R
 
 
 }
+
+pub mod overlay_gen;
