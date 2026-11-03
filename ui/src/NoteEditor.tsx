@@ -1,5 +1,5 @@
 import {useEditorResize} from './EditorResize';
-import React, {useState} from 'react';
+import React, {useEffect,useState} from 'react';
 import './control-contrast.css';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -10,11 +10,13 @@ import {MarkdownPre} from './MermaidPre';
 import type {SearchChunk} from './SearchResults';
 import {nextNoteMode} from './note-mode';
 
-type Props={searchControl?:React.ReactNode;title:string;text:string;highlight:SearchChunk|null;onTitle:(value:string)=>void;onText:(value:string)=>void;onClose:()=>void;onFinishEditing:()=>Promise<boolean>;onBlurEditor:()=>void};
-export function NoteEditor({searchControl,title,text,highlight,onTitle,onText,onClose,onFinishEditing,onBlurEditor}:Props){
+type Props={searchJumpRevision:number;searchControl?:React.ReactNode;title:string;text:string;highlight:SearchChunk|null;onTitle:(value:string)=>void;onText:(value:string)=>void;onClose:()=>void;onFinishEditing:()=>Promise<boolean>;onBlurEditor:()=>void};
+export function NoteEditor({searchJumpRevision,searchControl,title,text,highlight,onTitle,onText,onClose,onFinishEditing,onBlurEditor}:Props){
  const [mode,setMode]=useState({expanded:false,editing:false});
  const {expanded,editing}=mode;
  const resizeRef=useEditorResize(expanded);
+ // Keep unsaved text in the editor while revealing the selected passage.
+ useEffect(()=>{setMode(current=>current.editing&&!current.expanded?{...current,expanded:true}:current)},[searchJumpRevision]);
  return <div className="overlay" onClick={onClose}>
   <section ref={resizeRef} tabIndex={0} aria-label="Просмотр. Для изменения размера: Alt Shift и стрелки" className={'editor note-editor'+(expanded?' fullscreen':'')} onBlur={e=>{if(e.relatedTarget&&!e.currentTarget.contains(e.relatedTarget as Node))onBlurEditor()}} style={!expanded?{height:`min(${Number(localStorage.getItem('atlas-editor-height'))||640}px, 85vh)`,width:`min(${Number(localStorage.getItem('atlas-editor-width'))||900}px, 95vw)`}:undefined} onClick={e=>e.stopPropagation()}>
    <div className="editor-top"><div className="editor-meta"><span className="eyebrow">ЗАМЕТКА</span>{searchControl}</div><div>
@@ -26,7 +28,7 @@ export function NoteEditor({searchControl,title,text,highlight,onTitle,onText,on
    <div className={'note-split'+(expanded&&editing?' split-expanded':'')}>
     {editing&&<MarkdownEditor text={text} onChange={onText}/>}
     {(expanded||!editing)&&<div className="note-preview">{expanded&&editing&&<span className="eyebrow">ПРЕДПРОСМОТР</span>}<div className="note-content markdown-content">
-     {highlight?.start!=null&&highlight.end!=null?<MarkdownSearchExcerpt text={text} start={highlight.start} end={highlight.end} components={{a:MarkdownLink,pre:MarkdownPre}}/>:<ReactMarkdown components={{a:MarkdownLink,pre:MarkdownPre}} remarkPlugins={[remarkGfm]}>{text||'Здесь пока пусто.'}</ReactMarkdown>}
+     {highlight?.start!=null&&highlight.end!=null?<MarkdownSearchExcerpt key={searchJumpRevision} text={text} start={highlight.start} end={highlight.end} components={{a:MarkdownLink,pre:MarkdownPre}}/>:<ReactMarkdown components={{a:MarkdownLink,pre:MarkdownPre}} remarkPlugins={[remarkGfm]}>{text||'Здесь пока пусто.'}</ReactMarkdown>}
     </div></div>}
    </div>
 

@@ -10,3 +10,7 @@
 .editor > .note-content { flex:1 1 0; min-height:0; }
 
 .file-preview-overlay{pointer-events:none;background:transparent}.file-preview-overlay .file-editor{pointer-events:auto}
+
+.pdf-page {position:relative;display:table;max-width:100%;}
+.pdf-page canvas {display:block;max-width:100%;height:auto;}
+.pdf-search-highlight {position:absolute;pointer-events:none;opacity:.5;}

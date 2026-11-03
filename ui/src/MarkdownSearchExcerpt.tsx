@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef} from 'react';
 import ReactMarkdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import './search-highlight.css';
 
 // Source offsets are code points; Markdown parser positions use UTF-16 offsets.
 export function MarkdownSearchExcerpt({text, start, end, components}: {text:string;start:number;end:number;components?:Components}) {
@@ -27,5 +28,5 @@ export function MarkdownSearchExcerpt({text, start, end, components}: {text:stri
     };
   },[text,start,end]);
   useEffect(()=>{container.current?.querySelector('mark')?.scrollIntoView({block:'center'})},[text,start,end]);
-  return <div ref={container}><ReactMarkdown components={components} remarkPlugins={[remarkGfm,plugin]}>{text}</ReactMarkdown></div>;
+  return <div ref={container} key={`${start}:${end}`} className="search-highlight"><ReactMarkdown components={components} remarkPlugins={[remarkGfm,plugin]}>{text}</ReactMarkdown></div>;
 }

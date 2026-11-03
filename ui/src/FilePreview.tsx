@@ -4,9 +4,13 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {MarkdownPre} from './MermaidPre';
 import {getDocument, GlobalWorkerOptions} from './pdfCompat';
+import {locatePdfFragment, type PdfMatch} from './pdfSearch';
+import type {SearchChunk} from './SearchResults';
+import {Util} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type {PDFDocumentProxy, RenderTask} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import './file-preview-layout.css';
+import './search-highlight.css';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -26,11 +30,16 @@ export function PlainFilePreview({url, markdown=false}: {url:string; markdown?:b
  return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{value}</pre>}</>;
 }
 
-export function PdfPreview({url, title}: {url:string; title:string}) {
+export function PdfPreview({url, title, search}: {url:string; title:string; search?:SearchChunk|null}) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const viewportRef=useRef<HTMLDivElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [page, setPage] = useState(1);
   const [error, setError] = useState('');
+  const [searchStatus,setSearchStatus]=useState('');
+  const [match,setMatch]=useState<PdfMatch|null>(null);
+  const [rects,setRects]=useState<{x:number;y:number;w:number;h:number}[]>([]);
+  const searchSequence=useRef(0);
   useEffect(() => {
     setDocument(null); setPage(1); setError('');
     const task = getDocument({url});
@@ -38,6 +47,16 @@ export function PdfPreview({url, title}: {url:string; title:string}) {
     task.promise.then(pdf => { if (alive) setDocument(pdf); }).catch(() => { if (alive) setError('Не удалось открыть PDF.'); });
     return () => { alive = false; void task.destroy(); };
   }, [url]);
+  useEffect(()=>{
+    const seq=++searchSequence.current;setMatch(null);setRects([]);
+    if(!document||!search?.text||search.field==='description'){setSearchStatus('');return;}
+    setSearchStatus('Ищем страницу в PDF…');
+    void locatePdfFragment(document,search.text,search.start,()=>searchSequence.current!==seq,
+      (p,n)=>setSearchStatus(`Ищем страницу в PDF… ${p} / ${n}`))
+      .then(found=>{if(searchSequence.current!==seq)return;if(!found){setSearchStatus('Не удалось найти страницу фрагмента.');return;}setMatch(found);setPage(found.page);setSearchStatus(found.ambiguous?(found.partial?'Найдено несколько частичных совпадений; проверьте страницу.':'Найдено несколько совпадений; показана ближайшая страница.'):found.partial?'Найдено частичное совпадение; проверьте страницу.':'');})
+      .catch(()=>{if(searchSequence.current===seq)setSearchStatus('Не удалось найти страницу фрагмента.');});
+    return()=>{searchSequence.current++};
+  },[document,search]);
   useEffect(() => {
     if (!document || !canvas.current) return;
     let alive = true;
@@ -47,15 +66,18 @@ export function PdfPreview({url, title}: {url:string; title:string}) {
       const viewport = pdfPage.getViewport({scale: 1.35});
       const target = canvas.current;
       target.width = viewport.width; target.height = viewport.height;
+      const highlights=match?.page===page?match.matches.map(index=>{const item=match.items[index];const t=Util.transform(viewport.transform,item.transform);const h=Math.hypot(t[2],t[3]);return {x:t[4],y:t[5]-h,w:Math.abs(item.width*viewport.scale),h};}):[];
+      setRects([]);
       renderTask = pdfPage.render({canvas: target, viewport});
-      return renderTask.promise;
+      return renderTask.promise.then(()=>{const box=viewportRef.current;if(!alive||!box||!highlights.length)return;setRects(highlights);const y=target.getBoundingClientRect().top-box.getBoundingClientRect().top+box.scrollTop+highlights[0].y*(target.clientHeight/target.height);box.scrollTop=Math.max(0,y-80)});
     }).catch(() => { if (alive) setError('Не удалось отобразить страницу PDF.'); });
     return () => { alive = false; renderTask?.cancel(); };
-  }, [document, page]);
-  return <div className="pdf-preview" aria-label={title}>
+  }, [document, page, match]);
+  return <div className="pdf-preview" ref={viewportRef} aria-label={title}>
     {error ? <p role="alert">{error}</p> : !document ? <p role="status">Открываем PDF…</p> : <>
-      <div className="pdf-preview-controls"><button aria-label="Предыдущая страница" disabled={page <= 1} onClick={() => setPage(page - 1)}>←</button><span>{page} / {document.numPages}</span><button aria-label="Следующая страница" disabled={page >= document.numPages} onClick={() => setPage(page + 1)}>→</button></div>
-      <canvas ref={canvas}/>
+      <div className="pdf-preview-controls"><button aria-label="Предыдущая страница" disabled={page <= 1} onClick={() => {searchSequence.current++;setMatch(null);setSearchStatus('');setPage(page - 1)}}>←</button><span>{page} / {document.numPages}</span><button aria-label="Следующая страница" disabled={page >= document.numPages} onClick={() => {searchSequence.current++;setMatch(null);setSearchStatus('');setPage(page + 1)}}>→</button></div>
+      {searchStatus&&<p role="status">{searchStatus}</p>}
+      <div className="pdf-page"><canvas ref={canvas}/>{rects.map((rect,index)=><span className="search-highlight-mark pdf-search-highlight" aria-hidden="true" key={`${searchSequence.current}-${index}`} style={{left:`${rect.x/(canvas.current?.width||1)*100}%`,top:`${rect.y/(canvas.current?.height||1)*100}%`,width:`${rect.w/(canvas.current?.width||1)*100}%`,height:`${rect.h/(canvas.current?.height||1)*100}%`}} />)}</div>
     </>}
   </div>;
 }
