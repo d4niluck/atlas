@@ -221,6 +221,16 @@ fn main() {
         match result {Ok(port)=>Ok((c,port)),Err(e)=>{unsafe {libc::kill(-(c.id() as i32),libc::SIGTERM);} let _=c.wait();slot.store(0,Ordering::Relaxed);Err(e)}}
     }
     tauri::Builder::default().setup(|app| {
+        #[cfg(target_os="macos")]
+        {
+            use objc2::{AllocAnyThread, MainThreadMarker};
+            use objc2_app_kit::{NSApplication, NSImage};
+            use objc2_foundation::NSData;
+            let bytes=NSData::with_bytes(include_bytes!("../icons/icon.png"));
+            if let (Some(mtm),Some(image))=(MainThreadMarker::new(),NSImage::initWithData(NSImage::alloc(),&bytes)) {
+                unsafe {NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));}
+            }
+        }
         unsafe {libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t); libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);}
         let resources=app.path().resource_dir()?.join("resources");
         let data=model_data_dir(app.handle()).map_err(std::io::Error::other)?;

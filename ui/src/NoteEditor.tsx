@@ -17,7 +17,7 @@ export function NoteEditor({searchControl,title,text,highlight,onTitle,onText,on
  const resizeRef=useEditorResize(expanded);
  return <div className="overlay" onClick={onClose}>
   <section ref={resizeRef} tabIndex={0} aria-label="Просмотр. Для изменения размера: Alt Shift и стрелки" className={'editor note-editor'+(expanded?' fullscreen':'')} onBlur={e=>{if(e.relatedTarget&&!e.currentTarget.contains(e.relatedTarget as Node))onBlurEditor()}} style={!expanded?{height:`min(${Number(localStorage.getItem('atlas-editor-height'))||640}px, 85vh)`,width:`min(${Number(localStorage.getItem('atlas-editor-width'))||900}px, 95vw)`}:undefined} onClick={e=>e.stopPropagation()}>
-   <div className="editor-top"><div><span className="eyebrow">ЗАМЕТКА</span>{searchControl}</div><div>
+   <div className="editor-top"><div className="editor-meta"><span className="eyebrow">ЗАМЕТКА</span>{searchControl}</div><div>
     <button type="button" onClick={async()=>{if(editing&&!await onFinishEditing())return;setMode(current=>nextNoteMode(current,'toggle-edit'))}}>{editing?'Читать':'Редактировать'}</button>
     <button type="button" onClick={()=>setMode(current=>nextNoteMode(current,'expand'))}>{expanded?'Свернуть':'На весь экран'}</button>
     <button type="button" onClick={onClose} aria-label="Закрыть заметку">×</button>

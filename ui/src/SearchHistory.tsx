@@ -9,17 +9,18 @@ export function countHistoryResults(results: SearchResult[]) {
 export function historyPreview(mode: Entry['mode'], answer?: string) {
   return mode === 'rag' ? `Ответ: ${answer?.trim() || 'нет ответа'}` : mode === 'semantic' ? 'По смыслу' : mode === 'hybrid' ? 'По словам и смыслу' : 'По словам';
 }
-export function SearchHistory({prefix, onSelect}: {prefix: string; onSelect: (entry: Entry) => void}) {
+export function SearchHistory({prefix, revision, onSelect}: {prefix: string; revision: number; onSelect: (entry: Entry) => void}) {
   const [items, setItems] = useState<Entry[]>([]);
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
+    setError('');
     fetch(prefix + '/history').then(response => {
       if (!response.ok) throw new Error('Не удалось загрузить историю');
       return response.json() as Promise<{items: Entry[]}>;
     }).then(data => {if (active) setItems(data.items)}).catch(() => {if (active) setError('Не удалось загрузить историю')});
     return () => {active = false};
-  }, [prefix]);
+  }, [prefix, revision]);
   if (error) return <p role="alert">{error}</p>;
   if (!items.length) return <p>История пуста</p>;
   return <div className="results">{items.map((item, index) => <button className="result history-entry" key={`${item.created_at}-${index}`} onClick={() => onSelect(item)} title={`Открыть ответ и результаты: ${countHistoryResults(item.results)}`}><strong>{item.query}</strong><span className="history-detail"><span className="history-preview">{historyPreview(item.mode, item.answer)}</span><span className="history-count">Результатов: {countHistoryResults(item.results)}</span></span></button>)}</div>;

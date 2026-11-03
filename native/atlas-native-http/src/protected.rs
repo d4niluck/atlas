@@ -115,6 +115,50 @@ fn protected_rag(service:&super::semantic::SemanticService,index:&atlas_joined_p
  else if candidates.is_empty(){answer=Some("Не найдено достаточно близких фрагментов".into())}else{return Err("Модель ответа не загружена".into())}Ok((results,answer,sources,error))}
 
 fn note_revision(id:&str,title:&str,text:&str)->String{use sha2::{Digest,Sha256};let fields=[id,"note",title,""];let prefix=format!("[{}]",fields.iter().map(|v|serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join(", "));let mut hash=Sha256::new();hash.update(prefix.as_bytes());hash.update(text.as_bytes());format!("{:x}",hash.finalize())}
-fn history_results(vault:&Vault,results:&[Value])->Result<Vec<Value>,String>{let mut saved=results.to_vec();let mut hashes=std::collections::HashMap::<String,Option<String>>::new();for result in &mut saved{let id=result["id"].as_str().unwrap_or("");let hash=if let Some(hash)=hashes.get(id){hash.clone()}else{let hash=vault.history_source(id)?.map(|(title,body,description)|super::source_hash(&title,&body,&description));hashes.insert(id.to_owned(),hash.clone());hash};if let Some(hash)=hash{result["_source_hash"]=json!(hash);}}Ok(saved)}
-fn span_matches(text:&str,start:Option<u64>,end:Option<u64>,expected:&str)->bool{let (Some(start),Some(end))=(start,end)else{return false};if end<start{return false}let Ok(start)=usize::try_from(start)else{return false};let Ok(length)=usize::try_from(end-start as u64)else{return false};let mut chars=text.chars();if start>0&&chars.nth(start-1).is_none(){return false}let actual:String=chars.take(length).collect();actual.chars().count()==length&&actual==expected}
-fn enrich_history(vault:&Vault,mut entries:Vec<Value>)->Result<Vec<Value>,String>{for entry in &mut entries {if let Some(results)=entry["results"].as_array_mut(){for result in results {let id=result["id"].as_str().unwrap_or("");let current=vault.history_source(id)?;let saved=result.get("_source_hash").and_then(Value::as_str).map(str::to_owned);let stale=current.as_ref().is_none_or(|(t,b,d)|saved.as_deref()!=Some(super::source_hash(t,b,d).as_str())||result["title"].as_str()!=Some(t));if let Some(object)=result.as_object_mut(){object.remove("_source_hash");object.insert("missing".into(),json!(current.is_none()));object.insert("stale".into(),json!(stale));}if let Some(chunks)=result["chunks"].as_array_mut(){for chunk in chunks {let text=current.as_ref().map(|(_,body,desc)|if chunk["field"]=="description"{desc.as_str()}else{body.as_str()}).unwrap_or("");let matches=span_matches(text,chunk["start"].as_u64(),chunk["end"].as_u64(),chunk["text"].as_str().unwrap_or(""));chunk["stale"]=json!(stale||!matches);}}}}if let Some(sources)=entry["sources"].as_array_mut(){for source in sources {let id=source["id"].as_str().unwrap_or("");let current=vault.history_source(id)?;let text=current.as_ref().map(|(_,body,desc)|if source["field"]=="description"{desc.as_str()}else{body.as_str()}).unwrap_or("");let matches=span_matches(text,source["start"].as_u64(),source["end"].as_u64(),source["text"].as_str().unwrap_or(""));source["missing"]=json!(current.is_none());source["stale"]=json!(!matches);}}}Ok(entries)}
+pub(crate) fn history_results(vault:&Vault,results:&[Value])->Result<Vec<Value>,String>{let mut saved=results.to_vec();let mut hashes=std::collections::HashMap::<String,Option<String>>::new();for result in &mut saved{let id=result["id"].as_str().unwrap_or("");let hash=if let Some(hash)=hashes.get(id){hash.clone()}else{let hash=vault.history_source(id)?.map(|(title,body,description)|super::source_hash(&title,&body,&description));hashes.insert(id.to_owned(),hash.clone());hash};if let Some(hash)=hash{result["_source_hash"]=json!(hash);}}Ok(saved)}
+fn history_offsets(text:&str,mut wanted:Vec<usize>)->std::collections::HashMap<usize,usize>{
+ wanted.sort_unstable();wanted.dedup();let mut found=std::collections::HashMap::with_capacity(wanted.len());if wanted.is_empty(){return found}
+ let mut next=0;let mut count=0;
+ for (i,(byte,_)) in text.char_indices().enumerate(){count=i+1;if wanted[next]==i{found.insert(i,byte);next+=1;if next==wanted.len(){return found}}}
+ if next<wanted.len()&&wanted[next]==count{found.insert(count,text.len());}found
+}
+fn history_span_matches(text:&str,offsets:&std::collections::HashMap<usize,usize>,span:&Value)->bool{
+ let (Some(start),Some(end))=(span["start"].as_u64().and_then(|v|usize::try_from(v).ok()),span["end"].as_u64().and_then(|v|usize::try_from(v).ok()))else{return false};
+ if start>end{return false}let (Some(&a),Some(&b))=(offsets.get(&start),offsets.get(&end))else{return false};text.get(a..b)==span["text"].as_str()
+}
+pub(crate) fn enrich_history(vault:&Vault,mut entries:Vec<Value>)->Result<Vec<Value>,String>{
+ // Visit each source once and hold at most one extracted document at a time.
+ let mut refs=std::collections::HashMap::<String,Vec<(usize,bool,usize)>>::new();
+ for (entry_idx,entry) in entries.iter().enumerate(){
+  for (index,result) in entry["results"].as_array().into_iter().flatten().enumerate(){refs.entry(result["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,false,index));}
+  for (index,source) in entry["sources"].as_array().into_iter().flatten().enumerate(){refs.entry(source["id"].as_str().unwrap_or("").to_owned()).or_default().push((entry_idx,true,index));}
+ }
+ for (id,positions) in refs {
+  let current=vault.history_source(&id)?;let hash=current.as_ref().map(|(title,body,description)|super::source_hash(title,body,description));
+  let (body,description)=current.as_ref().map(|(_,body,description)|(body.as_str(),description.as_str())).unwrap_or(("",""));
+  let mut body_points=Vec::new();let mut description_points=Vec::new();
+  let mut collect=|span:&Value|{let points=if span["field"]=="description"{&mut description_points}else{&mut body_points};for field in ["start","end"]{if let Some(v)=span[field].as_u64().and_then(|v|usize::try_from(v).ok()){points.push(v)}}};
+  for &(entry_idx,is_source,index) in &positions {if is_source{collect(&entries[entry_idx]["sources"][index])}else{for chunk in entries[entry_idx]["results"][index]["chunks"].as_array().into_iter().flatten(){collect(chunk)}}}
+  let body_offsets=history_offsets(body,body_points);let description_offsets=history_offsets(description,description_points);
+  for (entry_idx,is_source,index) in positions {if is_source{
+    let source=&mut entries[entry_idx]["sources"][index];let (text,offsets)=if source["field"]=="description"{(description,&description_offsets)}else{(body,&body_offsets)};
+    let matches=history_span_matches(text,offsets,source);source["missing"]=json!(current.is_none());source["stale"]=json!(!matches);
+   }else{
+    let result=&mut entries[entry_idx]["results"][index];let saved=result.get("_source_hash").and_then(Value::as_str);let stale=current.as_ref().is_none_or(|(title,_,_)|saved!=hash.as_deref()||result["title"].as_str()!=Some(title));
+    if let Some(object)=result.as_object_mut(){object.remove("_source_hash");object.insert("missing".into(),json!(current.is_none()));object.insert("stale".into(),json!(stale));}
+    if let Some(chunks)=result["chunks"].as_array_mut(){for chunk in chunks{let (text,offsets)=if chunk["field"]=="description"{(description,&description_offsets)}else{(body,&body_offsets)};let matches=history_span_matches(text,offsets,chunk);chunk["stale"]=json!(stale||!matches);}}
+   }}
+ }
+ Ok(entries)
+}
+
+#[cfg(test)] mod history_offsets_tests {
+ use super::*;
+ #[test] fn unicode_character_offsets_and_invalid_ranges(){
+  let text="A🦊ёж文";let positions=history_offsets(text,vec![0,1,2,3,4,5,6]);
+  for (start,end,expected,valid) in [(0,5,"A🦊ёж文",true),(1,3,"🦊ё",true),(2,2,"",true),(0,6,"A🦊ёж文",false),(4,2,"",false)]{
+   let span=json!({"start":start,"end":end,"text":expected});assert_eq!(history_span_matches(text,&positions,&span),valid);
+  }
+ }
+
+}

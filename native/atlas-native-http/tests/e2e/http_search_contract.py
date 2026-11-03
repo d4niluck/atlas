@@ -4,7 +4,7 @@ import argparse, json, os, pathlib, signal, subprocess, tempfile, time, shutil
 from urllib.request import Request,urlopen,install_opener,build_opener,ProxyHandler
 from urllib.error import HTTPError
 install_opener(build_opener(ProxyHandler({})))
-p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['empty','typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['pdf-duplicate','history','pdf-exclusion','empty','typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');p.add_argument('--pdf');args=p.parse_args()
 root=pathlib.Path(tempfile.mkdtemp(prefix='atlas-search-contract-'));models=root/'models';models.mkdir();(models/'embeddinggemma-2-q8.gguf').write_bytes(b'fake-encoder-file')
 (models/'gemma-4-e2b-it-q4.gguf').write_bytes(b'fake-llm')
 if args.images:(models/'embeddinggemma-2-mmproj-q8.gguf').write_bytes(b'fake-vision')
@@ -46,7 +46,56 @@ try:
  if 'external' in args.workspace:
   disk=root/'disk';disk.mkdir();cap=ok(200,request('/api/workspaces/authorize',{'operation':'export','path':str(disk)}))['capability'];made=ok(201,request('/api/workspaces/create-external',{'capability':cap,'name':'External','protected':args.workspace=='protected-external','password':password}));wid=ok(200,request('/api/workspaces/attach',{'capability':made['capability'],**({'password':password,'test_protected':True} if args.workspace=='protected-external' else {})}))['id']
  a=ok(201,request('/api/w/'+wid+'/notes',{'title':'Документ индексирования','text':'Индексация заметок работает аккуратно. Уникальныйключ первая запись.'}));b=ok(201,request('/api/w/'+wid+'/notes',{'title':'Вторая заметка','text':'Уникальныйключ вторая запись.'}));aid=a['id'];bid=b['id']
- if args.case=='empty':
+ if args.case=='pdf-duplicate':
+  pdf=pathlib.Path(args.pdf or pathlib.Path(__file__).resolve().parents[4]/'ui/tests/fixtures/two-pages.pdf').read_bytes()
+  def upload_pdf():
+   q=Request(base+'/api/w/'+wid+'/files?filename=manual.pdf',data=pdf,method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
+   with urlopen(q,timeout=60) as r: assert r.status in (200,201); return json.load(r)
+  x,y=upload_pdf(),upload_pdf();xid,yid=x['id'],y['id'];assert xid!=yid and x['title']==y['title'],(x,y)
+  assert {xid,yid}.issubset(ids(search('semantic','Atlas first page')))
+  original=search('lexical','Atlas first page');assert {xid,yid}.issubset(ids(original))
+  set_excluded(xid,True)
+  for mode in ['lexical','semantic','hybrid']:
+   visible=ids(search(mode,'Atlas first page')); assert xid not in visible and yid in visible,(mode,visible,xid,yid)
+   assert xid in ids(search(mode,'Atlas first page',[xid]))
+  deadline=time.monotonic()+90
+  while True:
+   code, result=request('/api/w/'+wid+'/rag/search',{'query':'Atlas first page','object_ids':None,'agentic':False})
+   if code==200:break
+   assert code==503,(code,result)
+   assert time.monotonic()<deadline;time.sleep(.1)
+  assert xid not in ids(result['results']) and all(z.get('id')!=xid for z in result.get('sources',[])),result
+  assert yid in ids(result['results']),result
+  print('PASS duplicate PDF identity, RAG and explicit selection')
+ elif args.case=='history':
+  for mode, query in [('lexical','уникальныйключ'),('semantic','тестовый смысл'),('hybrid','проверка поиск')]:
+   search(mode,query)
+   data=ok(200,request('/api/w/'+wid+'/history'));assert any(row['query']==query and row['mode']==mode for row in data['items']),(mode,data)
+  deadline=time.monotonic()+90
+  while True:
+   code, result=request('/api/w/'+wid+'/rag/search',{'query':'история уникальныйключ','object_ids':None,'agentic':False})
+   if code==200:break
+   assert code==503,(code,result)
+   assert time.monotonic()<deadline;time.sleep(.1)
+  data=ok(200,request('/api/w/'+wid+'/history'));assert any(row['query']=='история уникальныйключ' and row['mode']=='rag' for row in data['items']),data
+  assert data['items'][0]['query']=='история уникальныйключ',data['items'][:2]
+  stop();start()
+  if args.workspace=='protected':ok(200,request('/api/workspaces/'+wid+'/unlock',{'password':password}))
+  if 'external' in args.workspace:
+   source=next((root/'disk').glob('Atlas-*'));cap=ok(200,request('/api/workspaces/authorize',{'operation':'attach','path':str(source)}))['capability'];wid=ok(200,request('/api/workspaces/attach',{'capability':cap,'id':wid,**({'password':password,'test_protected':True} if args.workspace=='protected-external' else {})}))['id']
+  data=ok(200,request('/api/w/'+wid+'/history'));assert data['items'][0]['query']=='история уникальныйключ',data['items'][:2]
+  print('PASS history saved for lexical, semantic, hybrid and RAG, newest first and after restart')
+ elif args.case=='pdf-exclusion':
+  pdf=pathlib.Path(args.pdf or pathlib.Path(__file__).resolve().parents[4]/'ui/tests/fixtures/two-pages.pdf').read_bytes()
+  q=Request(base+'/api/w/'+wid+'/files?filename=manual.pdf',data=pdf,method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
+  with urlopen(q,timeout=60) as r: assert r.status in (200,201); item=json.load(r)
+  fid=item['id']; assert fid in ids(search('lexical','Atlas first page')),'PDF text not indexed';assert fid in ids(search('semantic','Atlas first page',[fid]))
+  set_excluded(fid,True)
+  for mode in ['lexical','semantic','hybrid']:
+   assert fid not in ids(search(mode,'Atlas first page')),(mode,'excluded PDF in unscoped search')
+   assert fid in ids(search(mode,'Atlas first page',[fid])),(mode,'selected PDF missing')
+  print('PASS PDF exclusion, scoped override and all modes')
+ elif args.case=='empty':
   search('semantic','начальная проверка')
   time.sleep(1)
   before=log.read_text() if log.exists() else ''
