@@ -3,6 +3,7 @@ import React, {useEffect,useState} from 'react';
 import './control-contrast.css';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {remarkSoftBreaks} from './remarkSoftBreaks';
 import {MarkdownEditor} from './MarkdownEditor';
 import {MarkdownLink} from './MarkdownLink';
 import {MarkdownSearchExcerpt} from './MarkdownSearchExcerpt';
@@ -28,7 +29,7 @@ export function NoteEditor({searchJumpRevision,searchControl,title,text,highligh
    <div className={'note-split'+(expanded&&editing?' split-expanded':'')}>
     {editing&&<MarkdownEditor text={text} onChange={onText}/>}
     {(expanded||!editing)&&<div className="note-preview">{expanded&&editing&&<span className="eyebrow">ПРЕДПРОСМОТР</span>}<div className="note-content markdown-content">
-     {highlight?.start!=null&&highlight.end!=null?<MarkdownSearchExcerpt key={searchJumpRevision} text={text} start={highlight.start} end={highlight.end} components={{a:MarkdownLink,pre:MarkdownPre}}/>:<ReactMarkdown components={{a:MarkdownLink,pre:MarkdownPre}} remarkPlugins={[remarkGfm]}>{text||'Здесь пока пусто.'}</ReactMarkdown>}
+     {highlight?.start!=null&&highlight.end!=null?<MarkdownSearchExcerpt key={searchJumpRevision} text={text} start={highlight.start} end={highlight.end} components={{a:MarkdownLink,pre:MarkdownPre}}/>:<ReactMarkdown components={{a:MarkdownLink,pre:MarkdownPre}} remarkPlugins={[remarkGfm,remarkSoftBreaks]}>{text||'Здесь пока пусто.'}</ReactMarkdown>}
     </div></div>}
    </div>
 

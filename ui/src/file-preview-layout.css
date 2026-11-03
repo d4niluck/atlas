@@ -4,13 +4,13 @@
 .pdf-preview{flex:1 1 0;min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain}
 .pdf-preview-controls{position:sticky;top:0;z-index:1;background:#1d1e26}
 :root[data-theme=light] .pdf-preview-controls{background:#fff}
-.pdf-preview canvas{display:block;width:min(100%,1100px);height:auto;margin:0 auto}
+
 
 /* File text needs a constrained flex height to scroll in fullscreen. */
 .editor > .note-content { flex:1 1 0; min-height:0; }
 
 .file-preview-overlay{pointer-events:none;background:transparent}.file-preview-overlay .file-editor{pointer-events:auto}
 
-.pdf-page {position:relative;display:table;max-width:100%;margin-inline:auto;}
-.pdf-page canvas {display:block;max-width:100%;height:auto;}
+.pdf-page {position:relative;display:table;margin-inline:auto;}
+.pdf-page canvas {display:block;}
 .pdf-search-highlight {position:absolute;pointer-events:none;opacity:.5;}

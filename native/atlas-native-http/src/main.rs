@@ -64,7 +64,7 @@ impl Drop for Staged { fn drop(&mut self) { let _=std::fs::remove_file(&self.0);
 fn semantic_unavailable(service:&semantic::SemanticService,dir:&std::path::Path)->(u16,Value){let status=service.status(dir);if status["cancelled"]==true||status["stopping"]==true{(409,json!({"error":"Смысловая индексация остановлена"}))}else{(503,json!({"error":"Подготавливаем индекс поиска. Попробуйте ещё раз через несколько секунд."}))}}
 fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, token:&str, serial:&std::sync::Mutex<()>, model: &std::sync::Mutex<ModelState>, rag: &std::sync::Arc<std::sync::Mutex<RagState>>, choice: &std::sync::Arc<ModelChoice>, device: &std::sync::Arc<device::DeviceSettings>, workers:&std::sync::Arc<workspace_worker::Workers>, external_states:&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String,String>>>, protected:&std::sync::Arc<protected::Protected>) {
  if !valid(req.headers(),token){return answer(req,403,json!({"error":"Forbidden"}))}
- let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
+ let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/settings/preview-text-size" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
  // Models downloaded after launch become available without starting their processes.
  {let _creation_guard=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};
  if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="semantic" || (method=="POST" && (parts[3]=="search" || parts[3]=="rag"))) {
@@ -119,6 +119,8 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
  let semantic=if let ModelState::Ready(ref service)=model_state {Some(service)} else {None};
  let run=(|| -> Result<(u16,Value),Box<dyn std::error::Error>> {
   if parts.len()>=3 && ((parts[0..2]==["api","w"])||(parts[0..2]==["api","workspaces"]&&parts.len()==4&&parts[3]=="close")||(parts[0..2]==["api","workspaces"]&&parts.len()==3&&matches!(method.as_str(),"PATCH"|"DELETE"))) && portable_worker::busy(parts[2]) {return Ok((409,json!({"error":"Идёт копирование пространства"})))}
+  if parts==["api","settings","preview-text-size"]&&method=="GET" {return Ok((200,json!({"size":read_preview_text_size(&choice.dir)})))}
+  if parts==["api","settings","preview-text-size"]&&method=="PUT" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let size=match b["size"].as_u64(){Some(size) if (10..=32).contains(&size)=>size,_=>return Ok((400,json!({"error":"Неверный размер текста"})))};write_preview_text_size(&choice.dir,size)?;return Ok((200,json!({"size":size})))}
   if parts==["api","settings","app"]&&method=="GET" {return Ok((200,app_settings(&choice,&device)))}
   if parts==["api","settings","app"]&&method=="PUT" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let old=app_settings(&choice,&device);if let Err(e)=save_app_settings(&choice,&device,&b){return Ok((400,json!({"error":e})))}let embedding=b["embedding"].as_str().ok_or("invalid embedding")?;let llm=b["llm"].as_str().ok_or("invalid llm")?;let enabled=b["semantic_enabled"]==true;let rag_enabled=enabled&&b["rag_enabled"]==true;let new_path=choice.dir.join(if b["embedding_variant"]=="q8" {"embeddinggemma-2-q8.gguf"}else{"embeddinggemma-2.gguf"});let old_path=choice.dir.join(if old["embedding_variant"]=="q8" {"embeddinggemma-2-q8.gguf"}else{"embeddinggemma-2.gguf"});if let Some(service)=semantic {if let Err(e)=service.reconfigure_model(Some(&new_path.to_string_lossy()),embedding,enabled).and_then(|_|service.set_images(b["image_enabled"]==true)){let restore=service.reconfigure_model(Some(&old_path.to_string_lossy()),old["embedding"].as_str().unwrap_or("cpu"),old["semantic_enabled"]==true).and_then(|_|service.set_images(old["image_enabled"]==true));if restore.is_err()||save_app_settings(&choice,&device,&old).is_err(){return Err("Не удалось восстановить настройки после ошибки. Перезапустите Atlas.".into())}return Err(e.into())}}let name=b["model"].as_str().ok_or("invalid model")?;let path=choice.dir.join(if name=="e4b"{"gemma-4-e4b-it-q4.gguf"}else{"gemma-4-e2b-it-q4.gguf"});{let state=rag.lock().map_err(|_|"model unavailable")?;if let RagState::Ready(model)=&*state {if let Err(e)=model.reconfigure(path.to_string_lossy().as_ref(),llm,rag_enabled){if let Some(service)=semantic {if service.reconfigure_model(Some(&old_path.to_string_lossy()),old["embedding"].as_str().unwrap_or("cpu"),old["semantic_enabled"]==true).and_then(|_|service.set_images(old["image_enabled"]==true)).is_err(){return Err("Не удалось восстановить настройки после ошибки. Перезапустите Atlas.".into())}}if save_app_settings(&choice,&device,&old).is_err(){return Err("Не удалось восстановить настройки после ошибки. Перезапустите Atlas.".into())}return Err(e.into())}}}if old["embedding"]!=embedding || old["embedding_variant"]!=b["embedding_variant"] || old["image_enabled"]!=b["image_enabled"] {let mut states=external_states.lock().map_err(|_|"Состояние недоступно")?;states.retain(|_,state|{if state=="indexing"||state=="dirty"{*state="dirty".into();true}else{false}});}*choice.selected.lock().map_err(|_|"model unavailable")?=name.to_owned();device.apply_selected(embedding,llm);return Ok((200,app_settings(&choice,&device)));}
   if parts==["api","settings","device"]&&method=="GET" {let mut status=device.status();if let Some(service)=semantic {match service.active_device(){Ok(v)=>status["embedding"]["active_device"]=json!(v),Err(())=>status["embedding"]["message"]=json!("Модель занята")}}if let Ok(state)=rag.lock(){if let RagState::Ready(m)=&*state {match m.active_device(){Ok(v)=>status["llm"]["active_device"]=json!(v),Err(())=>status["llm"]["message"]=json!("Модель занята")}}}return Ok((200,status))}
@@ -298,6 +300,12 @@ fn merge_agentic(groups:&[Vec<Value>],candidates:Vec<Value>)->Vec<Value>{
 enum RagState { Disabled, Loading, Ready(std::sync::Arc<rag_model::RagModel>), Failed(String) }
 #[derive(Clone)]
 enum ModelState { Disabled, Loading, Ready(semantic::SemanticService), Failed(String) }
+fn read_preview_text_size(dir:&std::path::Path)->u64 {std::fs::read_to_string(dir.join("preview-text-size")).ok().and_then(|v|v.parse::<u64>().ok()).filter(|v|(10..=32).contains(v)).unwrap_or(16)}
+fn write_preview_text_size(dir:&std::path::Path,size:u64)->std::io::Result<()> {
+ std::fs::create_dir_all(dir)?;let tmp=dir.join(format!(".preview-text-size-{}",uuid::Uuid::new_v4()));
+ let result=(||{use std::io::Write;let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;write!(file,"{size}")?;file.sync_all()?;std::fs::rename(&tmp,dir.join("preview-text-size"))})();
+ if result.is_err(){let _=std::fs::remove_file(tmp);}result
+}
 fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
  // Downloads must not silently change the running model before settings are applied.
@@ -467,6 +475,21 @@ mod recovery_contract {
   assert_eq!(app_settings(&choice,&device)["agentic"],false);
   std::fs::write(dir.join("settings.json"),r#"{"agentic":true}"#).unwrap();
   assert_eq!(app_settings(&choice,&device)["agentic"],true);
+  std::fs::remove_dir_all(dir).unwrap();
+ }
+}
+
+#[cfg(test)] mod preview_text_size_tests {
+ use super::*;
+ #[test] fn size_survives_reload_and_invalid_data_defaults(){
+  let dir=std::env::temp_dir().join(format!("atlas-preview-text-size-{}",uuid::Uuid::new_v4()));
+  assert_eq!(read_preview_text_size(&dir),16);
+  write_preview_text_size(&dir,23).unwrap();
+  assert_eq!(read_preview_text_size(&dir),23);
+  write_preview_text_size(&dir,18).unwrap();
+  assert_eq!(read_preview_text_size(&dir),18);
+  std::fs::write(dir.join("preview-text-size"),"999").unwrap();
+  assert_eq!(read_preview_text_size(&dir),16);
   std::fs::remove_dir_all(dir).unwrap();
  }
 }
