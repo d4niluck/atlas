@@ -4,13 +4,14 @@ mod vision_model_download;
 
 
 mod model_download;
+mod q8_model_download;
 mod save_file;
 mod rag_model_download;
 mod rag_e4b_model_download;
 
 static DOWNLOAD_GATE:std::sync::Mutex<()>=std::sync::Mutex::new(());
 fn ensure_downloads_finished(statuses:&[String])->Result<(),String>{if statuses.iter().any(|s|s.starts_with("downloading")){Err("Дождитесь завершения загрузки модели перед перезапуском Atlas.".into())}else{Ok(())}}
-fn check_downloads(app:&tauri::AppHandle)->Result<(),String>{let dir=model_data_dir(app)?;ensure_downloads_finished(&[model_download::status(dir.clone()),vision_model_download::status(dir.clone()),rag_model_download::status(dir.clone()),rag_e4b_model_download::status(dir)])}
+fn check_downloads(app:&tauri::AppHandle)->Result<(),String>{let dir=model_data_dir(app)?;ensure_downloads_finished(&[model_download::status(dir.clone()),q8_model_download::status(dir.clone()),vision_model_download::status(dir.clone()),rag_model_download::status(dir.clone()),rag_e4b_model_download::status(dir)])}
 #[tauri::command]
 fn prepare_restart(app:tauri::AppHandle)->Result<(),String>{let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось проверить загрузки")?;check_downloads(&app)}
 
@@ -26,6 +27,10 @@ fn dismiss_models_intro(app:tauri::AppHandle)->Result<(),String>{let dir=model_d
 fn download_model(app: tauri::AppHandle) -> Result<(), String> { let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось начать загрузку")?;model_download::start(model_data_dir(&app)?) }
 #[tauri::command]
 fn model_download_status(app: tauri::AppHandle) -> Result<String, String> { Ok(model_download::status(model_data_dir(&app)?)) }
+#[tauri::command]
+fn download_q8_model(app: tauri::AppHandle) -> Result<(), String> { let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось начать загрузку")?;q8_model_download::start(model_data_dir(&app)?) }
+#[tauri::command]
+fn q8_model_download_status(app: tauri::AppHandle) -> Result<String, String> { Ok(q8_model_download::status(model_data_dir(&app)?)) }
 #[tauri::command]
 fn download_vision_model(app: tauri::AppHandle) -> Result<(), String> { let _guard=DOWNLOAD_GATE.lock().map_err(|_|"Не удалось начать загрузку")?;vision_model_download::start(model_data_dir(&app)?) }
 #[tauri::command]
@@ -121,7 +126,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| { tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External("http://127.0.0.1:5173".parse()?)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0, 800.0).build()?; Ok(()) })
-        .invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, save_workspace_file, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
+        .invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, save_workspace_file, open_external_url, download_model, model_download_status, download_q8_model, q8_model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas])
         .run(tauri::generate_context!())
         .expect("failed to start Atlas");
 }
@@ -167,7 +172,7 @@ struct Children(std::sync::Mutex<Vec<std::process::Child>>);
 #[cfg(not(debug_assertions))]
 impl Children {
  fn stop(&self) -> Result<(),String> {
-  model_download::cleanup(); vision_model_download::cleanup(); rag_model_download::cleanup(); rag_e4b_model_download::cleanup();
+  model_download::cleanup(); q8_model_download::cleanup(); vision_model_download::cleanup(); rag_model_download::cleanup(); rag_e4b_model_download::cleanup();
   let mut children=self.0.lock().map_err(|_|"Не удалось остановить службы Atlas".to_string())?;
   for child in children.iter_mut(){let pid=child.id() as i32;let rc=unsafe{libc::kill(-pid,libc::SIGTERM)};if rc!=0 {let err=std::io::Error::last_os_error();if err.raw_os_error()!=Some(libc::ESRCH){return Err(format!("Не удалось остановить службу: {err}"));}}}
   let started=std::time::Instant::now();let mut killed=false;
@@ -208,7 +213,7 @@ fn main() {
     use std::os::unix::process::CommandExt;
     use std::sync::atomic::{AtomicI32,Ordering};
     static BACKEND:AtomicI32=AtomicI32::new(0); static PROXY:AtomicI32=AtomicI32::new(0);
-    extern "C" fn terminate(_:i32){ model_download::terminate_child(); vision_model_download::terminate_child(); rag_model_download::terminate_child(); rag_e4b_model_download::terminate_child(); for id in [&BACKEND,&PROXY] { let pid=id.load(Ordering::Relaxed); if pid>0 { unsafe { libc::kill(-pid,libc::SIGTERM); } } } unsafe { libc::_exit(0); } }
+    extern "C" fn terminate(_:i32){ model_download::terminate_child(); q8_model_download::terminate_child(); vision_model_download::terminate_child(); rag_model_download::terminate_child(); rag_e4b_model_download::terminate_child(); for id in [&BACKEND,&PROXY] { let pid=id.load(Ordering::Relaxed); if pid>0 { unsafe { libc::kill(-pid,libc::SIGTERM); } } } unsafe { libc::_exit(0); } }
     fn secret()->std::io::Result<String> {let mut b=[0u8;32];fs::File::open("/dev/urandom")?.read_exact(&mut b)?; Ok(b.iter().map(|b|format!("{b:02x}")).collect())}
     fn launch(exe:&std::path::Path,args:&[String],input:&str,slot:&AtomicI32)->Result<(Child,u16),Box<dyn std::error::Error>> {
         let mut command=Command::new(exe); command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()); unsafe {command.pre_exec(|| {if libc::setsid()<0 {return Err(std::io::Error::last_os_error());} Ok(())});} let mut c=command.spawn()?; slot.store(c.id() as i32,Ordering::Relaxed);
@@ -274,7 +279,7 @@ fn main() {
         let origin=format!("http://127.0.0.1:{port}");let url=format!("{origin}/bootstrap/{bootstrap}").parse()?;
         WebviewWindowBuilder::new(app,"main",WebviewUrl::External(url)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0,800.0).on_navigation(move |url| url.scheme()=="http" && url.host_str()==Some("127.0.0.1") && url.port_or_known_default()==Some(port)).build()?;
         Ok(())
-    }).invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, save_workspace_file, open_external_url, download_model, model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
+    }).invoke_handler(tauri::generate_handler![models_intro_seen, dismiss_models_intro, select_workspace_directory, save_workspace_file, open_external_url, download_model, model_download_status, download_q8_model, q8_model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, prepare_restart, restart_atlas]).build(tauri::generate_context!()).expect("failed to start Atlas").run(|app,event|{if matches!(event,tauri::RunEvent::Exit){use tauri::Manager;if let Some(children)=app.try_state::<Children>(){if let Err(e)=children.stop(){eprintln!("Atlas: {e}");}}}});
 }
 #[cfg(all(test,not(debug_assertions),unix))]
 mod restart_group_contract_tests {

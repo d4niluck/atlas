@@ -44,7 +44,7 @@ fn recover(conn:&mut Connection,root:&Path)->R<()> {
         tx.execute("DELETE FROM search_chunks WHERE object_id=?",[&id])?;
         tx.execute("INSERT INTO search_chunks(object_id,start,field,content) VALUES(?,-1,'title',?)",params![id,title])?;
         for (field,value) in [("body",text.as_str()),("description",description.as_str())]{for (start,part) in chunks(value){tx.execute("INSERT INTO search_chunks(object_id,start,field,content) VALUES(?,?,?,?)",params![id,start as i64,field,part])?;}}
-        tx.execute("DELETE FROM note_journal WHERE object_id=?",[&id])?;tx.commit()?;
+        tx.execute("DELETE FROM note_journal WHERE object_id=?",[&id])?;if table_exists(&tx,"note_drafts")?{tx.execute("DELETE FROM note_drafts WHERE object_id=? AND title=? AND text=?",params![id,title,text])?;}tx.commit()?;
     }Ok(())
 }
 fn columns(conn:&Connection,table:&str)->R<Vec<String>> {let mut stmt=conn.prepare(&format!("PRAGMA table_info({table})"))?;let rows=stmt.query_map([],|r|r.get(1))?;Ok(rows.collect::<Result<_,_>>()?)}
@@ -223,12 +223,12 @@ pub fn restore_objects(root:&Path,ids:&[String])->R<Value>{validate_ids(ids)?;le
  for (id,data) in pending{let edge:Value=serde_json::from_str(&data)?;if edge["from"].as_str().is_some_and(|x|active.contains(x))&&edge["to"].as_str().is_some_and(|x|active.contains(x)){let edges=board["edges"].as_array_mut().ok_or("invalid edges")?;if !edges.iter().any(|e|e["id"]==edge["id"]){edges.push(edge)}tx.execute("DELETE FROM pending_edges WHERE id=?",[id])?;}}
  for(id,s) in saved{for stack in s["stacks"].as_array().ok_or("invalid stacks")?{if let Some(existing)=board["stacks"].as_array_mut().ok_or("invalid stacks")?.iter_mut().find(|v|v["id"]==stack["id"]){let members=existing["ids"].as_array_mut().ok_or("invalid members")?;if !members.iter().any(|v|v==id){members.push(json!(id))}}}}
  validate_edges(&tx,board["edges"].as_array().ok_or("invalid edges")?)?;
- tx.execute("INSERT OR REPLACE INTO board VALUES(1,?)",[serde_json::to_string(&board)?])?;tx.commit()?;board_from_db(&conn)
+ tx.execute("INSERT OR REPLACE INTO board VALUES(1,?)",[serde_json::to_string(&board)?])?;if table_exists(&tx,"note_drafts")?{for id in ids{tx.execute("INSERT OR REPLACE INTO note_journal(object_id,title,text) SELECT object_id,title,text FROM note_drafts WHERE object_id=?",[id])?;}}tx.commit()?;recover(&mut conn,root)?;board_from_db(&conn)
 }
 pub fn list_trash(root:&Path)->R<Value>{let conn=file_db(root)?;let mut stmt=conn.prepare("SELECT objects.id,title,kind FROM objects JOIN trash ON objects.id=trash.id ORDER BY deleted_at DESC")?;let rows=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?})))?;Ok(json!(rows.collect::<Result<Vec<_>,_>>()?))}
 pub fn purge_trash(root:&Path)->R<()> {let mut conn=file_db(root)?;let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;let cutoff=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()-86400.0;
  let expired={let mut stmt=tx.prepare("SELECT objects.id,objects.kind,objects.path FROM objects JOIN trash ON objects.id=trash.id WHERE trash.deleted_at <= ?")?;let rows=stmt.query_map([cutoff],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;rows.collect::<Result<Vec<_>,_>>()?};
- for(id,_,_) in &expired{for table in ["search_index","search_chunks"]{tx.execute(&format!("DELETE FROM {table} WHERE object_id=?"),[id])?;}tx.execute("DELETE FROM objects WHERE id=?",[id])?;tx.execute("DELETE FROM trash WHERE id=?",[id])?;}tx.commit()?;
+ let has_drafts=table_exists(&tx,"note_drafts")?;for(id,_,_) in &expired{if has_drafts{tx.execute("DELETE FROM note_drafts WHERE object_id=?",[id])?;}for table in ["search_index","search_chunks"]{tx.execute(&format!("DELETE FROM {table} WHERE object_id=?"),[id])?;}tx.execute("DELETE FROM objects WHERE id=?",[id])?;tx.execute("DELETE FROM trash WHERE id=?",[id])?;}tx.commit()?;
  for (id,kind,path) in expired{if kind=="file"{let folder=safe_path(root,&format!("files/{id}"))?;if folder.exists(){fs::remove_dir_all(folder)?;}}else{let target=safe_path(root,&path)?;if target.exists(){fs::remove_file(target)?;}}}Ok(())}
 fn validate_edges(tx:&Connection,edges:&[Value])->R<()> {
 let mut pairs:HashMap<String,Vec<String>>=HashMap::new();for edge in edges{let f=edge["from"].as_str().ok_or("invalid edge")?;let t=edge["to"].as_str().ok_or("invalid edge")?;for field in ["arrowStart","arrowEnd"]{if edge.get(field).is_some_and(|x|!x.is_boolean()){return Err("invalid arrow".into())}} let pair=pair_key(f,t)?;pairs.entry(pair).or_default().push(serde_json::to_string(&edge["id"])?);}
@@ -248,6 +248,10 @@ pub fn execute(a:&[String])->R<Value>{
  "put-board"=>{let board:Value=serde_json::from_str(a.get(3).ok_or("missing board")?)?;for key in ["objects","edges","stacks"] {if !board[key].is_array(){return Err("invalid board".into())}}
  let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;validate_edges(&tx,board["edges"].as_array().unwrap())?;
  tx.execute("INSERT OR REPLACE INTO board(id,data) VALUES(1,?)",[serde_json::to_string(&board)?])?;tx.commit()?;return Ok(json!({"ok":true}));},
+ "recover-note-drafts"=>{return Ok(json!({"count":recover_note_drafts(root)?}));},
+ "save-note-draft"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?;save_note_draft(root,id,title,text)?;return Ok(json!({"ok":true}));},
+ "get-note-draft"=>{let id=a.get(3).ok_or("missing id")?;return Ok(json!({"draft":get_note_draft(root,id)?.map(|(title,text)|json!({"title":title,"text":text}))}));},
+ "clear-note-draft"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?;return Ok(json!({"cleared":clear_note_draft(root,id,title,text)?}));},
  "get-note"=>{let id=a.get(3).ok_or("missing id")?;let (title,path):(String,String)=conn.query_row("SELECT title,path FROM objects WHERE id=? AND kind='note' AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;let text=fs::read_to_string(safe_path(root,&path)?)?;return Ok(json!({"id":id,"title":title,"text":text}));},
  "update-note"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?; let path:String=conn.query_row("SELECT path FROM objects WHERE id=? AND kind='note' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;let target=safe_path(root,&path)?;let previous=fs::read_to_string(&target)?;conn.execute("INSERT INTO note_journal(object_id,title,text) VALUES(?,?,?)",params![id,title,text])?;if let Err(error)=recover(&mut conn,root){write_atomic(&target,&previous)?;conn.execute("DELETE FROM note_journal WHERE object_id=?",[id])?;return Err(error)};return Ok(json!({"ok":true}));},
  "get-board"=>{
@@ -271,3 +275,24 @@ mod tests {
   write_atomic(&target,"new text").unwrap();assert_eq!(fs::read_to_string(&target).unwrap(),"new text");assert_eq!(fs::read_to_string(&stale).unwrap(),"previous crash");fs::remove_dir_all(dir).unwrap();
  }
 }
+
+/// A draft is durable in the workspace but does not update either search index.
+pub fn save_note_draft(root:&Path,id:&str,title:&str,text:&str)->R<()> {
+ let mut db=file_db(root)?;let tx=db.transaction()?;
+ let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE id=? AND kind='note' AND id NOT IN (SELECT id FROM trash))",[id],|r|r.get(0))?;
+ if !exists{return Err("note not found".into())}
+ tx.execute_batch("CREATE TABLE IF NOT EXISTS note_drafts(object_id TEXT PRIMARY KEY,title TEXT NOT NULL,text TEXT NOT NULL)")?;
+ tx.execute("INSERT OR REPLACE INTO note_drafts VALUES(?,?,?)",params![id,title,text])?;tx.commit()?;Ok(())
+}
+pub fn get_note_draft(root:&Path,id:&str)->R<Option<(String,String)>> {
+ let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(None)}
+ Ok(db.query_row("SELECT title,text FROM note_drafts WHERE object_id=?",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+}
+pub fn clear_note_draft(root:&Path,id:&str,title:&str,text:&str)->R<bool> {
+ let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(false)}
+ Ok(db.execute("DELETE FROM note_drafts WHERE object_id=? AND title=? AND text=?",params![id,title,text])?>0)
+}
+pub fn list_note_drafts(root:&Path)->R<Vec<(String,String,String)>>{let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(vec![])}let mut s=db.prepare("SELECT note_drafts.object_id,note_drafts.title,note_drafts.text FROM note_drafts JOIN objects ON objects.id=note_drafts.object_id WHERE objects.kind='note' AND objects.id NOT IN (SELECT id FROM trash) ORDER BY objects.id")?;let rows=s.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;Ok(rows.collect::<Result<Vec<_>,_>>()?)}
+pub fn recover_note_drafts(root:&Path)->R<usize>{let drafts=list_note_drafts(root)?;let mut count=0;for (id,title,text) in drafts{execute(&["atlas".into(),"update-note".into(),root.to_string_lossy().into_owned(),id.clone(),title.clone(),text.clone()])?;clear_note_draft(root,&id,&title,&text)?;count+=1;}Ok(count)}
+
+pub fn has_note_drafts(root:&Path)->R<bool>{let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(false)}Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM note_drafts JOIN objects ON objects.id=note_drafts.object_id WHERE objects.id NOT IN (SELECT id FROM trash))",[],|r|r.get(0))?)}

@@ -20,6 +20,8 @@
     "allow-open-external-url",
     "allow-download-model",
     "allow-model-download-status",
+    "allow-download-q8-model",
+    "allow-q8-model-download-status",
     "allow-download-rag-model",
     "allow-rag-model-download-status",
     "allow-download-rag-e4b-model",

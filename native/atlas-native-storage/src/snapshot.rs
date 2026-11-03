@@ -44,7 +44,7 @@ pub fn snapshot_workspace_named(source:&Path,destination:&Path,workspace_name:Op
  if source.is_symlink()||!source.is_dir(){return Err("invalid source workspace".into())}
  let source_resolved=source.canonicalize()?;let source=if source.is_absolute(){source_resolved.as_path()}else{source};let requested_parent=destination.parent().ok_or("missing destination parent")?;let parent_resolved=requested_parent.canonicalize()?;let parent=if requested_parent.is_absolute(){parent_resolved.as_path()}else{requested_parent};let name=destination.file_name().ok_or("missing destination name")?;let destination=parent.join(name);
  if parent_resolved.starts_with(&source_resolved)||destination.exists(){return Err("invalid or existing destination".into())}
- let _guard=workspace_lock(&source)?;super::validate_database_files(source)?;let db_path=source.join("atlas.sqlite3");if db_path.is_symlink()||!db_path.is_file(){return Err("invalid workspace database".into())}
+ let _guard=workspace_lock(&source)?;if super::has_note_drafts(&source)?{return Err("Сначала завершите редактирование заметок и восстановление черновиков".into())}super::validate_database_files(source)?;let db_path=source.join("atlas.sqlite3");if db_path.is_symlink()||!db_path.is_file(){return Err("invalid workspace database".into())}
  let stage=parent.join(format!(".atlas-snapshot-{}",uuid::Uuid::new_v4().simple()));fs::create_dir(&stage)?;
  let result=(||->R<()>{
   let db=rusqlite::Connection::open_with_flags(&db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;let check:String=db.query_row("PRAGMA quick_check",[],|r|r.get(0))?;if check!="ok"{return Err("invalid workspace database".into())}

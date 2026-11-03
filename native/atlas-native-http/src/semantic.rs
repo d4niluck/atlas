@@ -23,15 +23,19 @@ fn acquire_cancellable(slot:&Mutex<ModelSlot>,should_continue:impl Fn()->bool)->
 #[derive(Default)]
 struct State { revision:u64, indexed:u64, error:Option<String>, processing:Vec<String>, cancelled:bool, progress:Option<Value>, running:bool }
 #[derive(Clone)]
-pub struct SemanticService { identity:Arc<std::sync::RwLock<String>>, sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<ModelSlot>>, enabled:Arc<std::sync::atomic::AtomicBool>, counter:Arc<AtomicU64> }
+pub struct SemanticService { identity:Arc<std::sync::RwLock<String>>, sender:mpsc::Sender<PathBuf>, states:Arc<Mutex<HashMap<PathBuf,State>>>, model:Arc<Mutex<ModelSlot>>, enabled:Arc<std::sync::atomic::AtomicBool>, counter:Arc<AtomicU64>, model_epoch:Arc<AtomicU64> }
 
 impl SemanticService {
- pub fn reconfigure(&self,device:&str,enabled:bool)->Result<(),String>{let mut slot=self.model.lock().map_err(|_|"model unavailable")?;let was_enabled=slot.enabled;let changed=slot.device!=device;if changed {let mut identity=Encoder::model_identity(&slot.path,device)?;if slot.images {identity.push_str(":vision-q8-v1");}*self.identity.write().map_err(|_|"model unavailable")?=identity;}if changed||!enabled {slot.encoder.take();}slot.device=device.to_owned();slot.enabled=enabled;self.enabled.store(enabled,Ordering::Release);drop(slot);if changed {let mut states=self.states.lock().map_err(|_|"state unavailable")?;for state in states.values_mut(){state.revision=self.counter.fetch_add(1,Ordering::Relaxed)+1;state.error=None;}}if enabled&&(!was_enabled||changed) {let pending:Vec<_>=self.states.lock().map_err(|_|"state unavailable")?.iter().filter(|(_,s)|s.revision>s.indexed).map(|(p,_)|p.clone()).collect();for dir in pending {self.sender.send(dir).map_err(|e|e.to_string())?;}}Ok(())}
+ pub fn reconfigure(&self,device:&str,enabled:bool)->Result<(),String>{self.reconfigure_model(None,device,enabled)}
+ pub fn reconfigure_model(&self,path:Option<&str>,device:&str,enabled:bool)->Result<(),String>{let proposed=path.map(|p|Encoder::model_identity(p,device)).transpose()?;let will_change=proposed.as_ref().is_some_and(|p|self.worker_model_identity().map(|i|i.split(':').next()!=Some(p.as_str())).unwrap_or(true));if will_change {self.model_epoch.fetch_add(1,Ordering::AcqRel);let mut states=self.states.lock().map_err(|_|"state unavailable")?;for state in states.values_mut(){state.revision=self.counter.fetch_add(1,Ordering::Relaxed)+1;state.error=None;}}let mut slot=self.model.lock().map_err(|_|"model unavailable")?;let path=path.unwrap_or(&slot.path).to_owned();let was_enabled=slot.enabled;let changed=slot.device!=device||slot.path!=path;if changed {let mut identity=if let Some(value)=proposed {value} else {Encoder::model_identity(&path,device)?};if slot.images {identity.push_str(":vision-q8-v1");}*self.identity.write().map_err(|_|"model unavailable")?=identity;}if changed||!enabled {slot.encoder.take();}slot.path=path;slot.device=device.to_owned();slot.enabled=enabled;self.enabled.store(enabled,Ordering::Release);drop(slot);if changed {let mut states=self.states.lock().map_err(|_|"state unavailable")?;for state in states.values_mut(){state.revision=self.counter.fetch_add(1,Ordering::Relaxed)+1;state.error=None;}}if enabled&&(!was_enabled||changed) {let pending:Vec<_>=self.states.lock().map_err(|_|"state unavailable")?.iter().filter(|(_,s)|s.revision>s.indexed).map(|(p,_)|p.clone()).collect();for dir in pending {self.sender.send(dir).map_err(|e|e.to_string())?;}}Ok(())}
  pub fn set_images(&self,images:bool)->Result<(),String>{let mut slot=self.model.lock().map_err(|_|"model unavailable")?;if slot.images==images{return Ok(())}let mut identity=Encoder::model_identity(&slot.path,&slot.device)?;if images {identity.push_str(":vision-q8-v1");}*self.identity.write().map_err(|_|"model unavailable")?=identity;slot.encoder.take();slot.images=images;let enabled=slot.enabled;drop(slot);let mut states=self.states.lock().map_err(|_|"state unavailable")?;for (path,state) in states.iter_mut(){state.revision=self.counter.fetch_add(1,Ordering::Relaxed)+1;state.error=None;if enabled {self.sender.send(path.clone()).map_err(|e|e.to_string())?;}}Ok(())}
  pub fn active_device(&self)->Result<Option<String>,()>{self.model.try_lock().map(|slot|slot.encoder.as_ref().map(|_|slot.device.clone())).map_err(|_|())}
  pub fn unload_if_idle(&self,age:std::time::Duration)->bool {if let Ok(mut slot)=self.model.try_lock(){if slot.last_used.elapsed()>=age {slot.encoder.take();return true}}false}
  pub fn worker_model_identity(&self)->Result<String,String>{Ok(self.identity.read().map_err(|_|"model unavailable")?.clone())}
  pub fn worker_encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>{acquire(&self.model)?.encode(text,query)}
+ pub fn with_model_identity<T>(&self,expected:&str,f:impl FnOnce()->Result<T,String>)->Result<T,String>{let _guard=self.model.lock().map_err(|_|"model unavailable")?;if self.worker_model_identity()?!=expected{return Err("Модель поиска изменилась".into())}f()}
+ pub fn worker_encode_expected(&self,expected:&str,text:&str,query:bool)->Result<Vec<f32>,String>{let model=acquire(&self.model)?;if self.worker_model_identity()?!=expected{return Err("Модель поиска изменилась".into())}model.encode(text,query)}
+ pub fn worker_encode_image_expected(&self,expected:&str,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>{let model=acquire(&self.model)?;if self.worker_model_identity()?!=expected{return Err("Модель поиска изменилась".into())}model.encode_image(bytes,mime)}
  pub fn index_enabled(&self)->bool{self.enabled.load(Ordering::Acquire)}
  pub fn worker_images_enabled(&self)->bool{self.model.lock().map(|m|m.images).unwrap_or(false)}
  pub fn worker_encode_image(&self,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>{acquire(&self.model)?.encode_image(bytes,mime)}
@@ -72,11 +76,11 @@ impl SemanticService {
    let workspace_guard=atlas_native_storage_contract::workspace_lock(&dir);
    let mut states=worker_states.lock().unwrap();if let Some(s)=states.get_mut(&dir){s.running=false;match result {Ok(generation) if s.revision==rev && workspace_guard.is_ok()=>{match publish_sources(&dir.join(".atlas-semantic-native"),&generation){Ok(())=>{if let Err(e)=cleanup_generations(&dir.join(".atlas-semantic-native"),&generation){eprintln!("Atlas: cannot remove old search index: {e}");}s.indexed=rev;s.error=None;s.processing.clear()},Err(e)=>s.error=Some(e)}},Ok(generation)=>{if s.revision==rev && workspace_guard.is_err(){s.error=Some("Workspace unavailable".to_owned());}let _=std::fs::remove_dir_all(dir.join(".atlas-semantic-native").join(generation));},Err(e) if s.revision==rev=>s.error=Some(e),Err(_)=>{}}} else if let Ok(generation)=result {let _=std::fs::remove_dir_all(dir.join(".atlas-semantic-native").join(generation));}
   }});
-  Ok(Self {identity:Arc::new(std::sync::RwLock::new(identity)),sender,states,model,enabled:Arc::new(std::sync::atomic::AtomicBool::new(true)),counter:Arc::new(AtomicU64::new(0))})
+  Ok(Self {identity:Arc::new(std::sync::RwLock::new(identity)),sender,states,model,enabled:Arc::new(std::sync::atomic::AtomicBool::new(true)),counter:Arc::new(AtomicU64::new(0)),model_epoch:Arc::new(AtomicU64::new(0))})
  }
 
  pub fn protected_identity(&self)->String{self.identity.read().unwrap().clone()}
- pub fn protected_build(&self,mut next:impl FnMut()->Result<Option<(String,String,String,String)>,String>,mut image:impl FnMut(&str)->Result<Option<Vec<u8>>,String>,previous:Option<(&atlas_faiss_probe::Index,&Value)>,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<(Vec<u8>,Value),String>{let model=acquire_cancellable(&self.model,&should_continue)?;let mut builder=atlas_joined_probe::MemoryBuilder::new(&model,previous)?;while let Some((id,title,body,description))=next()?{if !should_continue(){return Err("indexing cancelled".into())}builder.push_progress(&model,&Source{id:&id,title:&title,body:&body,description:&description},&should_continue,&progress)?;if model.supports_images(){if let Some(mime)=image_mime(&title){match image(&id){Ok(Some(bytes))=>{if let Err(e)=builder.push_image(&model,&id,&title,&bytes,mime){eprintln!("Atlas: image indexing skipped: {e}");}},Ok(None)=>{},Err(e)=>eprintln!("Atlas: image indexing skipped: {e}")}}}}if !should_continue(){return Err("indexing cancelled".into())}builder.finish(&model)}
+ pub fn protected_build(&self,mut next:impl FnMut()->Result<Option<(String,String,String,String)>,String>,mut image:impl FnMut(&str)->Result<Option<Vec<u8>>,String>,previous:Option<(&atlas_faiss_probe::Index,&Value)>,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<(Vec<u8>,Value),String>{let epoch=self.model_epoch.load(Ordering::Acquire);let still_current=||self.model_epoch.load(Ordering::Acquire)==epoch && should_continue();let model=acquire_cancellable(&self.model,&still_current)?;let mut builder=atlas_joined_probe::MemoryBuilder::new(&model,previous)?;while let Some((id,title,body,description))=next()?{if !still_current(){return Err("indexing cancelled".into())}builder.push_progress(&model,&Source{id:&id,title:&title,body:&body,description:&description},&still_current,&progress)?;if model.supports_images(){if let Some(mime)=image_mime(&title){match image(&id){Ok(Some(bytes))=>{if let Err(e)=builder.push_image(&model,&id,&title,&bytes,mime){eprintln!("Atlas: image indexing skipped: {e}");}},Ok(None)=>{},Err(e)=>eprintln!("Atlas: image indexing skipped: {e}")}}}}if !still_current(){return Err("indexing cancelled".into())}builder.finish(&model)}
  pub fn protected_search(&self,index:&atlas_faiss_probe::Index,meta:&Value,q:&str,ids:Option<&[String]>)->Result<Vec<Value>,String>{let model=acquire(&self.model)?;let rows=atlas_joined_probe::search_memory(&model,index,meta,q,ids,128)?;Ok(rows.into_iter().map(|v|{let score=v["score"].clone();let chunks=if v["field"]=="title"{vec![]}else{vec![json!({"text":v["text"],"start":v["start"],"end":v["end"],"field":v["field"],"score":score})]};json!({"id":v["id"],"title":v["title"],"chunks":chunks,"score":score})}).collect())}
  pub fn ensure(&self,dir:&Path)->Result<(),String>{
   let pending={let mut states=self.states.lock().unwrap();if states.contains_key(dir){false}else{states.insert(dir.to_owned(),State{revision:self.counter.fetch_add(1,Ordering::Relaxed)+1,..State::default()});true}};
@@ -106,7 +110,7 @@ mod lifecycle_tests {
  use super::*;
  #[test]
  fn locked_model_is_not_unloaded() {
-  let service=SemanticService{identity:Arc::new(std::sync::RwLock::new(String::new())),sender:mpsc::channel().0,states:Arc::new(Mutex::new(HashMap::new())),model:Arc::new(Mutex::new(ModelSlot{images:false,enabled:true,encoder:None,exe:String::new(),path:String::new(),device:String::new(),last_used:std::time::Instant::now()})),enabled:Arc::new(std::sync::atomic::AtomicBool::new(true)),counter:Arc::new(AtomicU64::new(0))};
+  let service=SemanticService{identity:Arc::new(std::sync::RwLock::new(String::new())),sender:mpsc::channel().0,states:Arc::new(Mutex::new(HashMap::new())),model:Arc::new(Mutex::new(ModelSlot{images:false,enabled:true,encoder:None,exe:String::new(),path:String::new(),device:String::new(),last_used:std::time::Instant::now()})),enabled:Arc::new(std::sync::atomic::AtomicBool::new(true)),counter:Arc::new(AtomicU64::new(0)),model_epoch:Arc::new(AtomicU64::new(0))};
   let dir=PathBuf::from("/tmp/atlas-status-test");
   service.states.lock().unwrap().insert(dir.clone(),State{revision:2,indexed:1,error:None,processing:vec![],cancelled:false,progress:None,running:false});
   assert_eq!(service.status(&dir)["indexing"],true);
@@ -117,6 +121,21 @@ mod lifecycle_tests {
   assert!(!service.unload_if_idle(std::time::Duration::ZERO));
   drop(held);
   assert!(service.unload_if_idle(std::time::Duration::ZERO));
+ }
+ #[test]
+ fn changing_variant_updates_identity_and_missing_model_preserves_it() {
+  let dir=std::env::temp_dir().join(format!("atlas-variant-unit-{}",uuid::Uuid::new_v4()));
+  std::fs::create_dir(&dir).unwrap();
+  let bf=dir.join("bf.gguf");let q8=dir.join("q8.gguf");
+  std::fs::write(&bf,b"bf16").unwrap();std::fs::write(&q8,b"q8").unwrap();
+  let service=SemanticService::start_lazy("unused",bf.to_str().unwrap(),"cpu").unwrap();
+  let before=service.worker_model_identity().unwrap();
+  assert!(service.reconfigure_model(Some(dir.join("missing").to_str().unwrap()),"cpu",true).is_err());
+  assert_eq!(service.worker_model_identity().unwrap(),before);
+  service.reconfigure_model(Some(q8.to_str().unwrap()),"cpu",true).unwrap();
+  assert_ne!(service.worker_model_identity().unwrap(),before);
+  assert_eq!(service.worker_model_identity().unwrap(),Encoder::model_identity(q8.to_str().unwrap(),"cpu").unwrap());
+  std::fs::remove_dir_all(dir).unwrap();
  }
  #[test]
  #[ignore = "requires local embedding model and llama-server"]
