@@ -44,6 +44,18 @@ fn download_rag_e4b_model(app: tauri::AppHandle) -> Result<(), String> { let _gu
 #[tauri::command]
 fn rag_e4b_model_download_status(app: tauri::AppHandle) -> Result<String, String> { Ok(rag_e4b_model_download::status(model_data_dir(&app)?)) }
 
+#[cfg(target_os="linux")]
+async fn linux_select_directory()->Result<Option<String>,String>{
+ tauri::async_runtime::spawn_blocking(||{
+  let output=std::process::Command::new("/usr/bin/zenity").args(["--file-selection","--directory","--title=Выберите папку"]).output().map_err(|_|"Не удалось открыть выбор папки. Проверьте установку zenity.")?;
+  match output.status.code(){
+   Some(0)=>{let text=String::from_utf8(output.stdout).map_err(|_|"Не удалось прочитать путь к папке.")?;let path=text.strip_suffix('\n').unwrap_or(&text);if path.is_empty(){return Err("Не удалось прочитать путь к папке.".into())}Ok(Some(path.to_owned()))},
+   Some(1)=>Ok(None),
+   _=>Err("Не удалось открыть выбор папки.".into()),
+  }
+ }).await.map_err(|_|"Не удалось открыть выбор папки.".to_owned())?
+}
+
 struct TransferBackend { port:u16, token:String }
 #[tauri::command]
 async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Result<Option<String>,String> {
@@ -66,8 +78,10 @@ async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Resu
         }).map_err(|_| "Не удалось открыть выбор папки.")?;
         tauri::async_runtime::spawn_blocking(move || receiver.recv().ok().flatten()).await.map_err(|_| "Не удалось открыть выбор папки.")?
     };
+    #[cfg(target_os="linux")]
+    let path=linux_select_directory().await?;
     tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(target_os="macos")]
+        #[cfg(any(target_os="macos",target_os="linux"))]
         {
             use std::io::{Read,Write};
             let Some(path)=path else {return Ok(None)};
@@ -84,8 +98,8 @@ async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Resu
             let capability=value.get("capability").and_then(|v|v.as_str()).filter(|v|!v.is_empty()).ok_or("Не удалось подтвердить выбор папки.")?;
             Ok(Some(capability.to_owned()))
         }
-        #[cfg(not(target_os="macos"))]
-        {let _=(port,token,operation);Err("Выбор папки пока доступен только на macOS.".into())}
+        #[cfg(not(any(target_os="macos",target_os="linux")))]
+        {let _=(port,token,operation);Err("Выбор папки на этой системе пока не поддерживается.".into())}
     }).await.map_err(|_|"Не удалось открыть выбор папки.".to_owned())?
 }
 
@@ -95,10 +109,12 @@ async fn save_workspace_file(app:tauri::AppHandle,workspace:String,id:String,tit
  let auth=app.try_state::<TransferBackend>().ok_or("Сохранение недоступно.")?;let port=auth.port;let token=auth.token.clone();
  #[cfg(target_os="macos")]
  let path={let(sender,receiver)=std::sync::mpsc::channel();app.run_on_main_thread(move||{let Some(mtm)=objc2::MainThreadMarker::new() else{let _=sender.send(None);return};let panel=objc2_app_kit::NSOpenPanel::openPanel(mtm);panel.setCanChooseFiles(false);panel.setCanChooseDirectories(true);panel.setAllowsMultipleSelection(false);panel.setCanCreateDirectories(true);let selected=if panel.runModal()==1{panel.URL().and_then(|url|url.path()).map(|path|path.to_string())}else{None};let _=sender.send(selected);}).map_err(|_|"Не удалось открыть окно сохранения")?;tauri::async_runtime::spawn_blocking(move||receiver.recv().ok().flatten()).await.map_err(|_|"Не удалось открыть окно сохранения")?};
- #[cfg(target_os="macos")]
+ #[cfg(target_os="linux")]
+ let path=linux_select_directory().await?;
+ #[cfg(any(target_os="macos",target_os="linux"))]
  {let Some(path)=path else{return Ok(false)};let name=std::path::Path::new(&title);if name.file_name().and_then(|n|n.to_str())!=Some(title.as_str())||title=="."||title==".."{return Err("Некорректное имя файла".into())}let path=std::path::Path::new(&path).join(name);tauri::async_runtime::spawn_blocking(move||save_file::download(port,&token,&workspace,&id,&path)).await.map_err(|_|"Не удалось сохранить файл")??;Ok(true)}
- #[cfg(not(target_os="macos"))]
- {let _=(app,port,token,workspace,id,title);Err("Сохранение пока доступно только на macOS".into())}
+ #[cfg(not(any(target_os="macos",target_os="linux")))]
+ {let _=(app,port,token,workspace,id,title);Err("Сохранение на этой системе пока не поддерживается".into())}
 }
 
 fn allowed_external_url(url: &str) -> bool {

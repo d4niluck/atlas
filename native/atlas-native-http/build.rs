@@ -1,1 +1,7 @@
-fn main() { println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path"); }
+fn main() {
+ match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+  Ok("macos") => println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path"),
+  Ok("linux") => println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN"),
+  _ => {}
+ }
+}

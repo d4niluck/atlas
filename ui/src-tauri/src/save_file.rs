@@ -2,7 +2,13 @@ use std::{fs::OpenOptions,io::{self,BufRead,BufReader,Read,Write},net::{Ipv4Addr
 
 #[cfg(target_os="macos")]
 fn publish(from:&Path,to:&Path)->io::Result<()>{use std::{ffi::CString,os::unix::ffi::OsStrExt};unsafe extern "C" {fn renamex_np(from:*const i8,to:*const i8,flags:u32)->i32;}let from=CString::new(from.as_os_str().as_bytes())?;let to=CString::new(to.as_os_str().as_bytes())?;if unsafe{renamex_np(from.as_ptr(),to.as_ptr(),4)}==0{Ok(())}else{Err(io::Error::last_os_error())}}
-#[cfg(not(target_os="macos"))]
+#[cfg(target_os="linux")]
+fn publish(from:&Path,to:&Path)->io::Result<()>{
+ use std::{ffi::CString,os::unix::ffi::OsStrExt};
+ let from=CString::new(from.as_os_str().as_bytes())?;let to=CString::new(to.as_os_str().as_bytes())?;
+ if unsafe{libc::renameat2(libc::AT_FDCWD,from.as_ptr(),libc::AT_FDCWD,to.as_ptr(),libc::RENAME_NOREPLACE)}==0{Ok(())}else{Err(io::Error::last_os_error())}
+}
+#[cfg(not(any(target_os="macos",target_os="linux")))]
 fn publish(from:&Path,to:&Path)->io::Result<()>{std::fs::hard_link(from,to)}
 fn valid_id(s:&str)->bool {!s.is_empty()&&s.len()<=64&&s.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-')}
 pub fn download(port:u16,token:&str,workspace:&str,id:&str,path:&Path)->Result<(),String>{
@@ -19,12 +25,15 @@ pub fn download(port:u16,token:&str,workspace:&str,id:&str,path:&Path)->Result<(
  let (temp,mut file)=tmp.ok_or("Не удалось создать временный файл")?;
  use std::os::unix::fs::MetadataExt;let created=file.metadata().map_err(|e|e.to_string())?;
  let result=(||->Result<(),String>{let n=io::copy(&mut reader.take(length),&mut file).map_err(|e|e.to_string())?;if n!=length{return Err("Файл передан не полностью".into())}file.sync_all().map_err(|e|e.to_string())?;publish(&temp,path).map_err(|e|if e.kind()==io::ErrorKind::AlreadyExists{"Файл с таким именем уже существует. Выберите другую папку.".to_owned()}else{format!("Не удалось сохранить файл: {e}")})?;Ok(())})();drop(file);
+ // A successful rename removes the temporary path; another save may already reuse its name.
+ #[cfg(target_os="linux")]
+ if result.is_ok(){return Ok(())}
  if let Ok(m)=std::fs::symlink_metadata(&temp){if m.file_type().is_symlink()||m.dev()!=created.dev()||m.ino()!=created.ino(){return Err(format!("Временный файл изменился; проверьте {}",temp.display()))}if let Err(error)=std::fs::remove_file(&temp){return Err(format!("Не удалось удалить временный файл {}: {error}",temp.display()))}}result
 
 }
 #[cfg(test)]mod tests {use super::*;use std::{net::TcpListener,thread};
-fn run(payload:&'static [u8],declared:usize,existing:bool)->(Result<(),String>,Vec<u8>){let listener=TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();let worker=thread::spawn(move||{let(mut socket,_)=listener.accept().unwrap();let mut req=[0;512];let _=socket.read(&mut req);write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\r\n").unwrap();socket.write_all(payload).unwrap()});let path=std::env::temp_dir().join(format!("atlas-save-file-{}-{}",std::process::id(),port));if existing{std::fs::write(&path,b"keep").unwrap()}let result=download(port,"token","default","abcd",&path);worker.join().unwrap();let bytes=std::fs::read(&path).unwrap_or_default();if path.exists(){std::fs::remove_file(path).unwrap();}(result,bytes)}
-#[test]fn success(){let(r,b)=run(b"content",7,false);assert!(r.is_ok());assert_eq!(b,b"content")}
+fn run(payload:&'static [u8],declared:usize,existing:bool)->(Result<(),String>,Vec<u8>){let listener=TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();let worker=thread::spawn(move||{let(mut socket,_)=listener.accept().unwrap();let mut req=Vec::new();let mut buf=[0;512];while !req.ends_with(b"\r\n\r\n"){let n=socket.read(&mut buf).unwrap();assert!(n>0);req.extend_from_slice(&buf[..n]);}write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\r\n").unwrap();socket.write_all(payload).unwrap()});let path=std::env::temp_dir().join(format!("atlas-save-file-{}-{}",std::process::id(),port));if existing{std::fs::write(&path,b"keep").unwrap()}let result=download(port,"token","default","abcd",&path);worker.join().unwrap();let bytes=std::fs::read(&path).unwrap_or_default();if path.exists(){std::fs::remove_file(path).unwrap();}(result,bytes)}
+#[test]fn success(){let(r,b)=run(b"content",7,false);assert!(r.is_ok(),"{r:?}");assert_eq!(b,b"content")}
 #[test]fn preserve_existing(){let(r,b)=run(b"content",7,true);assert!(r.is_err());assert_eq!(b,b"keep")}
 #[test]fn incomplete(){let(r,b)=run(b"short",10,false);assert!(r.is_err());assert!(b.is_empty())}
 }
