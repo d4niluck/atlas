@@ -1,3 +1,4 @@
+#[cfg(windows)] mod windows_filename;
 pub mod pdf;
 pub mod search;
 mod snapshot;
@@ -8,6 +9,7 @@ use std::{env, fs, io::Write, path::{Path, Component}, collections::{HashMap,Has
 type R<T> = Result<T,Box<dyn std::error::Error>>;
 fn safe_path(root:&Path, path:&str)->R<std::path::PathBuf>{
     let p=Path::new(path); if p.components().any(|c|!matches!(c,Component::Normal(_))){return Err("unsafe path".into())}
+    #[cfg(windows)] if p.components().any(|c|match c {Component::Normal(name)=>name.to_str().is_none_or(|name| !windows_filename::valid_windows_filename(name)),_=>true}){return Err("path is not supported on Windows".into())}
     let root=root.canonicalize()?; let candidate=root.join(p);
     let parent=candidate.parent().ok_or("missing parent")?.canonicalize()?;
     let target=match candidate.canonicalize(){Ok(target)=>target,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>parent.join(candidate.file_name().ok_or("missing filename")?),Err(e)=>return Err(e.into())};
@@ -97,7 +99,7 @@ pub fn create_workspace(root:&Path)->R<()> {
  CREATE VIRTUAL TABLE search_chunks USING fts5(object_id UNINDEXED,start UNINDEXED,field UNINDEXED,content,tokenize='unicode61');")?;
  fs::write(root.join(".atlas-owned"),"atlas-workspace-v1")?;Ok(())
 }
-fn file_name(name:&str)->R<()> {if name.is_empty() || name=="." || name==".." || name.contains('/') || name.contains('\\') || name.contains('\0') {return Err("invalid filename".into())}Ok(())}
+fn file_name(name:&str)->R<()> {if name.is_empty() || name=="." || name==".." || name.contains('/') || name.contains('\\') || name.contains('\0') {return Err("invalid filename".into())}#[cfg(windows)] if !windows_filename::valid_windows_filename(name){return Err("filename is not supported on Windows".into())}Ok(())}
 fn text_info(name:&str,path:&Path)->R<(String,&'static str)>{
  let ext=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
  let result:R<String>=match ext.as_str(){
