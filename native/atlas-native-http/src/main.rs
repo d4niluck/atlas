@@ -1,3 +1,4 @@
+mod lifecycle;
 mod rag_stream;
 mod history;
 mod worker_overlay;
@@ -21,7 +22,7 @@ mod device;
 mod protected;
 mod protected_import;
 mod semantic;
-use std::{env, io::{self, BufRead, Read}};
+use std::{env, io::{self, BufRead, Read, Write}};
 use tiny_http::{Header, Response, Server, StatusCode, Request};
 use serde_json::{json,Value};
 
@@ -65,6 +66,11 @@ impl Drop for Staged { fn drop(&mut self) { let _=std::fs::remove_file(&self.0);
 fn semantic_unavailable(service:&semantic::SemanticService,dir:&std::path::Path)->(u16,Value){let status=service.status(dir);if status["cancelled"]==true||status["stopping"]==true{(409,json!({"error":"Смысловая индексация остановлена"}))}else{(503,json!({"error":"Подготавливаем индекс поиска. Попробуйте ещё раз через несколько секунд."}))}}
 fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, token:&str, serial:&std::sync::Mutex<()>, model: &std::sync::Mutex<ModelState>, rag: &std::sync::Arc<std::sync::Mutex<RagState>>, choice: &std::sync::Arc<ModelChoice>, device: &std::sync::Arc<device::DeviceSettings>, workers:&std::sync::Arc<workspace_worker::Workers>, external_states:&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String,String>>>, protected:&std::sync::Arc<protected::Protected>) {
  if !valid(req.headers(),token){return answer(req,403,json!({"error":"Forbidden"}))}
+ #[cfg(feature="test-hook")]
+ if req.method().as_str()=="POST"&&req.url()=="/api/w/default/notes" {if let Some(base)=std::env::var_os("ATLAS_TEST_SHUTDOWN_HTTP_BARRIER"){let base=std::path::PathBuf::from(base);let _=std::fs::write(base.join("ready"),b"ready");let until=std::time::Instant::now()+std::time::Duration::from_secs(30);while !base.join("resume").exists()&&std::time::Instant::now()<until{std::thread::sleep(std::time::Duration::from_millis(10));}}}
+ #[cfg(feature="test-hook")]
+ if req.url()=="/api/test-shutdown-background" {let Some(permit)=crate::lifecycle::background().enter() else{return answer(req,503,json!({"error":"shutting down"}))};let Some(base)=std::env::var_os("ATLAS_TEST_SHUTDOWN_BG_BARRIER") else{return answer(req,400,json!({"error":"missing test barrier"}))};let base=std::path::PathBuf::from(base);std::thread::spawn(move||{let _permit=permit;let _=std::fs::write(base.join("ready"),b"ready");let until=std::time::Instant::now()+std::time::Duration::from_secs(30);while !base.join("resume").exists()&&std::time::Instant::now()<until{std::thread::sleep(std::time::Duration::from_millis(10));}let _=std::fs::write(base.join("completed"),b"done");});return answer(req,200,json!({"ok":true}))}
+
  let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/settings/preview-text-size" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
  if parts.len()==6 && parts[0..2]==["api","w"] && parts[3]=="rag" && (parts[4]=="events"||parts[4]=="cancel") {
   let wid=parts[2];let id=parts[5];let cookie=protected.session(wid).map(|v|format!("p:{v}")).or_else(||workers.session(wid).ok().map(|v|format!("w:{v}")));
@@ -208,7 +214,8 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
    // Requests hold serial here: capture chosen and active mode as one snapshot before spawning.
    let previous_device=device.active_llm();let requested_mode=device.llm_requested();
    let rag=rag.clone();let choice=choice.clone();let device=device.clone();let name=name.to_owned();
-   std::thread::spawn(move||{
+   let Some(background)=crate::lifecycle::background().enter() else{return Ok((503,json!({"error":"Atlas завершается"})))};
+   std::thread::spawn(move||{let _background=background;
     let previous=choice.selected.lock().ok().map(|s|s.clone());
     let had_old=if let RagState::Ready(old)=old {while std::sync::Arc::strong_count(&old)>1 {std::thread::sleep(std::time::Duration::from_millis(25));}drop(old);true}else{false};
     let requested_device=if requested_mode=="legacy" {"metal".to_string()} else {requested_mode.clone()};
@@ -422,7 +429,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   if embedding_path.is_some(){*semantic.lock().map_err(|_|"model state unavailable")?=ModelState::Loading;}
   if (use_rag && startup.is_file()){*rag.lock().map_err(|_|"generator state unavailable")?=RagState::Loading;}
   let state=semantic.clone();let rag_state=rag.clone();let device=device.clone();let startup_serial=serial.clone();let startup_default=default.clone();let startup_registry=dir.clone();let startup_choice=choice.clone();
-  std::thread::spawn(move || {
+  let background=crate::lifecycle::background().enter().ok_or("Atlas shutting down")?;
+  std::thread::spawn(move || {let _background=background;
    let (requested_embedding,requested_llm)=startup_device;
    let mut embedding_device=requested_embedding.clone();let mut llm_device=requested_llm.clone();
    let mut embedding=embedding_path.as_ref().map(|p|semantic::SemanticService::start_lazy(&exe,p,&embedding_device));
@@ -442,6 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  let timer_semantic=semantic.clone();let timer_rag=rag.clone();let timer_choice=choice.clone();let timer_device=device.clone();
  std::thread::spawn(move || loop {
   std::thread::sleep(std::time::Duration::from_secs(5));
+  let Some(_background)=crate::lifecycle::background().enter() else {break};
   let config=app_settings(&timer_choice,&timer_device);
   if config["idle_enabled"]!=true {continue}
   let age=std::time::Duration::from_secs(config["idle_minutes"].as_u64().unwrap_or(15)*60);
@@ -450,7 +459,31 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  });
  let workers=std::sync::Arc::new(workspace_worker::Workers::default());let external_states=std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
  let protected=std::sync::Arc::new(protected::Protected::new());
- let server=Server::http(format!("127.0.0.1:{port}"))?;println!("{}",server.server_addr().to_ip().ok_or("invalid address")?.port()); let active=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));for req in server.incoming_requests(){if active.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|if n<32 {Some(n+1)}else{None}).is_err(){answer(req,503,json!({"error":"Server busy"}));continue}let slot=RequestSlot(active.clone());let dir=dir.clone();let default=default.clone();let token=token.clone();let serial=serial.clone();let semantic=semantic.clone();let rag=rag.clone();let choice=choice.clone();let device=device.clone();let workers=workers.clone();let external_states=external_states.clone();let protected=protected.clone();std::thread::spawn(move || {let _slot=slot;handle(req,&dir,&default,&token,&serial,&semantic,&rag,&choice,&device,&workers,&external_states,&protected)});} Ok(())
+ let control=args.iter().any(|v|v=="--control-stdin");
+ let request_gate=std::sync::Arc::new(lifecycle::Gate::default());
+ let shutting=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+ let (shutdown_tx,shutdown_rx)=std::sync::mpsc::channel();
+ if control {let gate=request_gate.clone();let shutting=shutting.clone();std::thread::spawn(move||{use std::io::BufRead;for line in io::stdin().lock().lines(){match line{Ok(line) if line=="shutdown"=>{let _=gate.close();shutting.store(true,std::sync::atomic::Ordering::Release);if shutdown_tx.send(()).is_err(){return}},Ok(_)=>continue,Err(_)=>break}}let _=gate.close();shutting.store(true,std::sync::atomic::Ordering::Release);let _=shutdown_tx.send(());});}
+
+ let server=Server::http(format!("127.0.0.1:{port}"))?;println!("{}",server.server_addr().to_ip().ok_or("invalid address")?.port());io::stdout().flush()?;
+ let active=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+ loop {if shutting.load(std::sync::atomic::Ordering::Acquire){break}let Some(req)=server.recv_timeout(std::time::Duration::from_millis(100))? else {continue};
+  let Some(request)=request_gate.enter() else {answer(req,503,json!({"error":"Atlas завершается"}));continue};
+  if active.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|if n<32 {Some(n+1)}else{None}).is_err(){answer(req,503,json!({"error":"Server busy"}));continue}
+  let slot=RequestSlot(active.clone());let dir=dir.clone();let default=default.clone();let token=token.clone();let serial=serial.clone();let semantic=semantic.clone();let rag=rag.clone();let choice=choice.clone();let device=device.clone();let workers=workers.clone();let external_states=external_states.clone();let protected=protected.clone();std::thread::spawn(move || {let _request=request;let _slot=slot;handle(req,&dir,&default,&token,&serial,&semantic,&rag,&choice,&device,&workers,&external_states,&protected)});
+ }
+ drop(server);
+ // Never acknowledge shutdown before accepted HTTP requests, their background work,
+ // workspace workers and open protected databases have finished.
+ let _=shutdown_rx.recv();
+ loop {
+  let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3600);
+  let stopped=(||->Result<(),String>{
+   #[cfg(feature="test-hook")] if let Some(path)=std::env::var_os("ATLAS_TEST_SHUTDOWN_RETRY_MARKER"){if std::path::Path::new(&path).exists(){return Err("injected recoverable shutdown error".into())}}
+   request_gate.wait_until(deadline).map_err(|_|"requests still active")?;lifecycle::background().close_when_idle(deadline).map_err(|_|"background still active")?;lifecycle::threads().close().map_err(|_|"index workers unavailable")?;lifecycle::threads().wait_until(deadline).map_err(|_|"index workers still active")?;workers.shutdown(deadline).map_err(|e|e.to_string())?;protected.shutdown()?;let mut semantic_state=semantic.lock().map_err(|_|"model unavailable")?;if let ModelState::Ready(service)=&*semantic_state{service.shutdown_until(deadline)?}*semantic_state=ModelState::Disabled;drop(semantic_state);*rag.lock().map_err(|_|"model unavailable")?=RagState::Disabled;Ok(())})();
+  match stopped {Ok(())=>{println!("OK");io::stdout().flush()?;return Ok(())},Err(error)=>{eprintln!("Atlas shutdown incomplete: {error}");match shutdown_rx.recv_timeout(std::time::Duration::from_secs(1)){Ok(())|Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{},Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>std::thread::sleep(std::time::Duration::from_secs(1))}}}
+ }
+
 }
 #[cfg(test)] mod tests {use super::*;fn h(k:&str,v:&str)->Header{Header::from_bytes(k,v).unwrap()} #[test]fn authorization(){assert!(valid(&[h("Host","127.0.0.1:18765"),h("Origin","http://localhost:5173"),h("X-Atlas-Token","secret")],"secret"));assert!(!valid(&[h("Host","evil.test"),h("X-Atlas-Token","secret")],"secret"));assert!(!valid(&[h("Host","localhost"),h("Host","evil.test"),h("X-Atlas-Token","secret")],"secret"));}}
 #[cfg(test)]

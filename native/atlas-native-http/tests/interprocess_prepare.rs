@@ -1,4 +1,5 @@
 #![cfg(feature="test-hook")]
+#[path="../src/lifecycle.rs"] mod lifecycle;
 #[path="../src/semantic.rs"] mod semantic;
 use semantic::SemanticService;
 use rusqlite::Connection;

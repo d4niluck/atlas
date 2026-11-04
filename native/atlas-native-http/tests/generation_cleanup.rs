@@ -1,3 +1,4 @@
+#[path="../src/lifecycle.rs"] mod lifecycle;
 #[path="../src/semantic.rs"] mod semantic;
 use semantic::SemanticService;use rusqlite::Connection;use std::{thread,time::{Duration,Instant}};
 fn ready(s:&SemanticService,p:&std::path::Path){let end=Instant::now()+Duration::from_secs(60);while Instant::now()<end{if s.status(p)["available"]==true{return}thread::sleep(Duration::from_millis(30));}panic!("not ready: {}",s.status(p))}

@@ -1,4 +1,5 @@
 #[cfg(windows)] mod windows_filename;
+#[cfg(windows)] pub mod windows_workspace;
 pub mod pdf;
 pub mod search;
 mod snapshot;
@@ -119,16 +120,23 @@ fn index_file(tx:&rusqlite::Transaction<'_>,id:&str,title:&str,text:&str,descrip
 fn file_db(root:&Path)->R<Connection>{if root.is_symlink(){return Err("invalid workspace".into())}let absolute=if root.is_absolute(){Some(root.canonicalize()?)}else{None};let root=absolute.as_deref().unwrap_or(root);let db=root.join("atlas.sqlite3");if !db.is_file(){return Err("missing db".into())}Ok(Connection::open_with_flags(db,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?)}
 pub fn validate_database_files(root:&Path)->R<()> {for name in ["atlas.sqlite3","atlas.sqlite3-wal","atlas.sqlite3-shm","atlas.sqlite3-journal"]{match fs::symlink_metadata(root.join(name)){Ok(meta) if meta.file_type().is_symlink()||!meta.is_file()=>return Err("unsafe database file".into()),Ok(_)=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}}Ok(())}
 /// Exclusive session ownership shared with protection conversion. Never waits on another process.
-pub fn workspace_session_lock(root:&Path)->R<fs::File>{use std::os::unix::fs::OpenOptionsExt;if root.is_symlink()||!root.is_dir(){return Err("invalid workspace".into())}let file=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(root.join(".atlas-session.lock"))?;if !file.metadata()?.is_file(){return Err("invalid session lock".into())}file.try_lock().map_err(|_|"workspace session is already active")?;Ok(file)}
+#[cfg(unix)] pub fn workspace_session_lock(root:&Path)->R<fs::File>{use std::os::unix::fs::OpenOptionsExt;if root.is_symlink()||!root.is_dir(){return Err("invalid workspace".into())}let file=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(root.join(".atlas-session.lock"))?;if !file.metadata()?.is_file(){return Err("invalid session lock".into())}file.try_lock().map_err(|_|"workspace session is already active")?;Ok(file)}
 /// Callers serialize every operation on this workspace, including journal recovery.
 /// This is advisory: older Atlas backends do not honor it.
-pub fn workspace_lock(root:&Path)->R<fs::File>{
+#[cfg(unix)] pub fn workspace_lock(root:&Path)->R<fs::File>{
  use std::os::unix::fs::OpenOptionsExt;
  if root.is_symlink() || !root.is_dir(){return Err("invalid workspace".into())}
  let file=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600)
      .custom_flags(libc::O_NOFOLLOW).open(root.join(".atlas-operation.lock"))?;
  if !file.metadata()?.is_file(){return Err("invalid workspace lock".into())}
  file.lock()?;Ok(file)
+}
+#[cfg(windows)]
+pub fn workspace_session_lock(root:&Path)->R<windows_workspace::WorkspaceLock>{Ok(windows_workspace::lock_session(root)?)}
+#[cfg(windows)]
+pub fn workspace_lock(_root:&Path)->R<windows_workspace::WorkspaceLock>{
+ // Windows callers must hold a workspace session and call session.operation_lock().
+ Err("workspace operation requires a live session".into())
 }
 pub fn add_file(root:&Path, name:&str,bytes:&[u8])->R<String>{add_file_stream(root,name,&mut std::io::Cursor::new(bytes))}
 pub fn add_file_stream(root:&Path, name:&str,reader:&mut impl std::io::Read)->R<String>{

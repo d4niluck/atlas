@@ -1,3 +1,4 @@
+#[path="../src/lifecycle.rs"] mod lifecycle;
 #[path="../src/semantic.rs"] mod semantic;
 use semantic::SemanticService;
 use std::{thread,time::{Duration,Instant}};
