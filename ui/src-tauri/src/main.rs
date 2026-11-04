@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(windows)]
+mod windows_model_download;
+#[cfg(target_os="windows")]
+mod windows_folder;
 mod vision_model_download;
 #[cfg(target_os="linux")] mod memory_linux;
 
@@ -86,8 +90,14 @@ async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Resu
     };
     #[cfg(target_os="linux")]
     let path=linux_select_directory().await?;
+    #[cfg(target_os="windows")]
+    let path={
+        let window=app.get_webview_window("main").ok_or("Не удалось открыть выбор папки.")?;
+        let owner=window.hwnd().map_err(|_|"Не удалось открыть выбор папки.")?.0 as isize;
+        tauri::async_runtime::spawn_blocking(move || windows_folder::select_folder(owner)).await.map_err(|_|"Не удалось открыть выбор папки.")??
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(any(target_os="macos",target_os="linux"))]
+        #[cfg(any(target_os="macos",target_os="linux",target_os="windows"))]
         {
             use std::io::{Read,Write};
             let Some(path)=path else {return Ok(None)};
@@ -104,7 +114,7 @@ async fn select_workspace_directory(app:tauri::AppHandle,operation:String)->Resu
             let capability=value.get("capability").and_then(|v|v.as_str()).filter(|v|!v.is_empty()).ok_or("Не удалось подтвердить выбор папки.")?;
             Ok(Some(capability.to_owned()))
         }
-        #[cfg(not(any(target_os="macos",target_os="linux")))]
+        #[cfg(not(any(target_os="macos",target_os="linux",target_os="windows")))]
         {let _=(port,token,operation);Err("Выбор папки на этой системе пока не поддерживается.".into())}
     }).await.map_err(|_|"Не удалось открыть выбор папки.".to_owned())?
 }
@@ -124,24 +134,70 @@ async fn save_workspace_file(app:tauri::AppHandle,workspace:String,id:String,tit
 }
 
 fn allowed_external_url(url: &str) -> bool {
-    tauri::Url::parse(url).is_ok_and(|parsed| {
+    !url.chars().any(char::is_control) && tauri::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
     })
 }
 
 #[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+async fn open_external_url(url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_external_url_sync(url)).await
+        .map_err(|_| "Не удалось открыть ссылку".to_string())?
+}
+fn open_external_url_sync(url: String) -> Result<(), String> {
     if !allowed_external_url(&url) {
         return Err("Недопустимый адрес".into());
     }
+    // The URL checked above must be the same normalized value sent to the OS.
+    let url = tauri::Url::parse(&url).map_err(|_| "Недопустимый адрес")?.to_string();
     #[cfg(target_os = "macos")]
     let program = "open";
     #[cfg(target_os = "linux")]
     let program = "xdg-open";
     #[cfg(target_os = "windows")]
-    return Err("Открытие ссылок на Windows пока не поддерживается".into());
+    return windows_open_external_url(&url);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     std::process::Command::new(program).arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open_external_url_with(url: &str, open: impl FnOnce(*const u16) -> isize) -> Result<(), String> {
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = open(wide.as_ptr());
+    if result > 32 { Ok(()) } else { Err(format!("Не удалось открыть ссылку (код {result})")) }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open_external_url(url: &str) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(window: *mut c_void, verb: *const u16, file: *const u16,
+            parameters: *const u16, directory: *const u16, show: i32) -> *mut c_void;
+    }
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
+        fn CoUninitialize();
+    }
+    let url = url.to_owned();
+    // A fresh thread guarantees the STA COM mode required by shell extensions.
+    std::thread::Builder::new().name("atlas-open-url".into()).spawn(move || {
+        const COINIT_APARTMENTTHREADED: u32 = 0x2;
+        const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+        let status = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+        if status < 0 { return Err(format!("Не удалось открыть ссылку (COM: {status:#x})")); }
+        struct ComGuard;
+        impl Drop for ComGuard { fn drop(&mut self) { unsafe { CoUninitialize(); } } }
+        let _com = ComGuard;
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        let result = windows_open_external_url_with(&url, |file| unsafe {
+            // Pass one validated URL to Windows, not through cmd.exe.
+            ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file, std::ptr::null(), std::ptr::null(), 1) as isize
+        });
+        result
+    }).map_err(|e| format!("Не удалось открыть ссылку: {e}"))?
+      .join().map_err(|_| "Не удалось открыть ссылку".to_string())?
 }
 
 #[cfg(debug_assertions)]
@@ -162,6 +218,22 @@ mod tests {
         assert!(!super::allowed_external_url("file:///etc/passwd"));
         assert!(!super::allowed_external_url("javascript:alert(1)"));
         assert!(!super::allowed_external_url("https://"));
+        for raw in ["https://example.com/a\n?x=1", "https://example.com/a\r?x=1", "https://example.com/a\t?x=1", "https://example.com/a\0?x=1"] {
+            assert!(!super::allowed_external_url(raw));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_opener_passes_one_url_and_propagates_errors() {
+        let url = "https://example.com/path?x=1&y=2";
+        let result = super::windows_open_external_url_with(url, |value| {
+            let length = unsafe { (0..).find(|i| *value.add(*i) == 0).unwrap() };
+            let actual = unsafe { std::slice::from_raw_parts(value, length) };
+            assert_eq!(String::from_utf16(actual).unwrap(), url);
+            33
+        });
+        assert!(result.is_ok());
+        assert!(super::windows_open_external_url_with(url, |_| 31).is_err());
     }
     #[cfg(target_os = "macos")]
     #[test]
@@ -175,7 +247,7 @@ mod tests {
         fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", &dir);
-        super::open_external_url("https://example.com/a?x=1".into()).unwrap();
+        super::open_external_url_sync("https://example.com/a?x=1".into()).unwrap();
         for _ in 0..100 {
             if capture.exists() { break; }
             std::thread::sleep(Duration::from_millis(10));
@@ -184,7 +256,7 @@ mod tests {
         match old_path { Some(value) => std::env::set_var("PATH", value), None => std::env::remove_var("PATH") };
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(actual, "https://example.com/a?x=1\n");
-        assert!(super::open_external_url("file:///etc/passwd".into()).is_err());
+        assert!(super::open_external_url_sync("file:///etc/passwd".into()).is_err());
     }
 
 }

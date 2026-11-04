@@ -1,12 +1,30 @@
-use std::{env, fs, io::{self, BufRead, Read, Write}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+use std::{env, fs, io::{self, BufRead, Write}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+#[cfg(not(target_os = "windows"))]
+use std::io::Read;
 use tiny_http::{Server, Response, Header, StatusCode};
+#[cfg(target_os = "windows")]
+fn fill_random(random: &mut [u8; 32]) -> io::Result<()> {
+ #[link(name = "bcrypt")]
+ unsafe extern "system" {
+  fn BCryptGenRandom(algorithm: *mut std::ffi::c_void, buffer: *mut u8, length: u32, flags: u32) -> i32;
+ }
+ const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+ // A null algorithm handle is required when using the system-preferred generator.
+ let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), random.as_mut_ptr(), random.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+ if status < 0 { return Err(io::Error::other(format!("BCryptGenRandom failed: {status:#x}"))); }
+ Ok(())
+}
+#[cfg(not(target_os = "windows"))]
+fn fill_random(random: &mut [u8; 32]) -> io::Result<()> {
+ fs::File::open("/dev/urandom")?.read_exact(random)
+}
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  let args: Vec<String> = env::args().collect();
  if args.len()!=4 { return Err("usage: proxy UI_DIR BACKEND_PORT LISTEN_PORT".into()); }
  let root = fs::canonicalize(&args[1])?; let backend: u16=args[2].parse()?; let port:u16=args[3].parse()?;
  let mut lines=io::stdin().lock().lines(); let bootstrap=lines.next().ok_or("no bootstrap")??; let token=lines.next().ok_or("no token")??;
  if bootstrap.len()<32 || token.len()<32 {return Err("short secret".into());}
- let mut random=[0u8;32];fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+ let mut random=[0u8;32];fill_random(&mut random)?;
  let cookie=random.iter().map(|n|format!("{n:02x}")).collect::<String>();
  let consumed=Arc::new(AtomicBool::new(false)); let listener=Server::http(format!("127.0.0.1:{port}"))?;
  let port=listener.server_addr().to_ip().ok_or("non-IP listener")?.port();

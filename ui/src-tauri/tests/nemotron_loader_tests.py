@@ -27,8 +27,8 @@ try:
   text,n=re.subn(r'const URL: &str = "[^"]+";', 'fn test_url() -> String { std::env::var("ATLAS_TEST_DOWNLOAD_URL").unwrap() }',text); assert n==1
   text,n=re.subn(r'const SHA: &str = "[0-9a-f]+";', 'const SHA: &str = "'+hashlib.sha256(b'abc').hexdigest()+'";',text); assert n==1
   text,n=re.subn(r'const SIZE: u64 = [0-9_]+;', 'const SIZE: u64 = 3;',text); assert n==1
-  old='let mut child = Command::new("/usr/bin/curl").args(["--fail", "--location", "--silent", "--show-error", "--max-time", "21600", URL])'
-  new='let url = test_url(); let mut child = Command::new("/usr/bin/curl").args(["--fail", "--location", "--silent", "--show-error", "--max-time", "21600", url.as_str()])'
+  old='command.args(["--fail", "--location", "--silent", "--show-error", "--max-time", "21600", URL])'
+  new='let url = test_url(); command.args(["--fail", "--location", "--silent", "--show-error", "--max-time", "21600", url.as_str()])'
   assert text.count(old)==1; text=text.replace(old,new)
   text+='''\nfn main() {
  let args: Vec<String> = std::env::args().collect();
