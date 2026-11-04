@@ -19,7 +19,7 @@ fn clear_model_environment(command:&mut Command) {
   if name.to_string_lossy().to_ascii_uppercase().starts_with("LLAMA_") {command.env_remove(name);}
  }
 }
-pub struct Encoder { child: Child, address: PathBuf, identity: String, diagnostic: String, key:KeyFile, images:bool }
+pub struct Encoder { child: Child, address: PathBuf, identity: String, alternate_identity: String, diagnostic: String, key:KeyFile, images:bool }
 
 pub struct Generator { child: Child, address: PathBuf, key:KeyFile }
 impl Drop for Generator {fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
@@ -142,24 +142,27 @@ fn normalize(v: &[f64]) -> Result<Vec<f32>,String> {
 impl Encoder {
  #[cfg(feature="test-hook")] pub fn socket_path(&self)->&std::path::Path {&self.address}
  pub fn identity(&self)->&str {&self.identity}
+ pub fn alternate_identity(&self)->&str {&self.alternate_identity}
+ pub fn matches_identity(&self,value:&str)->bool {value==self.identity || value==self.alternate_identity}
  pub fn diagnostic(&self)->&str {&self.diagnostic}
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"cpu")}
- pub fn model_identity(model:&str,device:&str)->Result<String,String>{
+ pub fn model_identities(model:&str,device:&str)->Result<(String,String),String>{
     let mut hash=Sha256::new();
     let mut f=std::fs::File::open(model).map_err(|e|e.to_string())?;let mut buf=[0u8;65536];loop {remaining_search_time()?;let n=f.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}hash.update(&buf[..n]);}
-    hash.update(format!("atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;{device};ctx=2048").as_bytes());
-    Ok(format!("{:x}",hash.finalize()))
+    let derive=|device:&str| {let mut h=hash.clone();h.update(format!("atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;{device};ctx=2048").as_bytes());format!("{:x}",h.finalize())};
+    let alternate=if device=="metal" {"cpu"} else {"metal"};Ok((derive(device),derive(alternate)))
  }
+ pub fn model_identity(model:&str,device:&str)->Result<String,String>{Ok(Self::model_identities(model,device)?.0)}
  pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{Self::start_with_mmproj(exe,model,device,None)}
  pub fn start_device_with_images(exe:&str,model:&str,device:&str,mmproj:&str)->Result<Self,String>{Self::start_with_mmproj(exe,model,device,Some(mmproj))}
  fn start_with_mmproj(exe:&str,model:&str,device:&str,mmproj:Option<&str>)->Result<Self,String>{
-    let mut identity=Self::model_identity(model,device)?;if mmproj.is_some(){identity.push_str(":vision-q8-v1");}let mut buf=[0u8;65536];
+    let (mut identity,mut alternate_identity)=Self::model_identities(model,device)?;if mmproj.is_some(){identity.push_str(":vision-q8-v1");alternate_identity.push_str(":vision-q8-v1");}let mut buf=[0u8;65536];
     let mut binary_hash=Sha256::new();let mut bin=std::fs::File::open(exe).map_err(|e|e.to_string())?;loop {remaining_search_time()?;let n=bin.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}binary_hash.update(&buf[..n]);}let diagnostic=format!("{:x}",binary_hash.finalize());
     let key=KeyFile::new()?;
     let address=key.dir.join("model.sock");
     let mut command=Command::new(exe);clear_model_environment(&mut command);if let Some(path)=mmproj{command.args(["--mmproj",path]);}
     let child=command.args(["-m",model,"--embedding","--host",address.to_str().ok_or("invalid socket path")?,"--api-key-file",key.path.to_str().ok_or("invalid key path")?,"-ngl",if device=="metal" {"99"} else {"0"},"-c","2048","-b","2048","-ub","2048"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
-    let mut encoder=Self {child,address,identity,diagnostic,key,images:mmproj.is_some()}; let start=Instant::now();
+    let mut encoder=Self {child,address,identity,alternate_identity,diagnostic,key,images:mmproj.is_some()}; let start=Instant::now();
     while start.elapsed()<Duration::from_secs(30) {
        remaining_search_time()?;
        if encoder.child.try_wait().map_err(|e|e.to_string())?.is_some() {return Err("model process exited during startup".into());}
@@ -223,4 +226,22 @@ impl Encoder {
 #[cfg(test)] mod encoder_startup_cancel_contract {
  use super::*;use std::{os::unix::fs::PermissionsExt,sync::{Arc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant},thread};
  #[test] fn cancel_during_encoder_start_stops_child(){let dir=std::env::temp_dir().join(format!("atlas-encodercancel-{}",std::process::id()));std::fs::create_dir(&dir).unwrap();let script=dir.join("server.py");let pid_file=dir.join("pid");let code=format!("#!/usr/bin/python3\nimport os,socket,sys,time\nopen({:?},'w').write(str(os.getpid()))\np=sys.argv[sys.argv.index('--host')+1]\ns=socket.socket(socket.AF_UNIX); s.bind(p); s.listen(4)\nwhile True:\n c,_=s.accept(); time.sleep(5)\n",pid_file.to_str().unwrap());std::fs::write(&script,code).unwrap();std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700)).unwrap();let model=dir.join("model");std::fs::write(&model,b"model").unwrap();let flag=Arc::new(AtomicBool::new(false));let c=flag.clone();let exe=script.to_str().unwrap().to_owned();let model=model.to_str().unwrap().to_owned();let worker=thread::spawn(move||{set_stream_sink(Arc::new(|_|{}),c);set_search_deadline(Instant::now()+Duration::from_secs(2));Encoder::start_device(&exe,&model,"cpu").map(|_|())});for _ in 0..100{if pid_file.exists(){break}thread::sleep(Duration::from_millis(10))}let pid:i32=std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();let start=Instant::now();flag.store(true,Ordering::Release);assert!(worker.join().unwrap().is_err());assert!(start.elapsed()<Duration::from_millis(700));assert_eq!(unsafe{libc::kill(pid,0)},-1);std::fs::remove_dir_all(dir).unwrap();}
+}
+
+#[cfg(test)]
+mod portable_identity_tests {
+ use super::*;
+ #[test]
+ fn model_identity_preserves_legacy_device_hashes_and_distinguishes_weights() {
+  let path=std::env::temp_dir().join(format!("atlas-identity-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+  std::fs::write(&path,b"weights-one").unwrap();
+  let name=path.to_str().unwrap();
+  let (cpu,metal)=Encoder::model_identities(name,"cpu").unwrap();
+  let suffix="atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;";
+  for (device,got) in [("cpu",&cpu),("metal",&metal)] {let mut h=Sha256::new();h.update(b"weights-one");h.update(format!("{suffix}{device};ctx=2048"));assert_eq!(*got,format!("{:x}",h.finalize()));}
+  assert_eq!(Encoder::model_identities(name,"metal").unwrap(),(metal.clone(),cpu.clone()));
+  std::fs::write(&path,b"weights-two").unwrap();
+  let other=Encoder::model_identities(name,"cpu").unwrap();assert_ne!(other.0,cpu);assert_ne!(other.1,metal);
+  std::fs::remove_file(path).unwrap();
+ }
 }

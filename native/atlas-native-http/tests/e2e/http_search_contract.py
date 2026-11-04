@@ -4,7 +4,7 @@ import argparse, json, os, pathlib, signal, subprocess, tempfile, time, shutil
 from urllib.request import Request,urlopen,install_opener,build_opener,ProxyHandler
 from urllib.error import HTTPError
 install_opener(build_opener(ProxyHandler({})))
-p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['pdf-duplicate','history','pdf-exclusion','empty','typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');p.add_argument('--pdf');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--resources',required=True);p.add_argument('--case',choices=['pdf-duplicate','history','pdf-exclusion','empty','typo','typo-common','exclude','hybrid','rag','file','image','race','hybrid-race','export','protect','model-status'],required=True);p.add_argument('--workspace',choices=['default','protected','external','protected-external'],default='default');p.add_argument('--images',action='store_true');p.add_argument('--pdf');args=p.parse_args()
 root=pathlib.Path(tempfile.mkdtemp(prefix='atlas-search-contract-'));models=root/'models';models.mkdir();(models/'embeddinggemma-2-q8.gguf').write_bytes(b'fake-encoder-file')
 (models/'gemma-4-e2b-it-q4.gguf').write_bytes(b'fake-llm')
 if args.images:(models/'embeddinggemma-2-mmproj-q8.gguf').write_bytes(b'fake-vision')
@@ -46,7 +46,13 @@ try:
  if 'external' in args.workspace:
   disk=root/'disk';disk.mkdir();cap=ok(200,request('/api/workspaces/authorize',{'operation':'export','path':str(disk)}))['capability'];made=ok(201,request('/api/workspaces/create-external',{'capability':cap,'name':'External','protected':args.workspace=='protected-external','password':password}));wid=ok(200,request('/api/workspaces/attach',{'capability':made['capability'],**({'password':password,'test_protected':True} if args.workspace=='protected-external' else {})}))['id']
  a=ok(201,request('/api/w/'+wid+'/notes',{'title':'Документ индексирования','text':'Индексация заметок работает аккуратно. Уникальныйключ первая запись.'}));b=ok(201,request('/api/w/'+wid+'/notes',{'title':'Вторая заметка','text':'Уникальныйключ вторая запись.'}));aid=a['id'];bid=b['id']
- if args.case=='pdf-duplicate':
+ if args.case=='model-status':
+  for name in ['gemma-4-e4b-it-q4.gguf','nemotron-3.5-bolt-e4b-q4.gguf']:(models/name).write_bytes(b'fake-llm')
+  for selected in ['e2b','nemotron','e4b']:
+   settings=ok(200,request('/api/settings/app'));settings['model']=selected;ok(200,request('/api/settings/app',settings,'PUT'))
+   status=ok(200,request('/api/w/'+wid+'/rag/status'));assert status['model']==selected and all(status['installed_'+name] for name in ['e2b','e4b','nemotron']),status
+  print('PASS model status and switching',args.workspace)
+ elif args.case=='pdf-duplicate':
   pdf=pathlib.Path(args.pdf or pathlib.Path(__file__).resolve().parents[4]/'ui/tests/fixtures/two-pages.pdf').read_bytes()
   def upload_pdf():
    q=Request(base+'/api/w/'+wid+'/files?filename=manual.pdf',data=pdf,method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
