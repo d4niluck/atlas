@@ -1,0 +1,10 @@
+import {strict as assert} from 'node:assert';
+import {prepareWindowExit} from '../src/windowExit.ts';
+let log:string[]=[];let release!:()=>void;const pending=new Promise<void>(r=>{release=r});
+const base=()=>({begin:async()=>{log.push('begin')},check:()=>{log.push('check')},lock:()=>{log.push('lock')},prepare:async()=>{log.push('prepare');await pending;log.push('saved')},cancel:()=>{log.push('cancel')},finish:async(error:string|null)=>{log.push('finish:'+error)},notify:(message:string)=>{log.push('notify:'+message)}});
+const operation=prepareWindowExit(base());await new Promise(r=>setTimeout(r,0));assert.deepEqual(log,['begin','check','lock','prepare']);release();await operation;assert.deepEqual(log,['begin','check','lock','prepare','saved','finish:null']);
+log=[];await prepareWindowExit({...base(),check:()=>{throw Error('busy')}});assert.deepEqual(log,['begin','cancel','finish:busy']);
+log=[];await prepareWindowExit({...base(),prepare:async()=>{throw Error('save failed')}});assert.deepEqual(log,['begin','check','lock','cancel','finish:save failed']);
+log=[];await prepareWindowExit({...base(),prepare:async()=>{},finish:async()=>{throw Error('connection lost')}});assert.deepEqual(log,['begin','check','lock','notify:Закрытие не подтверждено. Дождитесь завершения операции.']);
+log=[];await prepareWindowExit({...base(),begin:async()=>{throw Error('unavailable')}});assert.deepEqual(log,['notify:Не удалось подготовить закрытие Atlas.']);
+console.log('window exit preparation: OK');
