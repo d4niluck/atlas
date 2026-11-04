@@ -33,3 +33,8 @@
 .search-output > .results { max-height:none; overflow:visible; }
 .rag-answer .markdown-content { overflow-wrap:anywhere; }
 .rag-answer .markdown-content pre { overflow-x:auto; }
+.search-form .search-stop { background:#413c4b; color:#fff; border:1px solid #736982; border-radius:9px; padding:10px 15px; font-weight:600; }
+.search-form .search-stop:hover { background:#554b61; }
+:root[data-theme=light] .search-form .search-stop { background:#eee8f4; color:#30243b; border-color:#b9a9c7; }
+:root[data-theme=light] .search-form .search-stop:hover { background:#e3d9ec; }
+.search-form .search-stop:focus-visible { outline:3px solid #a98aca; outline-offset:2px; }

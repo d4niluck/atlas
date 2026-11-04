@@ -1,3 +1,4 @@
+mod rag_stream;
 mod history;
 mod worker_overlay;
 mod stream_metadata;
@@ -37,12 +38,12 @@ fn valid(headers: &[Header], token: &str) -> bool {
     for (a, b) in actual.bytes().zip(token.bytes()) { difference |= (a ^ b) as usize; }
     (host == "localhost" || host == "127.0.0.1") && origin.map_or(true, |o| o == "http://localhost:5173" || o == "http://127.0.0.1:5173") && difference == 0
 }
-fn answer(req: Request, status: u16, value: Value) { let mut response = Response::from_string(value.to_string()).with_status_code(StatusCode(status)); response.add_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap()); let _=req.respond(response); }
+fn answer(req: Request, status: u16, value: Value) { rag_stream::finish(status,&value); let mut response = Response::from_string(value.to_string()).with_status_code(StatusCode(status)); response.add_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap()); let _=req.respond(response); }
 fn body(req: &mut Request) -> Result<Value,()> {
  let c=req.headers().iter().find(|h|h.field.equiv("Content-Type")).map(|h|h.value.as_str());
  if !c.is_some_and(|s|s.split(';').next()==Some("application/json")) {return Err(())}
  let mut buf=Vec::new();req.as_reader().take(10_000_001).read_to_end(&mut buf).map_err(|_|())?;
- if buf.len()>10_000_000{return Err(())} let v:Value=serde_json::from_slice(&buf).map_err(|_|())?; if !v.is_object(){return Err(())} Ok(v)
+ if buf.len()>10_000_000{return Err(())} let v:Value=serde_json::from_slice(&buf).map_err(|_|())?; if !v.is_object(){return Err(())} rag_stream::register_if_prepared(&v)?; if rag_stream::cancelled(){return Err(())} Ok(v)
 }
 fn call(action:&str, root:&std::path::Path, args:&[&str])->Result<Value,Box<dyn std::error::Error>> {
  let mut argv=vec!["atlas".to_owned(),action.to_owned(),root.to_string_lossy().to_string()];argv.extend(args.iter().map(|s|s.to_string()));atlas_native_storage_contract::execute(&argv)
@@ -65,6 +66,14 @@ fn semantic_unavailable(service:&semantic::SemanticService,dir:&std::path::Path)
 fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, token:&str, serial:&std::sync::Mutex<()>, model: &std::sync::Mutex<ModelState>, rag: &std::sync::Arc<std::sync::Mutex<RagState>>, choice: &std::sync::Arc<ModelChoice>, device: &std::sync::Arc<device::DeviceSettings>, workers:&std::sync::Arc<workspace_worker::Workers>, external_states:&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String,String>>>, protected:&std::sync::Arc<protected::Protected>) {
  if !valid(req.headers(),token){return answer(req,403,json!({"error":"Forbidden"}))}
  let method=req.method().as_str().to_string();let url=req.url().to_string();let path=url.split('?').next().unwrap_or("");let routed=if path.starts_with("/api/") && !path.starts_with("/api/w/") && path!="/api/settings/device" && path!="/api/settings/app" && path!="/api/settings/preview-text-size" && path!="/api/workspaces" && !path.starts_with("/api/workspaces/") { format!("/api/w/default/{}",&path[5..]) } else {path.to_owned()};let parts:Vec<&str>=routed.trim_matches('/').split('/').collect();
+ if parts.len()==6 && parts[0..2]==["api","w"] && parts[3]=="rag" && (parts[4]=="events"||parts[4]=="cancel") {
+  let wid=parts[2];let id=parts[5];let cookie=protected.session(wid).map(|v|format!("p:{v}")).or_else(||workers.session(wid).ok().map(|v|format!("w:{v}")));
+  if parts[4]=="events" && method=="GET" {let after=url.split_once('?').map(|(_,q)|url::form_urlencoded::parse(q.as_bytes()).find(|(k,_)|k=="after").and_then(|(_,v)|v.parse::<u64>().ok()).unwrap_or(0)).unwrap_or(0);return match rag_stream::events(wid,id,cookie,after){Some(v)=>answer(req,200,v),None=>answer(req,404,json!({"error":"Not found"}))}}
+  if parts[4]=="cancel" && method=="POST" {return if rag_stream::cancel(wid,id,cookie){answer(req,200,json!({"ok":true}))}else{answer(req,400,json!({"error":"Invalid request"}))}}
+  return answer(req,404,json!({"error":"Not found"}));
+ }
+ if method=="POST" && parts.len()==5 && parts[0..2]==["api","w"] && parts[3..5]==["rag","search"] {let wid=parts[2];rag_stream::prepare(wid,protected.session(wid).map(|v|format!("p:{v}")).or_else(||workers.session(wid).ok().map(|v|format!("w:{v}"))));}
+
  // Models downloaded after launch become available without starting their processes.
  {let _creation_guard=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};
  if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="semantic" || (method=="POST" && (parts[3]=="search" || parts[3]=="rag"))) {
@@ -94,6 +103,8 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
  #[cfg(any(feature="test-hook",feature="protected-external"))] if parts==["api","workspaces","inspect-attach"]&&method=="POST" {return external_routes::inspect_attach(root,req)}
  if parts==["api","workspaces","remembered-attach"]&&method=="POST" {let b=match body(&mut req){Ok(b)=>b,Err(_)=>return answer(req,400,json!({"error":"Некорректный запрос"}))};let id=b["id"].as_str().unwrap_or("");if move_workspace::pending_external(root,id){return answer(req,409,json!({"error":"Перенос не восстановлен. Подключите исходный носитель и перезапустите Atlas."}))}let path=match external_registry::remembered_path(root,id){Ok(path)=>path,Err(_)=>return answer(req,500,json!({"error":"Не удалось прочитать список пространств"}))};let capability=if let Some(path)=path{match std::fs::symlink_metadata(&path){Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,Err(_)=>return answer(req,403,json!({"error":"Нет доступа к папке пространства"})),Ok(meta) if !meta.is_dir()||meta.file_type().is_symlink()=>None,Ok(_)=>match capability::issue("attach",&path){Ok(token)=>Some(token),Err(_)=>return answer(req,403,json!({"error":"Не удалось открыть папку пространства"}))}}}else{None};return answer(req,200,json!({"capability":capability}))}
  if parts==["api","workspaces","attach"]&&method=="POST" {let semantic=model.lock().ok().and_then(|m|if let ModelState::Ready(s)=&*m{Some(s.clone())}else{None});return external_routes::attach(root,workers.clone(),external_states.clone(),req,semantic)}
+ if parts.len()==4&&parts[0..2]==["api","workspaces"]&&parts[3]=="close"&&method=="POST"{rag_stream::drop_workspace(parts[2]);}
+ if parts.len()==3&&parts[0..2]==["api","workspaces"]&&method=="DELETE"{rag_stream::drop_workspace(parts[2]);}
  if parts.len()==3&&parts[0..2]==["api","workspaces"]&&method=="DELETE"&&external_registry::entries(root).is_ok_and(|v|v.iter().any(|e|e["id"]==parts[2])) {if workers.contains(parts[2]){let _=workers.detach(parts[2]);}if let Ok(mut states)=external_states.lock(){states.remove(parts[2]);}return match external_registry::forget(root,parts[2]){Ok(true)=>answer(req,200,json!({"ok":true})),_=>answer(req,400,json!({"error":"Не удалось убрать пространство"}))}}
  if parts.len()==3&&parts[0..2]==["api","workspaces"]&&method=="PATCH"&&workers.contains(parts[2]){return external_routes::rename(root,workers,req,parts[2])}
  if parts.len()==4&&parts[0..2]==["api","workspaces"]&&parts[3]=="close"&&method=="POST"&&external_registry::entries(root).is_ok_and(|entries|entries.iter().any(|entry|entry["id"]==parts[2])){if workers.contains(parts[2]){
@@ -139,6 +150,7 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
   if parts==["api","workspaces"]&&method=="POST" {let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let name=b["name"].as_str().ok_or("invalid name")?.trim();if name.is_empty()||name.chars().count()>100{return Err("invalid name".into())}if b.get("protected").is_some_and(|v|!v.is_boolean()){return Ok((400,json!({"error":"Некорректный тип защиты"})))}if b["protected"]==true {let password=b["password"].as_str().ok_or("Укажите пароль")?;return match protected.create(root,name,password){Ok(v)=>Ok((201,v)),Err(e)=>Ok((400,json!({"error":e})))};}let wid=uuid::Uuid::new_v4().simple().to_string();let dir=root.join(&wid);call("create-workspace",&dir,&[])?;std::fs::write(dir.join(".workspace.json"),json!({"name":name}).to_string())?;return Ok((201,json!({"id":wid,"name":name})))}
   if parts.len()==4 && parts[0..2]==["api","workspaces"] && parts[3]=="protection" && method=="PATCH" {
    let id=parts[2]; if id!="default"&&(id.len()!=32 || !id.chars().all(|c|c.is_ascii_hexdigit())){return Ok((400,json!({"error":"Это пространство пока нельзя защитить"})))}
+   rag_stream::drop_workspace(id);
    let _reservation=match portable_worker::reserve(vec![id.to_owned()]){Ok(v)=>v,Err(_)=>return Ok((409,json!({"error":"Идёт копирование пространства"})))};
    let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;
    if b["protected"]==false {
@@ -235,6 +247,8 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
     results=match service.search(&dir,query,ids.as_deref()){Ok(v)=>v,Err(_)=>{let status=service.status(&dir);if status["cancelled"]==true||status["stopping"]==true{return Ok(semantic_unavailable(&service,&dir))}return Ok((503,json!({"error":if is_rag && atlas_llama_probe::remaining_search_time().is_err(){"Превышено время ожидания поиска"}else{"Семантический поиск недоступен"}}))) }};
     if is_rag {
      results=exclude_image_chunks(results);
+     rag_stream::results(&results);
+     if rag_stream::cancelled(){return Ok((499,json!({"error":"Поиск остановлен"})))}
      let generator={let guard=rag.lock().map_err(|_|"generator unavailable")?;match &*guard{RagState::Ready(g)=>Some(g.clone()),_=>None}};
      let mut candidates=results.clone();
      let select=|rows:&Vec<Value>,limit:usize,threshold:f64| -> Vec<Value> {
@@ -272,9 +286,10 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
     _workspace_after=Some(atlas_native_storage_contract::workspace_lock(&dir)?);
     if service.revision(&dir)!=Some(revision){return Ok((409,json!({"error":"Рабочее пространство изменилось; повторите поиск"})))}if atlas_native_storage_contract::search_scope(&dir,scope_ids.clone())?!=ids{return Ok((409,json!({"error":"Область поиска изменилась; повторите поиск"})))}
    } else {_serial_after=None;_workspace_after=None;}
+   if is_rag && rag_stream::cancelled(){return Ok((499,json!({"error":"Поиск остановлен"})))}
    let db=rusqlite::Connection::open(dir.join("atlas.sqlite3"))?;
    if !is_semantic || is_hybrid {let lexical=atlas_native_storage_contract::search::lexical(&db,query,ids.as_deref(),128)?;results=if is_hybrid {atlas_native_storage_contract::search::fuse(lexical,results)}else{lexical};}
-   if !query.trim().is_empty() && (rag_error.is_none() || rag_answer.is_some()){let mut snapshot=results.clone();let mut hashes=std::collections::HashMap::<String,String>::new();for result in &mut snapshot {let id=result["id"].as_str().ok_or("invalid id")?;let hash=if let Some(hash)=hashes.get(id){hash.clone()}else{let (title,text,description):(String,String,String)=db.query_row("SELECT objects.title,COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;let hash=source_hash(&title,&text,&description);hashes.insert(id.to_owned(),hash.clone());hash};result["_source_hash"]=json!(hash);}let mode=if is_rag{"rag"}else if is_hybrid{"hybrid"}else if is_semantic{"semantic"}else{"lexical"};let scope=b.get("object_ids").filter(|x|!x.is_null()).map(|x|x.to_string());let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64();db.execute("INSERT INTO search_history(query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic) VALUES(?,?,?,?,?,1,?,?,?,?)",rusqlite::params![query,mode,serde_json::to_string(&snapshot)?,now,scope,rag_answer,if is_rag {Some(serde_json::to_string(&rag_sources)?)} else {None},rag_error,if is_rag {Some(agentic)} else {None}])?;db.execute("DELETE FROM search_history WHERE id NOT IN (SELECT id FROM search_history ORDER BY id DESC LIMIT 100)",[])?;}
+   if !query.trim().is_empty() && (rag_error.is_none() || rag_answer.is_some()){let mut snapshot=results.clone();let mut hashes=std::collections::HashMap::<String,String>::new();for result in &mut snapshot {let id=result["id"].as_str().ok_or("invalid id")?;let hash=if let Some(hash)=hashes.get(id){hash.clone()}else{let (title,text,description):(String,String,String)=db.query_row("SELECT objects.title,COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;let hash=source_hash(&title,&text,&description);hashes.insert(id.to_owned(),hash.clone());hash};result["_source_hash"]=json!(hash);}let mode=if is_rag{"rag"}else if is_hybrid{"hybrid"}else if is_semantic{"semantic"}else{"lexical"};let scope=b.get("object_ids").filter(|x|!x.is_null()).map(|x|x.to_string());let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64();let inserted=rag_stream::commit(||->Result<(),Box<dyn std::error::Error>>{db.execute("INSERT INTO search_history(query,mode,results,created_at,object_ids,scope_known,answer,sources,error,agentic) VALUES(?,?,?,?,?,1,?,?,?,?)",rusqlite::params![query,mode,serde_json::to_string(&snapshot)?,now,scope,rag_answer,if is_rag {Some(serde_json::to_string(&rag_sources)?)} else {None},rag_error,if is_rag {Some(agentic)} else {None}])?;db.execute("DELETE FROM search_history WHERE id NOT IN (SELECT id FROM search_history ORDER BY id DESC LIMIT 100)",[])?;Ok(())});match inserted {Ok(result)=>result?,Err(_)=>return Ok((499,json!({"error":"Поиск остановлен"})))};}
    return Ok((200,if is_rag {json!({"answer":rag_answer,"error":rag_error,"results":results,"sources":rag_sources})} else {json!({"results":results})}))
   }
   Ok((404,json!({"error":"Not found"})))
