@@ -26,8 +26,11 @@ impl Drop for Generator {fn drop(&mut self){let _=self.child.kill();let _=self.c
 impl Generator {
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"metal")}
  pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
+  Self::start_device_with_ngram(exe,model,device,false)
+ }
+ pub fn start_device_with_ngram(exe:&str,model:&str,device:&str,ngram_enabled:bool)->Result<Self,String>{
   let key=KeyFile::new()?;let address=key.dir.join("model.sock");
-  let mut command=Command::new(exe);clear_model_environment(&mut command);let child=command.args(["-m",model,"--host",address.to_str().ok_or("invalid socket")?,"--api-key-file",key.path.to_str().ok_or("invalid key")?,"-ngl",if device=="metal" {"99"} else {"0"},"-c","16384"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
+  let mut command=Command::new(exe);clear_model_environment(&mut command);command.args(["-m",model,"--host",address.to_str().ok_or("invalid socket")?,"--api-key-file",key.path.to_str().ok_or("invalid key")?,"-ngl",if device=="metal" {"99"} else {"0"},"-c","16384"]);if ngram_enabled && device=="metal" {command.args(["--spec-type","ngram-simple","--spec-ngram-simple-size-n","4","--spec-ngram-simple-size-m","8"]);}let child=command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
   let mut generator=Self{child,address,key};let started=Instant::now();
   while started.elapsed()<Duration::from_secs(120) {remaining_search_time()?;if generator.child.try_wait().map_err(|e|e.to_string())?.is_some(){return Err("model process exited during startup".into())}if request(&generator.address,"/health",None,Some(&generator.key.token)).is_ok(){return Ok(generator)}thread::sleep(Duration::from_millis(100));}
   Err("model process did not become ready".into())
