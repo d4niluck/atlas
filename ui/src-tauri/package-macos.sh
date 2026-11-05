@@ -4,11 +4,11 @@
 # Their exact versions and provenance are not verified: this is not a clean CI build.
 set -eu
 setopt pipefail
-if (( $# < 5 || $# > 7 )); then
-  print -u2 'Usage: package-macos.sh PROJECT_ROOT LLAMA_DIR PDFIUM_DIR NODE_MODULES_DIR OUTPUT_APP [NATIVE_TARGET_DIR [APP_TARGET_DIR]]'
+if (( $# < 7 || $# > 9 )); then
+  print -u2 'Usage: package-macos.sh PROJECT_ROOT LLAMA_DIR PDFIUM_DIR NODE_MODULES_DIR OUTPUT_APP FAISS_SOURCE LLVM_SOURCE [NATIVE_TARGET_DIR [APP_TARGET_DIR]]'
   exit 2
 fi
-project=${1:A}; llama_dir=${2:A}; pdfium_dir=${3:A}; node_modules_dir=${4:A}; output=${5:A}
+project=${1:A}; llama_dir=${2:A}; pdfium_dir=${3:A}; node_modules_dir=${4:A}; output=${5:A}; faiss_source=${6:A}; llvm_source=${7:A}
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || { print -u2 'An Apple Silicon Mac is required'; exit 2; }
 [[ -x "$llama_dir/llama-server" && -f "$llama_dir/LICENSE" && -f "$pdfium_dir/lib/libpdfium.dylib" && -f "$pdfium_dir/include/fpdfview.h" && -f "$pdfium_dir/LICENSE" && -d "$pdfium_dir/licenses" && -d "$node_modules_dir" ]] || { print -u2 'Missing project, runtime, PDFium, licenses or node_modules'; exit 2; }
 [[ $(git -C "$project" rev-parse --show-toplevel 2>/dev/null) == "$project" ]] || { print -u2 'Project root must be a git working tree'; exit 2; }
@@ -34,11 +34,12 @@ commit=$(git -C "$project" rev-parse --verify HEAD^{commit})
 print "Building committed snapshot: $commit"
 git -C "$project" archive "$commit" | (cd "$work/source" && tar -xf -)
 src="$work/source"
-file "$src/native/atlas-faiss-rust/vendor/lib/libfaiss.dylib" | grep -q 'arm64' || { print -u2 'Snapshot FAISS is not arm64'; exit 2; }
+print 'Building FAISS and OpenMP from source…'
+"$src/scripts/macos/build-faiss.sh" "$faiss_source" "$llvm_source" "$src/native/atlas-faiss-rust/vendor/lib"
 ln -s "$node_modules_dir" "$src/ui/node_modules"
 native_target="$work/native-target"; app_target="$work/app-target"
-if (( $# >= 6 )); then native_target=${6:A}; [[ -d "$native_target" ]] || { print -u2 'Native target directory does not exist'; exit 2; }; fi
-if (( $# == 7 )); then app_target=${7:A}; [[ -d "$app_target" ]] || { print -u2 'App target directory does not exist'; exit 2; }; fi
+if (( $# >= 8 )); then native_target=${8:A}; [[ -d "$native_target" ]] || { print -u2 'Native target directory does not exist'; exit 2; }; fi
+if (( $# == 9 )); then app_target=${9:A}; [[ -d "$app_target" ]] || { print -u2 'App target directory does not exist'; exit 2; }; fi
 print 'Building interface…'
 (cd "$src/ui" && npm run build -- --configLoader runner)
 print 'Building backend and proxy…'
@@ -54,7 +55,7 @@ cp "$native_target/release/atlas-native-http" "$res/atlas-backend"
 cp "$native_target/release/atlas-native-proxy" "$res/atlas-proxy"
 cp "$src/native/atlas-faiss-rust/vendor/lib/libfaiss.dylib" "$res/libfaiss.dylib"
 cp "$src/native/atlas-faiss-rust/vendor/lib/.dylibs/libomp.dylib" "$res/.dylibs/libomp.dylib"
-cp "$src/native/atlas-faiss-rust/vendor/LICENSE" "$src/native/atlas-faiss-rust/vendor/THIRD_PARTY_NOTICES" "$res/licenses/faiss/"
+cp "$src/native/atlas-faiss-rust/vendor/LICENSE" "$src/native/atlas-faiss-rust/vendor/THIRD_PARTY_NOTICES" "$src/native/atlas-faiss-rust/vendor/lib/OPENMP-LICENSE.txt" "$res/licenses/faiss/"
 cp -R "$llama_dir/." "$res/llama/"
 cp -R "$src/ui/dist/." "$res/ui/"
 cp "$pdfium_dir/lib/libpdfium.dylib" "$res/libpdfium.dylib"
