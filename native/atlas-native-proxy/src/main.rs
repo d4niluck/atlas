@@ -1,22 +1,46 @@
-use std::{env, fs, io::{self, BufRead, Read, Write}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+use std::{env, fs, io::{self, BufRead, Write}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+#[cfg(not(target_os = "windows"))]
+use std::io::Read;
 use tiny_http::{Server, Response, Header, StatusCode};
+#[cfg(target_os = "windows")]
+fn fill_random(random: &mut [u8; 32]) -> io::Result<()> {
+ #[link(name = "bcrypt")]
+ unsafe extern "system" {
+  fn BCryptGenRandom(algorithm: *mut std::ffi::c_void, buffer: *mut u8, length: u32, flags: u32) -> i32;
+ }
+ const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+ // A null algorithm handle is required when using the system-preferred generator.
+ let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), random.as_mut_ptr(), random.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+ if status < 0 { return Err(io::Error::other(format!("BCryptGenRandom failed: {status:#x}"))); }
+ Ok(())
+}
+#[cfg(not(target_os = "windows"))]
+fn fill_random(random: &mut [u8; 32]) -> io::Result<()> {
+ fs::File::open("/dev/urandom")?.read_exact(random)
+}
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
  let args: Vec<String> = env::args().collect();
- if args.len()!=4 { return Err("usage: proxy UI_DIR BACKEND_PORT LISTEN_PORT".into()); }
- let root = fs::canonicalize(&args[1])?; let backend: u16=args[2].parse()?; let port:u16=args[3].parse()?;
+ let deferred=cfg!(windows) && args.len()==5 && args[4]=="--backend-stdin";
+ if args.len()!=4 && !deferred { return Err("usage: proxy UI_DIR BACKEND_PORT LISTEN_PORT [--backend-stdin]".into()); }
+ let root = fs::canonicalize(&args[1])?; let mut backend: u16=args[2].parse()?; let port:u16=args[3].parse()?;
  let mut lines=io::stdin().lock().lines(); let bootstrap=lines.next().ok_or("no bootstrap")??; let token=lines.next().ok_or("no token")??;
  if bootstrap.len()<32 || token.len()<32 {return Err("short secret".into());}
- let mut random=[0u8;32];fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+ let mut random=[0u8;32];fill_random(&mut random)?;
  let cookie=random.iter().map(|n|format!("{n:02x}")).collect::<String>();
  let consumed=Arc::new(AtomicBool::new(false)); let listener=Server::http(format!("127.0.0.1:{port}"))?;
  let port=listener.server_addr().to_ip().ok_or("non-IP listener")?.port();
  println!("{port}"); io::stdout().flush()?;
+ if deferred {let line=lines.next().ok_or("missing backend port")??;if line=="shutdown"{println!("OK");io::stdout().flush()?;return Ok(())}backend=line.parse()?;if backend==0 {return Err("invalid backend port".into());}}
+ #[cfg(windows)] let shutdown=Arc::new(AtomicBool::new(false));
+ #[cfg(windows)] {drop(lines);let flag=shutdown.clone();std::thread::spawn(move||{let stdin=io::stdin();for line in stdin.lock().lines(){match line {Ok(v) if v=="shutdown"=>{flag.store(true,Ordering::SeqCst);return},Err(_)=>break,_=>{}}}});}
  let agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).timeout_read(std::time::Duration::from_secs(30)).timeout_write(std::time::Duration::from_secs(30)).build();
  let rag_agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).timeout_read(std::time::Duration::from_secs(180)).timeout_write(std::time::Duration::from_secs(30)).build();
  // Transfers can legitimately exceed the search timeout; wait for the backend result.
  let transfer_agent=ureq::AgentBuilder::new().redirects(0).timeout_connect(std::time::Duration::from_secs(5)).build();
  let active=Arc::new(AtomicUsize::new(0));
- for mut req in listener.incoming_requests() {
+ loop {
+  #[cfg(windows)] let mut req={if shutdown.load(Ordering::SeqCst){break}match listener.recv_timeout(std::time::Duration::from_millis(50))? {Some(req)=>req,None=>continue}};
+  #[cfg(not(windows))] let mut req=listener.recv()?;
   if active.fetch_add(1,Ordering::SeqCst)>=16 { active.fetch_sub(1,Ordering::SeqCst); let _=req.respond(Response::empty(503)); continue; }
   let active=active.clone();
   let root=root.clone(); let bootstrap=bootstrap.clone(); let token=token.clone(); let cookie=cookie.clone(); let consumed=consumed.clone(); let agent=agent.clone(); let rag_agent=rag_agent.clone(); let transfer_agent=transfer_agent.clone();
@@ -52,5 +76,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let response=Response::from_file(file).with_header(Header::from_bytes("Content-Type",mime).unwrap()).with_header(Header::from_bytes("X-Content-Type-Options","nosniff").unwrap()).with_header(Header::from_bytes("Referrer-Policy","no-referrer").unwrap()).with_header(Header::from_bytes("Content-Security-Policy","default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; worker-src 'self' blob:").unwrap());let _=req.respond(response);
   });
  }
+ #[cfg(windows)] {while active.load(Ordering::SeqCst)!=0 {std::thread::sleep(std::time::Duration::from_millis(10));}println!("OK");io::stdout().flush()?;}
  Ok(())
 }

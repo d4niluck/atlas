@@ -17,3 +17,6 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSImage"] }
 
 objc2-foundation = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+sha2 = "0.10"

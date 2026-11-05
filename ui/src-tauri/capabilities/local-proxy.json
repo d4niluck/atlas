@@ -28,6 +28,8 @@
     "allow-rag-e4b-model-download-status",
     "allow-download-nemotron-model",
     "allow-nemotron-model-download-status",
+    "allow-begin-close-preparation",
+    "allow-finish-close-preparation",
     "allow-prepare-restart",
     "allow-restart-atlas"
   ]
