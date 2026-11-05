@@ -1,0 +1,24 @@
+[package]
+name = "atlas-native-http"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+atlas-sqlcipher-proof = { path = "../atlas-protected-storage" }
+tiny_http = "0.12"
+libc = "0.2"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "modern_sqlite"] }
+atlas-native-storage-contract = { path = "../atlas-native-storage" }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+sha2 = "0.10"
+percent-encoding = "2"
+
+atlas-faiss-probe={path="../atlas-faiss-rust"}
+atlas-joined-probe={path="../atlas-joined-probe"}
+atlas-llama-probe={path="../atlas-llama-rust"}
+[features]
+default=["protected-external"]
+protected-external=[]
+test-hook=["atlas-native-storage-contract/test-hook","atlas-joined-probe/test-hook","atlas-sqlcipher-proof/test-hook"]

@@ -1,0 +1,19 @@
+.rag-settings{margin:0 0 16px;padding:14px;border:1px solid #51485f;border-radius:12px;background:#25232e;color:#f1edf7}
+.rag-settings-heading{font-size:13px;font-weight:650}
+.rag-settings-description{margin:5px 0 12px;color:#c7c0cf;font-size:12px;line-height:1.4}
+.rag-models{display:grid;gap:6px}
+.rag-model-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:10px 12px;text-align:left;color:#f1edf7;background:#302d39;border:1px solid #554f60;border-radius:9px;cursor:pointer}
+.rag-model-option:hover:not(:disabled){background:#413949;border-color:#aa8fc8}
+.rag-model-option:focus-visible{outline:3px solid #d1b4ff;outline-offset:2px}
+.rag-model-option[aria-pressed=true]{background:#463853;border-color:#c3a4ea}
+.rag-model-option:disabled{cursor:not-allowed;color:#c3bdc9;opacity:.8}
+.rag-model-copy{display:flex;flex-direction:column;gap:3px;min-width:0}.rag-model-copy strong{font-size:13px}.rag-model-copy small{font-size:11px;color:#d1c8d8}.rag-model-check{font-size:16px;color:#e4cfff}
+:root[data-theme=light] .rag-settings{background:#f8f5fb;border-color:#ddd2e6;color:#30283a}
+:root[data-theme=light] .rag-settings-description{color:#605569}
+:root[data-theme=light] .rag-model-option{background:#fff;border-color:#d8cce2;color:#30283a}
+:root[data-theme=light] .rag-model-option:hover:not(:disabled){background:#f0e8f7;border-color:#8d6aab}
+:root[data-theme=light] .rag-model-option:focus-visible{outline-color:#69418b}
+:root[data-theme=light] .rag-model-option[aria-pressed=true]{background:#eee4f7;border-color:#8963aa}
+:root[data-theme=light] .rag-model-option:disabled{color:#615a65}
+:root[data-theme=light] .rag-model-copy small{color:#625569}:root[data-theme=light] .rag-model-check{color:#604080}
+.device-settings-group{margin-top:16px}.device-settings-group>strong{display:block;font-size:13px;margin-bottom:8px}.device-settings-group p{font-size:12px;line-height:1.4;margin:8px 0 0}

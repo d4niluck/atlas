@@ -1,0 +1,3 @@
+.atlas-icon{display:grid;place-items:center;width:32px;height:32px;flex:none;color:#b69af7}
+.atlas-icon svg{display:block;width:100%;height:100%}
+.atlas-icon-large{width:56px;height:56px;margin:auto}

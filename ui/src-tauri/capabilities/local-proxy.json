@@ -1,0 +1,34 @@
+{
+  "identifier": "atlas-local-proxy",
+  "description": "Local application window",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "allow-models-intro-seen",
+    "allow-dismiss-models-intro",
+    "allow-download-vision-model",
+    "allow-vision-model-download-status",
+    "allow-select-workspace-directory",
+    "allow-save-workspace-file",
+    "allow-open-external-url",
+    "allow-download-model",
+    "allow-model-download-status",
+    "allow-download-q8-model",
+    "allow-q8-model-download-status",
+    "allow-download-rag-model",
+    "allow-rag-model-download-status",
+    "allow-download-rag-e4b-model",
+    "allow-rag-e4b-model-download-status",
+    "allow-download-nemotron-model",
+    "allow-nemotron-model-download-status",
+    "allow-prepare-restart",
+    "allow-restart-atlas"
+  ]
+}

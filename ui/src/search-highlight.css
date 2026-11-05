@@ -1,0 +1,13 @@
+/* Keep the source readable in both themes after the temporary search cue. */
+.search-highlight, .search-highlight-mark { --atlas-search-yellow: rgba(157, 120, 9, .62); }
+:root[data-theme=light] .search-highlight, :root[data-theme=light] .search-highlight-mark { --atlas-search-yellow: rgba(255, 214, 0, .48); }
+.search-highlight mark, .search-highlight-mark {
+  color: inherit;
+  background-color: transparent;
+  animation: atlas-search-fade 1s ease-out 1s both;
+}
+.search-highlight-mark { pointer-events: none; }
+@keyframes atlas-search-fade {
+  from { background-color: var(--atlas-search-yellow); }
+  to { background-color: transparent; }
+}

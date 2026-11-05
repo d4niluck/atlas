@@ -1,0 +1,4 @@
+export async function searchWithRetry(url:string,options:RequestInit,onWaiting:()=>void,onRetry?:()=>void):Promise<Response>{
+ const deadline=Date.now()+300000;let waitMs=250;
+ for(;;){const response=await fetch(url,options);if(response.status!==503)return response;const data=await response.clone().json().catch(()=>null);if(data?.error!=='Подготавливаем индекс поиска. Попробуйте ещё раз через несколько секунд.'||Date.now()>=deadline)return response;onWaiting();await new Promise<void>((resolve,reject)=>{const signal=options.signal;if(signal?.aborted){reject(new DOMException('Aborted','AbortError'));return}const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve()},waitMs);waitMs=Math.min(waitMs*2,1500);function abort(){clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))}signal?.addEventListener('abort',abort,{once:true})});onRetry?.();}
+}

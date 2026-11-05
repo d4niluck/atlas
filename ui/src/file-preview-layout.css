@@ -1,0 +1,16 @@
+/* A flex child must be allowed to shrink for its own scrollbar to work. */
+.file-preview-text{flex:1 1 0;min-height:0;min-width:0;max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
+/* Keep the page area scrollable inside both the normal and expanded editor. */
+.pdf-preview{flex:1 1 0;min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain}
+.pdf-preview-controls{position:sticky;top:0;z-index:1;background:#1d1e26}
+:root[data-theme=light] .pdf-preview-controls{background:#fff}
+
+
+/* File text needs a constrained flex height to scroll in fullscreen. */
+.editor > .note-content { flex:1 1 0; min-height:0; }
+
+.file-preview-overlay{pointer-events:none;background:transparent}.file-preview-overlay .file-editor{pointer-events:auto}
+
+.pdf-page {position:relative;display:table;margin-inline:auto;}
+.pdf-page canvas {display:block;}
+.pdf-search-highlight {position:absolute;pointer-events:none;opacity:.5;}

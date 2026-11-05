@@ -1,0 +1,7 @@
+[package]
+name = "atlas-native-proxy"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+tiny_http = "0.12"
+ureq = { version = "2.12", default-features = false }
