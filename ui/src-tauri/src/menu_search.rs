@@ -4,27 +4,55 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Windo
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 const QUICK: &str = "quick-search";
-const WIDTH: f64 = 760.;
-const HEIGHT: f64 = 540.;
+const NARROW_WIDTH: f64 = 440.;
+const WIDE_WIDTH: f64 = 760.;
+const HEIGHT: f64 = 680.;
 
 #[derive(Default)]
-pub struct PendingResult(Mutex<Option<Value>>, AtomicBool, AtomicBool);
+pub struct PendingResult(Mutex<Option<Value>>, AtomicBool, AtomicBool, Mutex<Option<(f64, f64)>>, AtomicBool);
 
-// Keep the entire popup on the monitor even when the status item is near an edge.
-fn popup_position(x: f64, bottom: f64, scale: f64, bounds: (f64, f64, f64, f64)) -> (f64, f64) {
+// Physical coordinates prevent scaling errors when the menu is on a secondary display.
+fn popup_size(wide: bool, scale: f64, available_width: f64, available_height: f64) -> (f64, f64) {
+    ((if wide { WIDE_WIDTH } else { NARROW_WIDTH } * scale).min(available_width), (HEIGHT * scale).min(available_height))
+}
+fn popup_position(x: f64, bottom: f64, width: f64, height: f64, bounds: (f64, f64, f64, f64)) -> (f64, f64) {
     let (left, top, right, lower) = bounds;
-    let width = WIDTH * scale;
-    let height = HEIGHT * scale;
     ((x - width / 2.).max(left).min((right - width).max(left)), bottom.max(top).min((lower - height).max(top)))
+}
+fn position_popup(app: &AppHandle, window: &tauri::WebviewWindow, anchor: (f64, f64), wide: bool) -> Result<(), String> {
+    let monitors=app.available_monitors().map_err(|e|e.to_string())?;
+    let monitor=monitors.iter().find(|m| {let p=m.position();let s=m.size();anchor.0>=p.x as f64&&anchor.0<(p.x as f64+s.width as f64)&&anchor.1>=p.y as f64&&anchor.1<=(p.y as f64+s.height as f64)}).ok_or("Экран для окна поиска недоступен")?;
+    let area=monitor.work_area();let p=area.position;let s=area.size;
+    let (width,height)=popup_size(wide,monitor.scale_factor(),s.width as f64,s.height as f64);
+    let (x,y)=popup_position(anchor.0,anchor.1,width,height,(p.x as f64,p.y as f64,p.x as f64+s.width as f64,p.y as f64+s.height as f64));
+    window.set_size(tauri::PhysicalSize::new(width.round() as u32,height.round() as u32)).map_err(|e|e.to_string())?;
+    window.set_position(tauri::PhysicalPosition::new(x.round() as i32,y.round() as i32)).map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub fn set_quick_search_mode(app: AppHandle, wide: bool) -> Result<(), String> {
+    let state=app.state::<PendingResult>();
+    let anchor=state.3.lock().map_err(|_|"Не удалось изменить размер окна")?;
+    state.4.store(wide,Ordering::SeqCst);
+    if let (Some(anchor),Some(window))=(*anchor,app.get_webview_window(QUICK)) {position_popup(&app,&window,anchor,wide)?;}
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test] fn keeps_popup_on_monitor_near_edges() {
-        assert_eq!(popup_position(1980., 30., 2., (0., 0., 2000., 1600.)), (480., 30.));
-        assert_eq!(popup_position(10., 30., 2., (0., 0., 2000., 1600.)), (0., 30.));
-        assert_eq!(popup_position(-10., 30., 1., (-1200., 0., 0., 900.)), (-760., 30.));
+        assert_eq!(popup_position(1980., 30., 1520., 1360., (0., 0., 2000., 1600.)), (480., 30.));
+        assert_eq!(popup_position(10., 30., 1520., 1360., (0., 0., 2000., 1600.)), (0., 30.));
+        assert_eq!(popup_position(-10., 30., 760., 680., (-1200., 0., 0., 900.)), (-760., 30.));
+    }
+    #[test] fn popup_dimensions_follow_search_mode_and_screen() {
+        assert_eq!(popup_size(false, 2., 2000., 1600.), (880., 1360.));
+        assert_eq!(popup_size(true, 2., 2000., 1600.), (1520., 1360.));
+        assert_eq!(popup_size(true, 2., 1000., 1000.), (1000., 1000.));
+    }
+    #[test] fn popup_remains_on_screen_when_resized() {
+        assert_eq!(popup_position(1980., 30., 1520., 1360., (0., 0., 2000., 1600.)), (480., 30.));
+        assert_eq!(popup_position(10., 30., 880., 1360., (0., 0., 2000., 1600.)), (0., 30.));
     }
     #[test] fn exit_waits_for_active_downloads() {
         let exited=std::cell::Cell::new(false);
@@ -128,7 +156,7 @@ pub fn install(app: &mut tauri::App, origin: String) -> Result<(), Box<dyn std::
         let window=if let Some(window)=app_handle.get_webview_window(QUICK){window}else{
             let Ok(url)=format!("{origin}/?window=quick-search").parse() else{return};
             let Ok(window)=WebviewWindowBuilder::new(&app_handle,QUICK,WebviewUrl::External(url))
-                .title("Поиск Atlas").inner_size(WIDTH,HEIGHT).resizable(false).decorations(false).skip_taskbar(true).always_on_top(true).visible(false)
+                .title("Поиск Atlas").inner_size(NARROW_WIDTH,HEIGHT).resizable(false).decorations(false).transparent(true).effects(tauri::window::EffectsBuilder::new().effect(tauri::window::Effect::Popover).state(tauri::window::EffectState::Active).radius(18.).build()).shadow(true).skip_taskbar(true).always_on_top(true).visible(false)
                 .on_navigation({let origin=origin.clone();move |url|url.scheme()=="http" && url.origin().ascii_serialization()==origin})
                 .build() else{return};
             let hiding=window.clone();
@@ -138,10 +166,11 @@ pub fn install(app: &mut tauri::App, origin: String) -> Result<(), Box<dyn std::
         if window.is_visible().unwrap_or(false) {let _=window.hide();return}
         if let Ok(monitors)=app_handle.available_monitors() {
             if let Some(monitor)=monitors.iter().find(|m| {let p=m.position();let s=m.size();position.x>=p.x as f64&&position.x<(p.x as f64+s.width as f64)&&position.y>=p.y as f64&&position.y<(p.y as f64+s.height as f64)}) {
-                let scale=monitor.scale_factor(); let area=monitor.work_area();
+                let scale=monitor.scale_factor();
                 let rpos=rect.position.to_physical::<f64>(scale);let rsize=rect.size.to_physical::<f64>(scale);
-                let (x,y)=popup_position(rpos.x+rsize.width/2.,rpos.y+rsize.height,scale,(area.position.x as f64,area.position.y as f64,(area.position.x as f64)+(area.size.width as f64),(area.position.y as f64)+(area.size.height as f64)));
-                let _=window.set_position(tauri::PhysicalPosition::new(x as i32,y as i32));
+                let anchor=(rpos.x+rsize.width/2.,rpos.y+rsize.height);
+                let state=app_handle.state::<PendingResult>();
+                if let Ok(mut saved)=state.3.lock(){*saved=Some(anchor);let _=position_popup(&app_handle,&window,anchor,state.4.load(Ordering::SeqCst));};
             }
         }
         let _=window.show();let _=window.set_focus();

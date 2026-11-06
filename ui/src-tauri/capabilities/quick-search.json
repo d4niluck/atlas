@@ -3,5 +3,5 @@
   "description": "Compact macOS search window",
   "windows": ["quick-search"],
   "remote": {"urls": ["http://127.0.0.1:*/*"]},
-  "permissions": ["core:default", "allow-show-main-window", "allow-hide-quick-search", "allow-open-quick-result", "allow-request-atlas-exit", "allow-open-search-settings"]
+  "permissions": ["core:default", "allow-set-quick-search-mode", "allow-hide-quick-search", "allow-open-quick-result", "allow-open-search-settings"]
 }

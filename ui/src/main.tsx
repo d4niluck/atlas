@@ -360,9 +360,8 @@ function WorkspaceTabs(){
 }
 const tauri=(window as any).__TAURI__;
 const quickSearch=new URLSearchParams(window.location.search).get('window')==='quick-search';
+if(quickSearch)document.documentElement.classList.add('menu-search-root');
 createRoot(document.getElementById('root')!).render(quickSearch?<MenuBarSearch
  onNavigate={(workspaceId,target)=>tauri?.core.invoke('open_quick_result',{workspaceId,id:target.id,chunk:target.chunk})}
- onOpenAtlas={()=>tauri?.core.invoke('show_main_window')}
  onOpenSettings={()=>tauri?.core.invoke('open_search_settings')}
- onExit={()=>tauri?.core.invoke('request_atlas_exit')}
 />:<WorkspaceTabs/>);

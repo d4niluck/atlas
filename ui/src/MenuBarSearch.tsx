@@ -14,14 +14,14 @@ import './menu-bar-search.css';
 type Workspace = {id:string;name:string;protected?:boolean;available?:boolean};
 type Settings = {lexical_enabled:boolean;semantic_enabled:boolean;rag_enabled:boolean;agentic:boolean};
 type Source = SearchChunk & {id:string;title:string;missing?:boolean};
-type Props = {onNavigate:(workspaceId:string,target:{id:string;chunk:SearchChunk|null})=>void|Promise<void>;onOpenAtlas:()=>void|Promise<void>;onExit:()=>void|Promise<void>;onOpenSettings?:()=>void|Promise<void>};
+type Props = {onNavigate:(workspaceId:string,target:{id:string;chunk:SearchChunk|null})=>void|Promise<void>;onOpenSettings?:()=>void|Promise<void>};
 type Request = {workspaceId:string;workspaceName:string;protected:boolean;query:string;mode:SearchMode;agentic:boolean};
 
 export function clearFinishedAttempt(operation:{id:string|null;poll:AbortController|null}){operation.poll?.abort();operation.id=null}
 export async function cancelRagAttempt(operation:{id:string|null;prefix:string},fetcher:typeof fetch=fetch){if(!operation.id)return;const response=await fetcher(operation.prefix+'/rag/cancel/'+encodeURIComponent(operation.id),{method:'POST',keepalive:true});if(!response.ok)throw Error()}
 export async function reportCancelFailure(operation:{id:string|null;prefix:string},isCurrent:()=>boolean,report:()=>void,fetcher:typeof fetch=fetch){try{await cancelRagAttempt(operation,fetcher)}catch{if(isCurrent())report()}}
 
-export function MenuBarSearch({onNavigate,onOpenAtlas,onOpenSettings,onExit}:Props) {
+export function MenuBarSearch({onNavigate,onOpenSettings}:Props) {
  const [workspaces,setWorkspaces]=useState<Workspace[]>([]);
  const [workspaceId,setWorkspaceId]=useState('');
  const [settings,setSettings]=useState<Settings>({lexical_enabled:true,semantic_enabled:false,rag_enabled:false,agentic:false});
@@ -103,8 +103,10 @@ export function MenuBarSearch({onNavigate,onOpenAtlas,onOpenSettings,onExit}:Pro
  function selectSimple(value:'lexical'|'semantic'){const next=selectSearchMode(mode,previous.current,value);previous.current=next;setMode(next)}
  function action(fn:()=>void|Promise<void>){void Promise.resolve().then(fn).catch(e=>setError(e instanceof Error?e.message:'Не удалось открыть Atlas'))}
  const isRag=resultRequest?.mode==='rag';
- return <main className="menu-search">
-  <header className="menu-search-head"><label className="menu-search-workspace"><span className="sr-only">Пространство</span><select aria-label="Пространство" value={workspaceId} onChange={e=>{setWorkspaceId(e.target.value);setLocked(null);setPassword('')}}><option value="" disabled>Выберите пространство</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.protected?'🔒 ':''}{w.name}{w.available===false?' · недоступно':''}</option>)}</select></label><button type="button" className="menu-search-icon" aria-label="Открыть Atlas" title="Открыть Atlas" onClick={()=>action(onOpenAtlas)}>↗</button>{onOpenSettings&&<button type="button" className="menu-search-icon" aria-label="Настройки поиска" title="Настройки поиска" onClick={()=>action(onOpenSettings)}>⚙</button>}<button type="button" className="menu-search-icon" aria-label="Выйти из Atlas" title="Выйти из Atlas" onClick={()=>action(onExit)}>⏻</button></header>
+ const resizeQueue=useRef<Promise<void>>(Promise.resolve());
+ useEffect(()=>{const tauri=(window as any).__TAURI__;if(!tauri?.core)return;let stale=false;resizeQueue.current=resizeQueue.current.catch(()=>{}).then(async()=>{if(stale)return;try{await tauri.core.invoke('set_quick_search_mode',{wide:mode==='rag'})}catch{if(!stale)setError('Не удалось изменить размер окна поиска')}});return()=>{stale=true}},[mode]);
+ return <main className={'menu-search '+(mode==='rag'?'menu-search-wide':'menu-search-compact')}>
+  <header className="menu-search-head"><label className="menu-search-workspace"><span className="sr-only">Пространство</span><select aria-label="Пространство" value={workspaceId} onChange={e=>{setWorkspaceId(e.target.value);setLocked(null);setPassword('')}}><option value="" disabled>Выберите пространство</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.protected?'🔒 ':''}{w.name}{w.available===false?' · недоступно':''}</option>)}</select></label>{onOpenSettings&&<button type="button" className="menu-search-icon" aria-label="Настройки поиска" title="Настройки поиска" onClick={()=>action(onOpenSettings)}>⚙</button>}</header>
   <div className="menu-search-controls"><div className="menu-search-modes" role="group" aria-label="Режим поиска"><button type="button" aria-pressed={mode==='lexical'||mode==='hybrid'} disabled={!settings.lexical_enabled} title="По словам" aria-label="По словам" onClick={()=>selectSimple('lexical')}>T</button><button type="button" aria-pressed={mode==='semantic'||mode==='hybrid'} disabled={!settings.semantic_enabled} title="По смыслу" aria-label="По смыслу" onClick={()=>selectSimple('semantic')}>≋</button><button type="button" aria-pressed={mode==='rag'} disabled={!settings.rag_enabled} title="Умный поиск" aria-label="Умный поиск" onClick={()=>{if(mode!=='rag')previous.current=mode;setMode('rag')}}>🧠</button></div></div>
   <form className="menu-search-form" onSubmit={submit}><input aria-label="Поисковый запрос" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Найти в пространстве…"/><button type="submit" disabled={!workspaceId||!query.trim()} aria-label="Искать" title="Искать">⌕</button>{searching&&<button type="button" className="menu-search-stop" aria-label="Остановить поиск" title="Остановить поиск" onClick={()=>stop()}>■</button>}</form>
   {error&&<p className="menu-search-error" role="alert">{error}</p>}
