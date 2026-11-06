@@ -67,12 +67,12 @@
 .card.image-expanded .board-image { max-height:calc(var(--image-card-width,230px) * 0.9565); }
 .image-size-controls { position:absolute; inset:0; pointer-events:none; }
 .image-resize-corner { position:absolute; width:18px; height:18px; pointer-events:auto; touch-action:none; z-index:3; }
-.image-resize-corner.top { top:-5px; }
-.image-resize-corner.bottom { bottom:-5px; }
-.image-resize-corner.left { left:-5px; }
-.image-resize-corner.right { right:-5px; }
-.image-resize-corner.top.left, .image-resize-corner.bottom.right { cursor:nwse-resize; }
-.image-resize-corner.top.right, .image-resize-corner.bottom.left { cursor:nesw-resize; }
+.image-resize-corner.corner-top { top:-5px; }
+.image-resize-corner.corner-bottom { bottom:-5px; }
+.image-resize-corner.corner-left { left:-5px; }
+.image-resize-corner.corner-right { right:-5px; }
+.image-resize-corner.corner-top.corner-left, .image-resize-corner.corner-bottom.corner-right { cursor:nwse-resize; }
+.image-resize-corner.corner-top.corner-right, .image-resize-corner.corner-bottom.corner-left { cursor:nesw-resize; }
 .image-resize-corner:focus-visible { outline:2px solid #b194fa; outline-offset:2px; }
 
 
