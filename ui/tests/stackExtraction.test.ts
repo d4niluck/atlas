@@ -14,8 +14,8 @@ test('avoids a neighbouring card using extracted image dimensions',()=>{
  assert.ok(pos);assert.equal(pos.x,270);assert.ok(pos.y>=102);
 });
 
-test('does not produce a location for missing or singleton groups',()=>{
- assert.equal(extractionPosition([{id:'a',x:0,y:0}],[{id:'g',ids:['a']}],'a'),null);
+test('extracts the final card in place and rejects missing groups',()=>{
+ assert.deepEqual(extractionPosition([{id:'a',x:12,y:34}],[{id:'g',ids:['a']}],'a'),{x:12,y:34});
  assert.equal(extractionPosition([{id:'a',x:0,y:0}],[],'a'),null);
 });
 

@@ -13,6 +13,7 @@ export function extractionPosition(objects:BoardObject[],stacks:Stack[],id:strin
  const extracted=objects.find(item=>item.id===id);
  if(!group||!extracted)return null;
  const members=objects.filter(item=>group.ids.includes(item.id)&&item.id!==id);
+ if(!members.length)return {x:extracted.x,y:extracted.y};
  const frame=stackFrame(members,false);if(!frame)return null;
  const hidden=new Set(stacks.filter(stack=>stack.collapsed).flatMap(stack=>stack.ids));
  const occupied=objects.filter(item=>item.id!==id&&!hidden.has(item.id)).map(item=>({x:item.x,y:item.y,w:item.width??230,h:item.height??82}));
