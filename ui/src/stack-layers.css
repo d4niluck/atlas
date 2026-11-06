@@ -1,8 +1,8 @@
 /* Keep the active group above intersecting cards; its own cards stay sharp. */
-.stack.stack-open{z-index:2;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
-.stack.stack-front{z-index:4;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.stack.stack-open{z-index:2}
+.stack.stack-front{z-index:4}
+.stack.stack-blur{backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.lines.lines-group{z-index:3}
 .lines.lines-front{z-index:4}
 .card.group-card-open{z-index:3}
 .card.group-card-front{z-index:5}
-
-.canvas.viewport-moving .stack.stack-open,.canvas.viewport-moving .stack.stack-front{backdrop-filter:none;-webkit-backdrop-filter:none}
