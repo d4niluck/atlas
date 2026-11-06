@@ -23,3 +23,19 @@ test('a hidden expanded image reserves its saved width and a safe height before 
  assert.deepEqual(canvasCardSize(image,{offsetWidth:460,offsetHeight:250}),{width:460,height:250});
  assert.deepEqual(canvasCardSize({...image,imageExpanded:false},null),{width:230,height:82});
 });
+
+test('left and right corners keep the opposite edge fixed, including bounds',async()=>{
+ const {resizedImageGeometry}=await import('../src/imageCardSize.ts');
+ assert.deepEqual(resizedImageGeometry(300,100,-50,'left'),{width:350,x:50});
+ assert.deepEqual(resizedImageGeometry(300,100,50,'right'),{width:350,x:100});
+ assert.deepEqual(resizedImageGeometry(300,100,500,'left'),{width:230,x:170});
+ assert.deepEqual(resizedImageGeometry(900,100,100,'right'),{width:920,x:100});
+});
+
+test('vertical motion resizes and top left corner keeps opposite corner fixed',async()=>{
+ const {cornerResizeWidth,anchoredImagePosition}=await import('../src/imageCardSize.ts');
+ assert.equal(cornerResizeWidth(300,200,0,-40,'left','top'),330);
+ assert.equal(cornerResizeWidth(300,200,0,40,'right','bottom'),330);
+ assert.deepEqual(anchoredImagePosition(100,200,300,330,200,220,'left','top'),{x:70,y:180});
+ assert.deepEqual(anchoredImagePosition(100,200,300,330,200,220,'right','bottom'),{x:100,y:200});
+});

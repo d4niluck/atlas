@@ -18,3 +18,21 @@ export function canvasCardSize(item:{kind:string;title:string;imageExpanded?:boo
  const width=expandedImage?imageCardWidth(item.imageWidth):230;
  return {width:card?.offsetWidth||width,height:card?.offsetHeight||(expandedImage?Math.ceil(width*0.9565)+34:82)};
 }
+
+// Keep the opposite edge fixed when resizing from the left.
+export function resizedImageGeometry(width:number,x:number,delta:number,side:'left'|'right') {
+ const start=imageCardWidth(width);
+ const next=imageCardWidth(start+(side==='left'?-delta:delta));
+ return {width:next,x:side==='left'?x+start-next:x};
+}
+
+// Project the pointer displacement onto the card diagonal while preserving its aspect ratio.
+export function cornerResizeWidth(width:number,height:number,dx:number,dy:number,side:'left'|'right',vertical:'top'|'bottom') {
+ const w=imageCardWidth(width);const h=Math.max(1,height);
+ const horizontal=side==='left'?-dx:dx;
+ const verticalDelta=(vertical==='top'?-dy:dy)*w/h;
+ return imageCardWidth(w+(horizontal+verticalDelta)/2);
+}
+export function anchoredImagePosition(x:number,y:number,oldWidth:number,newWidth:number,oldHeight:number,newHeight:number,side:'left'|'right',vertical:'top'|'bottom') {
+ return {x:side==='left'?x+oldWidth-newWidth:x,y:vertical==='top'?y+oldHeight-newHeight:y};
+}

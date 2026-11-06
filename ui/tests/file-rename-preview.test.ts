@@ -29,3 +29,13 @@ test('a lost response resynchronizes an open preview with the saved title',async
  const s=setup(true);await assert.rejects(s.rename('file-id','new.pdf'),/network/);
  assert.equal(s.getPreview().title,'new.pdf');assert.equal(s.appRef.current.inert,false);assert.equal(s.busy.current,false);
 });
+
+test('file title editing is available only in the open preview',()=>{
+ const occurrences=[...source.matchAll(/<FileCardTitle\b/g)];
+ assert.equal(occurrences.length,1);
+ const position=occurrences[0].index!;
+ assert.ok(source.lastIndexOf('className="file-preview-title"',position)>source.lastIndexOf('<main ref={canvasRef}',position));
+ assert.match(source.slice(position,position+200),/title=\{preview\.title\}/);
+ const component=readFileSync(new URL('../src/FileCardTitle.tsx',import.meta.url),'utf8');
+ assert.match(component,/onClick=\{e=>\{e\.stopPropagation\(\);begin\(\)\}\}/);
+});

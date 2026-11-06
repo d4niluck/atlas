@@ -1,20 +1,13 @@
 import React,{useEffect,useRef} from 'react';
-import {imageCardWidth,stepImageCardWidth,MIN_IMAGE_CARD_WIDTH,MAX_IMAGE_CARD_WIDTH} from './imageCardSize';
-
-type Props={width?:number|null;onChange:(width:number)=>void;onGeometryChange:()=>void};
-export function ImageSizeControls({width,onChange,onGeometryChange}:Props){
+import {imageCardWidth,cornerResizeWidth,anchoredImagePosition,MIN_IMAGE_CARD_WIDTH,MAX_IMAGE_CARD_WIDTH} from './imageCardSize';
+type Side='left'|'right';type Vertical='top'|'bottom';
+type Props={width?:number|null;x:number;y:number;zoom:number;onChange:(width:number,x:number,y:number)=>void;onGeometryChange:()=>void};
+export function ImageSizeControls({width,x,y,zoom,onChange,onGeometryChange}:Props){
  const control=useRef<HTMLSpanElement>(null);
+ const drag=useRef<{pointerX:number;pointerY:number;startX:number;startY:number;width:number;height:number;side:Side;vertical:Vertical;card:HTMLElement;next:{width:number;x:number;y:number}}|null>(null);
  const geometryCallback=useRef(onGeometryChange);geometryCallback.current=onGeometryChange;
- useEffect(()=>{
-  const card=control.current?.closest<HTMLElement>('[data-card-id]');
-  if(!card||typeof ResizeObserver==='undefined')return;
-  let previous='';
-  const observer=new ResizeObserver(()=>{const current=`${card.offsetWidth}:${card.offsetHeight}`;if(current!==previous){previous=current;geometryCallback.current()}});
-  observer.observe(card);return()=>observer.disconnect();
- },[]);
+ useEffect(()=>{const card=control.current?.closest<HTMLElement>('[data-card-id]');if(!card||typeof ResizeObserver==='undefined')return;let previous='';const observer=new ResizeObserver(()=>{const current=`${card.offsetWidth}:${card.offsetHeight}`;if(current!==previous){previous=current;geometryCallback.current()}});observer.observe(card);return()=>observer.disconnect()},[]);
  const current=imageCardWidth(width);
- return <span ref={control} className="image-size-controls" onPointerDown={event=>event.stopPropagation()} onPointerUp={event=>event.stopPropagation()} onClick={event=>event.stopPropagation()} onDoubleClick={event=>event.stopPropagation()} onKeyDown={event=>event.stopPropagation()}>
-  <button type="button" aria-label="Уменьшить изображение на доске" title="Уменьшить изображение" disabled={current<=MIN_IMAGE_CARD_WIDTH} onClick={()=>onChange(stepImageCardWidth(current,-1))}>−</button>
-  <button type="button" aria-label="Увеличить изображение на доске" title="Увеличить изображение" disabled={current>=MAX_IMAGE_CARD_WIDTH} onClick={()=>onChange(stepImageCardWidth(current,1))}>＋</button>
- </span>;
+ function apply(card:HTMLElement,startX:number,startY:number,startWidth:number,startHeight:number,nextWidth:number,side:Side,vertical:Vertical){card.style.setProperty('--image-card-width',`${nextWidth}px`);const position=anchoredImagePosition(startX,startY,startWidth,nextWidth,startHeight,card.offsetHeight,side,vertical);card.style.left=`${position.x}px`;card.style.top=`${position.y}px`;return {width:nextWidth,...position}}
+ return <span ref={control} className="image-size-controls" onClick={e=>e.stopPropagation()} onDoubleClick={e=>e.stopPropagation()}>{(['top','bottom'] as const).flatMap(vertical=>(['left','right'] as const).map(side=><span key={vertical+side} className={'image-resize-corner '+vertical+' '+side} role="slider" tabIndex={0} aria-label={'Размер изображения, '+(side==='left'?'левый':'правый')+' '+(vertical==='top'?'верхний':'нижний')+' угол'} aria-valuemin={MIN_IMAGE_CARD_WIDTH} aria-valuemax={MAX_IMAGE_CARD_WIDTH} aria-valuenow={current} onKeyDown={e=>{e.stopPropagation();if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();const card=control.current?.closest<HTMLElement>('[data-card-id]');if(!card)return;const positive=e.key==='ArrowRight'||e.key==='ArrowDown';const increase=(e.key==='ArrowLeft'||e.key==='ArrowRight')?(side==='right'?positive:!positive):(vertical==='bottom'?positive:!positive);const next=apply(card,x,y,current,card.offsetHeight,imageCardWidth(current+(increase?20:-20)),side,vertical);if(next.width!==current)onChange(next.width,next.x,next.y)}} onPointerDown={e=>{e.stopPropagation();if(e.button!==0)return;const card=control.current?.closest<HTMLElement>('[data-card-id]');if(!card)return;e.preventDefault();drag.current={pointerX:e.clientX,pointerY:e.clientY,startX:x,startY:y,width:current,height:card.offsetHeight,side,vertical,card,next:{width:current,x,y}};e.currentTarget.setPointerCapture(e.pointerId)}} onPointerMove={e=>{e.stopPropagation();const state=drag.current;if(!state)return;const nextWidth=cornerResizeWidth(state.width,state.height,(e.clientX-state.pointerX)/zoom,(e.clientY-state.pointerY)/zoom,state.side,state.vertical);state.next=apply(state.card,state.startX,state.startY,state.width,state.height,nextWidth,state.side,state.vertical);onGeometryChange()}} onPointerUp={e=>{e.stopPropagation();const state=drag.current;if(!state)return;drag.current=null;if(state.next.width!==state.width)onChange(state.next.width,state.next.x,state.next.y)}} onPointerCancel={e=>{e.stopPropagation();const state=drag.current;if(state){state.card.style.setProperty('--image-card-width',`${state.width}px`);state.card.style.left=`${state.startX}px`;state.card.style.top=`${state.startY}px`;drag.current=null;onGeometryChange()}}}/>))}</span>;
 }

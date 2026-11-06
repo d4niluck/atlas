@@ -10,6 +10,7 @@ import {MarkdownCodePre as MarkdownPre} from './MarkdownCodePre';
 import {PythonCode} from './PythonCode';
 import {getDocument, GlobalWorkerOptions} from './pdfCompat';
 import {locatePdfFragment, type PdfMatch} from './pdfSearch';
+import {pdfPageDirection} from './pdfKeys';
 import type {SearchChunk} from './SearchResults';
 import {Util} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type {PDFDocumentProxy, RenderTask} from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -35,7 +36,7 @@ export function PlainFilePreview({url, markdown=false, filename=''}: {url:string
  return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{/\.py$/i.test(filename)?<PythonCode source={value}/>:value}</pre>}</>;
 }
 
-export function PdfPreview({url, title, search}: {url:string; title:string; search?:SearchChunk|null}) {
+export function PdfPreview({url, title, search, active}: {url:string; title:string; search?:SearchChunk|null; active:boolean}) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewportRef=useRef<HTMLDivElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
@@ -49,6 +50,18 @@ export function PdfPreview({url, title, search}: {url:string; title:string; sear
   const [pageSize,setPageSize]=useState({width:1,height:1});
   const navigateToMatch=useRef(false);
   const searchSequence=useRef(0);
+  useEffect(() => {
+    if (!document || !active) return;
+    const onKey = (event: KeyboardEvent) => {
+      const direction = pdfPageDirection(event, active);
+      if (!direction) return;
+      event.preventDefault();
+      searchSequence.current++; setMatch(null); setSearchStatus('');
+      setPage(current => Math.max(1, Math.min(document.numPages, current + direction)));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [document, active]);
   useEffect(()=>{
     const box=viewportRef.current;if(!box)return;
     const update=()=>setWidth(box.clientWidth);update();
