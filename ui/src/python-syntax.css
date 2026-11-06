@@ -1,0 +1,14 @@
+.python-code{color:#f1edf7}
+.python-code .hljs-keyword,.python-code .hljs-selector-tag{color:#e1abff}
+.python-code .hljs-string,.python-code .hljs-regexp{color:#b7e7a1}
+.python-code .hljs-number,.python-code .hljs-literal,.python-code .hljs-built_in{color:#ffd096}
+.python-code .hljs-comment{color:#afc2ad}
+.python-code .hljs-title,.python-code .hljs-function,.python-code .hljs-class{color:#a8d5ff}
+.python-code .hljs-meta{color:#f4c59d}
+:root[data-theme=light] .python-code{color:#302b37}
+:root[data-theme=light] .python-code .hljs-keyword,:root[data-theme=light] .python-code .hljs-selector-tag{color:#662198}
+:root[data-theme=light] .python-code .hljs-string,:root[data-theme=light] .python-code .hljs-regexp{color:#275f20}
+:root[data-theme=light] .python-code .hljs-number,:root[data-theme=light] .python-code .hljs-literal,:root[data-theme=light] .python-code .hljs-built_in{color:#865000}
+:root[data-theme=light] .python-code .hljs-comment{color:#45663e}
+:root[data-theme=light] .python-code .hljs-title,:root[data-theme=light] .python-code .hljs-function,:root[data-theme=light] .python-code .hljs-class{color:#174f86}
+:root[data-theme=light] .python-code .hljs-meta{color:#874623}

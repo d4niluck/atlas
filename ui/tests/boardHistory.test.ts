@@ -41,3 +41,13 @@ test('undo restores image preview state',()=>{
  history.record(before,after);
  assert.equal(history.undo(after)?.objects[0].imageExpanded,false);
 });
+test('undo restores image width while preserving current metadata',()=>{
+ const history=new BoardHistory();
+ const before={objects:[{id:'image',x:0,y:0,imageExpanded:true,imageWidth:230,title:'old'}],edges:[],stacks:[]};
+ const after={...before,objects:[{...before.objects[0],imageWidth:460}]};
+ history.record(before,after);
+ const renamed={...after,objects:[{...after.objects[0],title:'new'}]};
+ const restored=history.undo(renamed);
+ assert.equal(restored?.objects[0].imageWidth,230);
+ assert.equal(restored?.objects[0].title,'new');
+});

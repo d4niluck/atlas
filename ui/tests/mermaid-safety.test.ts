@@ -26,3 +26,28 @@ test('фон темы сохраняется только как провере�
  const text='%%{init: {"theme":"base","themeVariables":{"background":"#111827"}}}%%\nflowchart LR\n A-->B';
  const parsed=prepareMermaid(text);assert.equal(parsed.error,null);assert.equal(parsed.background,'#111827');
 });
+test('диаграммы из заметок допускают безопасные настройки и прозрачные стили',()=>{
+ const samples=[
+  'flowchart LR\n A-->B\n classDef transparent fill:none,stroke:none',
+  '%%{init: {"theme":"base","flowchart":{"curve":"basis"},"themeVariables":{"clusterBkg":"#111827","clusterBorder":"#475569"}}}%%\nflowchart LR\n A-->B',
+  'flowchart LR\n A-->B\n style A fill:#bbf,stroke:#333',
+  'flowchart LR\n A-->B\n linkStyle default stroke:#94A3B8,stroke-width:2px',
+  'flowchart LR\n A["<span style=\'font-size:12px\'>одна строка<br/>вторая строка</span>"]',
+  'flowchart LR\n Style --> Other\n linkStyle 4,5 stroke:#64748B,stroke-width:1.5px,stroke-dasharray:5 5',
+  'flowchart LR\n In --> LoopAgent\n style LoopAgent fill:#2E8B57,color:#fff,shape:circle',
+ ];
+ for(const text of samples) assert.equal(mermaidInputError(text),null,text);
+});
+test('новые стили не разрешают подмену CSS и опасные настройки',()=>{
+ for(const text of [
+  'flowchart LR\n classDef x fill:noneevil,stroke:none',
+  'flowchart LR\n style A fill:url(https://evil.example)',
+  'flowchart LR\n style A fill:#fff,color:red',
+  'flowchart LR\n linkStyle default stroke:url(https://evil.example)',
+  'flowchart LR\n linkStyle default stroke-dasharray:5 5!important',
+  'flowchart LR\n style A shape:circle!important',
+  'flowchart LR\n A["<span style=\'font-size:12px\'>text<img src=x></span>"]',
+  '%%{init: {"flowchart":{"curve":"x\\nsecurityLevel: loose"}}}%%\nflowchart LR\n A-->B',
+  '%%{init: {"themeVariables":{"clusterBkg":"url(https://evil.example)"}}}%%\nflowchart LR\n A-->B',
+ ]) assert.ok(mermaidInputError(text),text);
+});

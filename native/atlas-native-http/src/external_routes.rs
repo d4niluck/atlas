@@ -45,6 +45,7 @@ pub fn handle(root:&std::path::Path,default:&std::path::Path,serial:&Mutex<()>,w
  ("DELETE",["notes",nid,"draft"])=>send_session(&workers,&id,&session,json!({"action":"clear-note-draft","args":[nid,b["title"],b["text"]]}))?,
  ("GET",["notes",nid])=>send_session(&workers,&id,&session,json!({"action":"get-note","args":[nid]}))?,
  ("PUT",["notes",nid])=>{changed=true;send_session(&workers,&id,&session,json!({"action":"update-note","args":[nid,b["title"],b["text"]]}))?;send_session(&workers,&id,&session,json!({"action":"get-note","args":[nid]}))?},
+ ("PATCH",["files",fid])=>{changed=true;send_session(&workers,&id,&session,json!({"action":"rename-file","args":[fid,b["title"]]}))?},
  ("GET",["objects",oid,"revision"])=>send_session(&workers,&id,&session,json!({"action":"file-revision","id":oid}))?,
  ("POST",["objects",oid,"undo-create"])=>{changed=true;send_session(&workers,&id,&session,json!({"action":"undo-created","id":oid,"expected_revision":b["expected_revision"]}))?;json!({"ok":true})},
  ("GET",["objects",oid,"search-visibility"])=>send_session(&workers,&id,&session,json!({"action":"search-visibility","id":oid}))?,

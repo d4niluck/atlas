@@ -16,6 +16,11 @@
 .markdown-content :is(p,ul,ol,pre,blockquote){margin:0 0 .65em}
 .markdown-content :is(h1,h2,h3,h4){margin:.8em 0 .35em}
 .markdown-content > :first-child{margin-top:0}
+.markdown-content table{border-collapse:collapse;margin:0 0 .65em}
+.markdown-content th,.markdown-content td{border:1px solid #91869e;padding:.35em .6em}
+.markdown-content th{background:#ffffff0d}
+:root[data-theme=light] .markdown-content th,:root[data-theme=light] .markdown-content td{border-color:#81758d}
+:root[data-theme=light] .markdown-content th{background:#f5f1f8}
 :root[data-theme=light] .note-preview{border-color:#ded9e4}
 
 /* One reading size is shared by note and file previews. */

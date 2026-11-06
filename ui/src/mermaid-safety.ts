@@ -19,34 +19,47 @@ export function prepareMermaid(source:string):{source:string;error:string|null;f
   const flowchart=config.flowchart;
   if (flowchart!==undefined && (!flowchart || typeof flowchart!=='object' || Array.isArray(flowchart))) return fail('Некорректные настройки схемы');
   const spacing=Object.entries((flowchart || {}) as Record<string,unknown>);
-  if (spacing.some(([k,v])=>!['nodeSpacing','rankSpacing'].includes(k)||typeof v!=='number'||!Number.isInteger(v)||v<1||v>200)) return fail('Эти настройки схемы не поддерживаются');
+  if (spacing.some(([k,v])=>k==='curve'?typeof v!=='string'||!['basis','linear'].includes(v):!['nodeSpacing','rankSpacing'].includes(k)||typeof v!=='number'||!Number.isInteger(v)||v<1||v>200)) return fail('Эти настройки схемы не поддерживаются');
   const variables=config.themeVariables;
   if (variables!==undefined && (!variables || typeof variables!=='object' || Array.isArray(variables))) return fail('Некорректные настройки темы');
-  const allowed=new Set(['background','primaryTextColor','lineColor','edgeLabelBackground','fontFamily']);
+  const allowed=new Set(['background','primaryTextColor','lineColor','edgeLabelBackground','fontFamily','fontSize','clusterBkg','clusterBorder','secondaryTextColor','tertiaryTextColor','stateBkg','stateBorder','transitionColor','transitionLabelColor','primaryColor','primaryBorderColor','secondaryColor','tertiaryColor','textColor','taskBkgColor','taskBorderColor','taskTextColor','taskTextOutsideColor','gridColor','sectionBkgColor','altSectionBkgColor','sectionBkgColor2']);
   const entries=Object.entries((variables || {}) as Record<string,unknown>);
   for (const [key,value] of entries) {
    if (!allowed.has(key) || typeof value!=='string') return fail('Эти настройки темы не поддерживаются');
-   if (key==='fontFamily' ? value!=='Arial' : !/^#(?:[a-f\d]{3}|[a-f\d]{4}|[a-f\d]{6}|[a-f\d]{8})$/i.test(value)) return fail('Некорректные цвета или шрифт темы');
+   if (key==='fontFamily' ? value!=='Arial' : key==='fontSize' ? !/^(?:[89]|1\d|2\d|3[0-2])px$/.test(value) : !/^#(?:[a-f\d]{3}|[a-f\d]{4}|[a-f\d]{6}|[a-f\d]{8})$/i.test(value)) return fail('Некорректные цвета или шрифт темы');
   }
   const backgroundEntry=entries.find(([key])=>key==='background');
   if (backgroundEntry) background=backgroundEntry[1] as string;
   // Rebuild rather than passing user-supplied configuration to Mermaid.
-  frontmatter='---\nconfig:\n  theme: base\n' + (entries.length ? '  themeVariables:\n'+entries.map(([k,v])=>`    ${k}: ${JSON.stringify(v)}`).join('\n')+'\n' : '') + (spacing.length ? '  flowchart:\n'+spacing.map(([k,v])=>`    ${k}: ${v}`).join('\n')+'\n' : '') + '---\n';
+  frontmatter='---\nconfig:\n  theme: base\n' + (entries.length ? '  themeVariables:\n'+entries.map(([k,v])=>`    ${k}: ${JSON.stringify(v)}`).join('\n')+'\n' : '') + (spacing.length ? '  flowchart:\n'+spacing.map(([k,v])=>`    ${k}: ${JSON.stringify(v)}`).join('\n')+'\n' : '') + '---\n';
   text=text.slice(directive[0].length);
  }
  if (/%%\s*\{/.test(text)) return fail('Настройки Mermaid внутри диаграммы не поддерживаются');
- if (/(?:^|[;\n])\s*(?:style|click|linkStyle)\b/i.test(text)) return fail('Стили и интерактивные действия диаграммы не поддерживаются');
+ if (/(?:^|[;\n])\s*click\b/i.test(text)) return fail('Интерактивные действия диаграммы не поддерживаются');
+ const validStyles=(styles:string)=>styles.split(',').every(rule=>/^\s*(?:fill|stroke)\s*:\s*(?:none|#(?:[a-f\d]{3}|[a-f\d]{4}|[a-f\d]{6}|[a-f\d]{8}))\s*$/i.test(rule) || /^\s*color\s*:\s*#(?:[a-f\d]{3}|[a-f\d]{4}|[a-f\d]{6}|[a-f\d]{8})\s*$/i.test(rule) || /^\s*stroke-width\s*:\s*(?:[0-9]|10)(?:\.\d+)?px\s*$/i.test(rule) || /^\s*stroke-dasharray\s*:\s*(?:[0-9]|1\d|20)(?:\s+(?:[0-9]|1\d|20)){0,3}\s*$/i.test(rule) || /^\s*shape\s*:\s*circle\s*$/i.test(rule));
  let invalidClass=false;
  text.replace(/(?:^|[;\n])\s*classDef\s+([^\s;]+)\s+([^;\n]+)/gi, (_match,names:string,styles:string) => {
-  if (!/^[\w-]+(?:,[\w-]+)*$/.test(names) || !styles.split(',').every(rule=>/^\s*(?:fill|stroke|color)\s*:\s*#(?:[a-f\d]{3}|[a-f\d]{4}|[a-f\d]{6}|[a-f\d]{8})\s*$/i.test(rule) || /^\s*stroke-width\s*:\s*(?:[0-9]|10)(?:\.\d+)?px\s*$/i.test(rule))) invalidClass=true;
+  if (!/^[\w-]+(?:,[\w-]+)*$/.test(names) || !validStyles(styles)) invalidClass=true;
   return _match;
  });
  // Any malformed definition is rejected, not passed through to the renderer.
  const withoutClasses=text.replace(/(?:^|[;\n])\s*classDef\s+([^\s;]+)\s+([^;\n]+)/gi,'');
  if (invalidClass || /(?:^|[;\n])\s*classDef\b/i.test(withoutClasses)) return fail('Некорректные стили диаграммы');
+ let invalidStyle=false;
+ const withoutStyles=text.replace(/(?:^|[;\n])\s*style\s+(?![-=])([^\s;]+)\s+([^;\n]+)/gi, (_match,node:string,styles:string)=>{
+  if (!/^[\w-]+$/.test(node)||!validStyles(styles)) invalidStyle=true;
+  return '';
+ });
+ if (invalidStyle || /(?:^|[;\n])\s*style\b(?!\s*[-=])/i.test(withoutStyles)) return fail('Некорректные стили диаграммы');
+ let invalidLinkStyle=false;
+ const withoutLinkStyles=text.replace(/(?:^|[;\n])\s*linkStyle\s+([^\s;]+)\s+([^;\n]+)/gi, (_match,selector:string,styles:string)=>{
+  if (!/^(?:default|\d+(?:,\d+)*)$/i.test(selector)||!validStyles(styles)) invalidLinkStyle=true;
+  return '';
+ });
+ if (invalidLinkStyle || /(?:^|[;\n])\s*linkStyle\b/i.test(withoutLinkStyles)) return fail('Некорректные стили диаграммы');
  // Replace a validated span with private markers; SVG formatting is applied after sanitization.
  const fontSizes:number[]=[];
- text=text.replace(/<span\s+style\s*=\s*(['"])font-size\s*:\s*([8-9]|1\d|2\d|3[0-2])px\1\s*>([^<>]*)<\/span\s*>/gi, (_match,_quote,size:string,content:string)=>{
+ text=text.replace(/<span\s+style\s*=\s*(['"])font-size\s*:\s*([8-9]|1\d|2\d|3[0-2])px\1\s*>((?:[^<>]|<br\s*\/?>)*)<\/span\s*>/gi, (_match,_quote,size:string,content:string)=>{
   const id=fontSizes.push(Number(size))-1;
   return `\uE000${id}\uE001${content}\uE002`;
  });

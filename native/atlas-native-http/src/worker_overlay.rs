@@ -58,3 +58,16 @@ impl WorkerOverlayPrepared {
  }
  pub(crate) fn finish(self)->R<(atlas_faiss_probe::overlay::DeltaSnapshot,Vec<Value>,Option<(atlas_faiss_probe::Index,Vec<Value>,Vec<String>)>)>{if self.cursor.is_some(){return Err("compaction unfinished".into())}Ok((self.snapshot,self.rows,self.compact))}
 }
+
+#[cfg(test)] mod rename_tests {
+ use super::*;
+ use serde_json::json;
+ #[test] fn rename_reuses_every_vector_beyond_sixteen_thousand_chunks(){
+  let count=16_005usize;let mut index=atlas_faiss_probe::Index::new().unwrap();let vector=[0.125f32;512];
+  let mut records=Vec::with_capacity(count);
+  for i in 0..count{let text=format!("fragment {i}");let key=crate::worker_models::input_key("body","old",&text);index.add(&[vector]).unwrap();records.push(json!({"id":"doc","title":"old","field":"body","text":text,"input_hash":key}));}
+  let mut plan=WorkerOverlayPlan::new(index,records,None,vec![]).unwrap();let mut fresh=0usize;
+  for i in 0..count{let text=format!("fragment {i}");let key=crate::worker_models::input_key("body","new",&text);let value=match plan.reuse(&key).unwrap(){Some(v)=>v,None=>{fresh+=1;[0.0;512]}};plan.push(json!({"id":"doc","title":"new","field":"body","text":text,"input_hash":key}),value,false).unwrap();}
+  assert_eq!(fresh,0);let (_,_,compact)=plan.finish().unwrap();let(index,rows,_) = compact.expect("large delta should be compacted");assert_eq!(index.count(),count as i64);assert_eq!(rows.len(),count);assert!(rows.iter().all(|row|row["title"]=="new"));
+ }
+}

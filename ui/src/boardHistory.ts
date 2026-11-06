@@ -1,10 +1,10 @@
 // Undo board layout without replacing current note/file metadata.
-type Position = {id:string; x:number; y:number; imageExpanded?:boolean};
+type Position = {id:string; x:number; y:number; imageExpanded?:boolean; imageWidth?:number|null};
 type Layout = {objects:Position[]; edges:unknown[]; stacks:unknown[]};
 type Entry = {before:Layout; after:Layout; kind:'layout'} | {before:Layout; after:Layout; kind:'created'; id:string; revision:string} | {before:Layout; after:Layout; kind:'deleted'; id:string} | {before:Layout; after:Layout; kind:'deleted-group'; ids:string[]};
 export type UndoPlan = {kind:'layout'; board:Layout} | {kind:'created'; id:string; revision:string} | {kind:'deleted'; id:string} | {kind:'deleted-group'; ids:string[]};
 function snapshot(board:Layout):Layout {
- return {objects:board.objects.map(({id,x,y,imageExpanded})=>({id,x,y,imageExpanded:!!imageExpanded})),edges:structuredClone(board.edges),stacks:structuredClone(board.stacks)};
+ return {objects:board.objects.map(({id,x,y,imageExpanded,imageWidth})=>({id,x,y,imageExpanded:!!imageExpanded,imageWidth:imageWidth??undefined})),edges:structuredClone(board.edges),stacks:structuredClone(board.stacks)};
 }
 function same(a:Layout,b:Layout){return JSON.stringify(snapshot(a))===JSON.stringify(snapshot(b));}
 function ids(x:Layout){return JSON.stringify(x.objects.map(o=>o.id).sort());}

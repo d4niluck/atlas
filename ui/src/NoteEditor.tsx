@@ -7,7 +7,7 @@ import {remarkSoftBreaks} from './remarkSoftBreaks';
 import {MarkdownEditor} from './MarkdownEditor';
 import {MarkdownLink} from './MarkdownLink';
 import {MarkdownSearchExcerpt} from './MarkdownSearchExcerpt';
-import {MarkdownPre} from './MermaidPre';
+import {MarkdownCodePre as MarkdownPre} from './MarkdownCodePre';
 import type {SearchChunk} from './SearchResults';
 import {nextNoteMode} from './note-mode';
 

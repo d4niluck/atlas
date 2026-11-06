@@ -152,7 +152,7 @@ impl Encoder {
  pub fn model_identities(model:&str,device:&str)->Result<(String,String),String>{
     let mut hash=Sha256::new();
     let mut f=std::fs::File::open(model).map_err(|e|e.to_string())?;let mut buf=[0u8;65536];loop {remaining_search_time()?;let n=f.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}hash.update(&buf[..n]);}
-    let derive=|device:&str| {let mut h=hash.clone();h.update(format!("atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;{device};ctx=2048").as_bytes());format!("{:x}",h.finalize())};
+    let derive=|device:&str| {let mut h=hash.clone();h.update(format!("atlas-experiment-v2;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;body-input=text-only;{device};ctx=2048").as_bytes());format!("{:x}",h.finalize())};
     let alternate=if device=="metal" {"cpu"} else {"metal"};Ok((derive(device),derive(alternate)))
  }
  pub fn model_identity(model:&str,device:&str)->Result<String,String>{Ok(Self::model_identities(model,device)?.0)}
@@ -234,13 +234,19 @@ impl Encoder {
 #[cfg(test)]
 mod portable_identity_tests {
  use super::*;
+ #[test] fn text_only_index_is_not_compatible_with_legacy_title_prefixed_index(){
+  let path=std::env::temp_dir().join(format!("atlas-identity-v2-{}",std::process::id()));
+  std::fs::write(&path,b"weights").unwrap();let now=Encoder::model_identity(path.to_str().unwrap(),"cpu").unwrap();
+  let mut old=Sha256::new();old.update(b"weights");old.update(b"atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;cpu;ctx=2048");
+  assert_ne!(now,format!("{:x}",old.finalize()));std::fs::remove_file(path).unwrap();
+ }
  #[test]
- fn model_identity_preserves_legacy_device_hashes_and_distinguishes_weights() {
+ fn model_identity_distinguishes_devices_and_weights() {
   let path=std::env::temp_dir().join(format!("atlas-identity-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
   std::fs::write(&path,b"weights-one").unwrap();
   let name=path.to_str().unwrap();
   let (cpu,metal)=Encoder::model_identities(name,"cpu").unwrap();
-  let suffix="atlas-experiment-v1;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;";
+  let suffix="atlas-experiment-v2;chunk=1000;dim=512;l2;query=task: search result | query: ;document=title: none | text: ;body-input=text-only;";
   for (device,got) in [("cpu",&cpu),("metal",&metal)] {let mut h=Sha256::new();h.update(b"weights-one");h.update(format!("{suffix}{device};ctx=2048"));assert_eq!(*got,format!("{:x}",h.finalize()));}
   assert_eq!(Encoder::model_identities(name,"metal").unwrap(),(metal.clone(),cpu.clone()));
   std::fs::write(&path,b"weights-two").unwrap();

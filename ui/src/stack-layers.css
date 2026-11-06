@@ -1,0 +1,6 @@
+/* Keep the active group above intersecting cards; its own cards stay sharp. */
+.stack.stack-open{z-index:2;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.stack.stack-front{z-index:4;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.lines.lines-front{z-index:4}
+.card.group-card-open{z-index:3}
+.card.group-card-front{z-index:5}

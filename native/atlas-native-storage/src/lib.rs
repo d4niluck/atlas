@@ -129,6 +129,22 @@ pub fn workspace_lock(root:&Path)->R<fs::File>{
  file.lock()?;Ok(file)
 }
 pub fn add_file(root:&Path, name:&str,bytes:&[u8])->R<String>{add_file_stream(root,name,&mut std::io::Cursor::new(bytes))}
+pub fn validate_file_rename(previous:&str,name:&str)->R<()> {
+ file_name(name)?;if name.trim()!=name||name.trim().is_empty()||name.chars().count()>255{return Err("invalid filename".into())}
+ if Path::new(previous).extension()!=Path::new(name).extension(){return Err("file extension cannot be changed".into())}Ok(())
+}
+/// Change the displayed name without rereading or rewriting the original file.
+pub fn rename_file(root:&Path,id:&str,name:&str)->R<()> {
+ let mut conn=file_db(root)?;let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+ let previous:String=tx.query_row("SELECT title FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;
+ validate_file_rename(&previous,name)?;
+ if previous!=name {
+  tx.execute("UPDATE objects SET title=? WHERE id=?",params![name,id])?;
+  if tx.execute("UPDATE search_index SET title=? WHERE object_id=?",params![name,id])?!=1{return Err("file search index missing".into())}
+  if tx.execute("UPDATE search_chunks SET content=? WHERE object_id=? AND field='title'",params![name,id])?!=1{return Err("file title index missing".into())}
+ }
+ tx.commit()?;Ok(())
+}
 pub fn add_file_stream(root:&Path, name:&str,reader:&mut impl std::io::Read)->R<String>{
  file_name(name)?;let files=root.join("files");if files.is_symlink() || !files.canonicalize()?.starts_with(root.canonicalize()?){return Err("unsafe files directory".into())}
  let id=uuid::Uuid::new_v4().to_string();let dir=files.join(&id);fs::create_dir(&dir)?;let target=dir.join(name);
@@ -153,7 +169,7 @@ fn board_from_db(conn:&Connection)->R<Value>{
    let mut b:Value=serde_json::from_str(saved.as_deref().unwrap_or("{\"objects\":[],\"edges\":[],\"stacks\":[]}"))?;
    let positions:HashMap<String,Value>=b["objects"].as_array().ok_or("invalid board")?.iter().filter_map(|o|o["id"].as_str().map(|id|(id.to_owned(),o.clone()))).collect();
    let mut stmt=conn.prepare("SELECT id,title,kind,text_status FROM objects WHERE id NOT IN (SELECT id FROM trash) ORDER BY rowid")?;
-   let objects=stmt.query_map([],|r|{let id:String=r.get(0)?;let p=positions.get(&id);Ok(json!({"id":id,"title":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"text_status":r.get::<_,Option<String>>(3)?,"x":p.and_then(|v|v.get("x")).cloned().unwrap_or(json!(0)),"y":p.and_then(|v|v.get("y")).cloned().unwrap_or(json!(0)),"imageExpanded":p.and_then(|v|v.get("imageExpanded")).and_then(Value::as_bool).unwrap_or(false),"searchExcluded":p.and_then(|v|v.get("searchExcluded")).and_then(Value::as_bool).unwrap_or(false)}))})?.collect::<Result<Vec<_>,_>>()?;
+   let objects=stmt.query_map([],|r|{let id:String=r.get(0)?;let p=positions.get(&id);Ok(json!({"id":id,"title":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"text_status":r.get::<_,Option<String>>(3)?,"x":p.and_then(|v|v.get("x")).cloned().unwrap_or(json!(0)),"y":p.and_then(|v|v.get("y")).cloned().unwrap_or(json!(0)),"imageExpanded":p.and_then(|v|v.get("imageExpanded")).and_then(Value::as_bool).unwrap_or(false),"imageWidth":p.and_then(|v|v.get("imageWidth")).and_then(Value::as_f64).filter(|w|w.is_finite()&&*w>=230.0&&*w<=920.0),"searchExcluded":p.and_then(|v|v.get("searchExcluded")).and_then(Value::as_bool).unwrap_or(false)}))})?.collect::<Result<Vec<_>,_>>()?;
    let ids:HashSet<&str>=objects.iter().filter_map(|o|o["id"].as_str()).collect();
    let edges:Vec<Value>=b["edges"].as_array().ok_or("invalid edges")?.iter().filter(|e|e["from"].as_str().is_some_and(|s|ids.contains(s))&&e["to"].as_str().is_some_and(|s|ids.contains(s))).cloned().collect();
    let stacks:Vec<Value>=b["stacks"].as_array().ok_or("invalid stacks")?.iter().map(|s|{let mut s=s.clone();let members=s["ids"].as_array().map(|v|v.iter().filter(|x|x.as_str().is_some_and(|id|ids.contains(id))).cloned().collect::<Vec<_>>()).unwrap_or_default();s["ids"]=json!(members);s}).collect();
@@ -272,6 +288,7 @@ pub fn execute(a:&[String])->R<Value>{
  "get-note-draft"=>{let id=a.get(3).ok_or("missing id")?;return Ok(json!({"draft":get_note_draft(root,id)?.map(|(title,text)|json!({"title":title,"text":text}))}));},
  "clear-note-draft"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?;return Ok(json!({"cleared":clear_note_draft(root,id,title,text)?}));},
  "get-note"=>{let id=a.get(3).ok_or("missing id")?;let (title,path):(String,String)=conn.query_row("SELECT title,path FROM objects WHERE id=? AND kind='note' AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;let text=fs::read_to_string(safe_path(root,&path)?)?;return Ok(json!({"id":id,"title":title,"text":text}));},
+ "rename-file"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;drop(conn);rename_file(root,id,title)?;return Ok(json!({"id":id,"title":title}));},
  "update-note"=>{let id=a.get(3).ok_or("missing id")?;let title=a.get(4).ok_or("missing title")?;let text=a.get(5).ok_or("missing text")?; let path:String=conn.query_row("SELECT path FROM objects WHERE id=? AND kind='note' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;let target=safe_path(root,&path)?;let previous=fs::read_to_string(&target)?;conn.execute("INSERT INTO note_journal(object_id,title,text) VALUES(?,?,?)",params![id,title,text])?;if let Err(error)=recover(&mut conn,root){write_atomic(&target,&previous)?;conn.execute("DELETE FROM note_journal WHERE object_id=?",[id])?;return Err(error)};return Ok(json!({"ok":true}));},
  "get-board"=>{
 return board_from_db(&conn);
@@ -315,6 +332,22 @@ pub fn list_note_drafts(root:&Path)->R<Vec<(String,String,String)>>{let db=file_
 pub fn recover_note_drafts(root:&Path)->R<usize>{let drafts=list_note_drafts(root)?;let mut count=0;for (id,title,text) in drafts{execute(&["atlas".into(),"update-note".into(),root.to_string_lossy().into_owned(),id.clone(),title.clone(),text.clone()])?;clear_note_draft(root,&id,&title,&text)?;count+=1;}Ok(count)}
 
 pub fn has_note_drafts(root:&Path)->R<bool>{let db=file_db(root)?;if !table_exists(&db,"note_drafts")?{return Ok(false)}Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM note_drafts JOIN objects ON objects.id=note_drafts.object_id WHERE objects.id NOT IN (SELECT id FROM trash))",[],|r|r.get(0))?)}
+#[cfg(test)] mod rename_file_tests {
+ use super::*;
+ #[test] fn file_title_changes_without_rewriting_content_or_body_chunks() {
+  let root=std::env::temp_dir().join(format!("atlas-rename-file-{}",uuid::Uuid::new_v4()));create_workspace(&root).unwrap();
+  let id=add_file(&root,"original.txt",b"alpha beta").unwrap();
+  let db=file_db(&root).unwrap();let path:String=db.query_row("SELECT path FROM objects WHERE id=?",[&id],|r|r.get(0)).unwrap();
+  let before:Vec<(i64,String)>=db.prepare("SELECT start,content FROM search_chunks WHERE object_id=? AND field='body'").unwrap().query_map([&id],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();drop(db);
+  rename_file(&root,&id,"renamed.txt").unwrap();
+  let db=file_db(&root).unwrap();let (title,new_path,body):(String,String,String)=db.query_row("SELECT objects.title,objects.path,search_index.body FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+  assert_eq!((title.as_str(),new_path.as_str(),body.as_str()),("renamed.txt",path.as_str(),"alpha beta"));assert_eq!(fs::read(root.join(&path)).unwrap(),b"alpha beta");
+  let after:Vec<(i64,String)>=db.prepare("SELECT start,content FROM search_chunks WHERE object_id=? AND field='body'").unwrap().query_map([&id],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();assert_eq!(before,after);
+  let title_hit:i64=db.query_row("SELECT count(*) FROM search_chunks WHERE search_chunks MATCH 'renamed' AND object_id=?",[&id],|r|r.get(0)).unwrap();assert_eq!(title_hit,1);
+  assert!(rename_file(&root,&id,"renamed.pdf").is_err());assert!(rename_file(&root,&id,"../bad.txt").is_err());
+  drop(db);fs::remove_dir_all(root).unwrap();
+ }
+}
 #[cfg(test)] mod search_visibility_tests {
  use super::*;
  #[test] fn excluded_is_preserved_by_stale_board_and_restored_after_trash(){

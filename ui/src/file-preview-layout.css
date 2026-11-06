@@ -14,3 +14,9 @@
 .pdf-page {position:relative;display:table;margin-inline:auto;}
 .pdf-page canvas {display:block;}
 .pdf-search-highlight {position:absolute;pointer-events:none;opacity:.5;}
+
+/* In fullscreen give the page more height without changing the compact preview. */
+.editor.file-editor.fullscreen:has(> .pdf-preview){padding:10px 16px}
+.editor.file-editor.fullscreen:has(> .pdf-preview) > .file-preview-title{margin:6px 0}
+.editor.file-editor.fullscreen:has(> .pdf-preview) > .file-preview-title h1{font-size:18px}
+.editor.file-editor.fullscreen:has(> .pdf-preview) .pdf-preview-controls{padding:4px}

@@ -8,9 +8,10 @@ let nextId = 0;
 let initialized = false;
 
 function MermaidDiagram({source}: {source:string}) {
- const [result,setResult] = useState<{html?:string; error?:string}>({});
+ const [result,setResult] = useState<{url?:string; background?:string; width?:number; error?:string}>({});
  useEffect(() => {
   let cancelled = false;
+  let objectUrl:string|undefined;
   const prepared = prepareMermaid(source);
   if (prepared.error) { setResult({error:prepared.error}); return; }
   setResult({});
@@ -29,18 +30,23 @@ function MermaidDiagram({source}: {source:string}) {
      const {svg} = await mermaid.render(`atlas-mermaid-${++nextId}`, prepared.source, container);
      const safe = DOMPurify.sanitize(svg, {USE_PROFILES:{svg:true,svgFilters:true}, FORBID_TAGS:['script','foreignObject','a'], FORBID_ATTR:['href','xlink:href']});
      const clean = applyMermaidFontSizes(safe, prepared.fontSizes);
-     const html = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body{margin:0;background:${prepared.background}}svg{display:block;max-width:100%;height:auto;margin:auto}</style></head><body>${clean}</body></html>`;
-     if (!cancelled) setResult({html});
+     if (!cancelled) {
+      const root=new DOMParser().parseFromString(clean,'image/svg+xml').documentElement;
+      const viewBox=root.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+      const width=viewBox?.length===4&&Number.isFinite(viewBox[2])&&viewBox[2]>0?viewBox[2]:undefined;
+      objectUrl=URL.createObjectURL(new Blob([clean],{type:'image/svg+xml'}));
+      setResult({url:objectUrl,background:prepared.background,width});
+     }
     } finally { container.remove(); }
    } catch {
     if (!cancelled) setResult({error:'Проверьте синтаксис Mermaid'});
    }
   })();
-  return () => { cancelled=true; };
+  return () => { cancelled=true;if(objectUrl) URL.revokeObjectURL(objectUrl); };
  }, [source]);
  if (result.error) return <div className="mermaid-error"><div role="alert">Не удалось построить диаграмму: {result.error}</div><pre><code>{source}</code></pre></div>;
- if (!result.html) return <div role="status">Строим диаграмму…</div>;
- return <iframe className="mermaid-frame" title="Диаграмма Mermaid" sandbox="" srcDoc={result.html}/>;
+ if (!result.url) return <div role="status">Строим диаграмму…</div>;
+ return <img className="mermaid-frame" alt="Диаграмма Mermaid" src={result.url} style={{background:result.background,width:result.width}} onError={()=>setResult({error:'Не удалось отобразить диаграмму'})}/>;
 }
 
 /** Only fenced Mermaid blocks are rendered; all other Markdown code stays unchanged. */

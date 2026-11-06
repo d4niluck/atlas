@@ -1,0 +1,4 @@
+.file-card-title-edit{display:flex;align-items:center;max-width:190px;color:inherit;font-size:14px}
+.file-card-title-edit input{min-width:30px;width:100%;padding:3px 5px;font:inherit;color:#f4eefb;background:#272831;border:1px solid #a88cda;border-radius:5px;user-select:text;-webkit-user-select:text}
+:root[data-theme=light] .file-card-title-edit input{color:#241b30;background:#fff;border-color:#8062a8}
+.file-card-title-edit span{flex:none;white-space:nowrap}

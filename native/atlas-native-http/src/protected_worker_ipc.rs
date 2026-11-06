@@ -28,7 +28,7 @@ impl ProtectedWorker {
  pub fn dispatch(&mut self, command:&Value)->Result<Value,String> {
   let action=command["action"].as_str().ok_or("invalid action")?;
   let result=self.dispatch_inner(command);
-  if result.is_ok()&&matches!(action,"unlock"|"close"|"export-resume"|"upload-finish"|"create-note"|"recover-note-drafts"|"update-note"|"put-note"|"undo-created"|"delete-objects"|"restore-objects"|"set-description"){self.source_epoch=self.source_epoch.wrapping_add(1);}
+  if result.is_ok()&&matches!(action,"unlock"|"close"|"export-resume"|"upload-finish"|"create-note"|"recover-note-drafts"|"update-note"|"put-note"|"rename-file"|"undo-created"|"delete-objects"|"restore-objects"|"set-description"){self.source_epoch=self.source_epoch.wrapping_add(1);}
   result
  }
  fn dispatch_inner(&mut self, command:&Value)->Result<Value,String> {
@@ -72,6 +72,7 @@ impl ProtectedWorker {
    "get-note-draft"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;Ok(json!({"draft":vault.get_note_draft(id)?.map(|(title,text)|json!({"title":title,"text":text}))}))},
    "clear-note-draft"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;let text=command["args"][2].as_str().ok_or("invalid text")?;Ok(json!({"cleared":vault.clear_note_draft_guarded(id,title,text,||self.guard.verify())?}))},
    "update-note"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;let text=command["args"][2].as_str().ok_or("invalid text")?;vault.put_note_guarded(id,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
+   "rename-file"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;vault.rename_file_guarded(id,title,||self.guard.verify())?;Ok(json!({"id":id,"title":title}))},
    "get-note"=>{let id=command["id"].as_str().or_else(||command["args"][0].as_str()).ok_or("invalid id")?;Ok(json!({"id":id,"title":vault.note_title(id)?,"text":vault.get_note(id)?}))},
    "put-note"=>{let id=command["id"].as_str().ok_or("invalid id")?;let title=command["title"].as_str().ok_or("invalid title")?;let text=command["text"].as_str().ok_or("invalid text")?;vault.put_note_guarded(id,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
    "list-trash"=>Ok(json!(vault.list_trash()?)),
@@ -151,12 +152,15 @@ impl Drop for ProtectedWorker {fn drop(&mut self){if let Some(upload)=self.uploa
   assert!(!worker.dispatch(&json!({"action":"lexical-search","query":"Body"})).unwrap()["results"].as_array().unwrap().is_empty());
   worker.dispatch(&json!({"action":"set-description","id":"file","description":"sample"})).unwrap();
   assert_eq!(worker.dispatch(&json!({"action":"object-info","id":"file"})).unwrap()["description"],"sample");
+  assert!(worker.dispatch(&json!({"action":"rename-file","args":["file","invalid.txt"]})).is_err());
+  worker.dispatch(&json!({"action":"rename-file","args":["file","renamed.png"]})).unwrap();
+  assert_eq!(worker.dispatch(&json!({"action":"object-info","id":"file"})).unwrap()["title"],"renamed.png");
   assert!(worker.dispatch(&json!({"action":"get-board"})).unwrap().is_object());
   let page=worker.dispatch(&json!({"action":"index-snapshot"})).unwrap();let revision=page["revision"].as_str().unwrap().to_owned();
   worker.dispatch(&json!({"action":"index-begin","revision":revision,"model":"test"})).unwrap();
   let mut vector=vec![0f32;512];vector[0]=1.;let key=crate::worker_models::input_key("body","Title","Body");worker.dispatch(&json!({"action":"index-add","records":[{"id":"note","title":"Title","field":"body","text":"Body","input_hash":key,"vector":vector}]})).unwrap();assert_eq!(worker.dispatch(&json!({"action":"index-reuse","key":key})).unwrap()["vector"][0],1.0);assert!(worker.dispatch(&json!({"action":"index-reuse","key":crate::worker_models::input_key("body","Title","Changed")})).unwrap()["vector"].is_null());
   worker.dispatch(&json!({"action":"index-commit"})).unwrap();let result=worker.dispatch(&json!({"action":"index-search","model":"test","vector":vector})).unwrap();assert_eq!(result["results"][0]["id"],"note");
-  worker.dispatch(&json!({"action":"index-begin","revision":revision,"model":"test"})).unwrap();let key=crate::worker_models::input_key("body","Title","Body");let reused=worker.dispatch(&json!({"action":"index-reuse","key":key})).unwrap();assert_eq!(reused["vector"][0],1.0);assert!(worker.dispatch(&json!({"action":"index-reuse","key":crate::worker_models::input_key("body","Different","Body")})).unwrap()["vector"].is_null());worker.dispatch(&json!({"action":"index-abort"})).unwrap();assert!(worker.dispatch(&json!({"action":"index-commit"})).is_err());let result=worker.dispatch(&json!({"action":"index-search","model":"test","vector":vector})).unwrap();assert_eq!(result["results"][0]["id"],"note");
+  worker.dispatch(&json!({"action":"index-begin","revision":revision,"model":"test"})).unwrap();let key=crate::worker_models::input_key("body","Title","Body");let reused=worker.dispatch(&json!({"action":"index-reuse","key":key})).unwrap();assert_eq!(reused["vector"][0],1.0);assert_eq!(worker.dispatch(&json!({"action":"index-reuse","key":crate::worker_models::input_key("body","Different","Body")})).unwrap()["vector"][0],1.0);assert!(worker.dispatch(&json!({"action":"index-reuse","key":crate::worker_models::input_key("body","Different","Changed")})).unwrap()["vector"].is_null());worker.dispatch(&json!({"action":"index-abort"})).unwrap();assert!(worker.dispatch(&json!({"action":"index-commit"})).is_err());let result=worker.dispatch(&json!({"action":"index-search","model":"test","vector":vector})).unwrap();assert_eq!(result["results"][0]["id"],"note");
   worker.dispatch(&json!({"action":"index-begin","revision":revision,"model":"test"})).unwrap();
   worker.dispatch(&json!({"action":"index-add","records":[{"id":"note","title":"Title","field":"body","text":"Body","input_hash":key,"vector":vector}]})).unwrap();
   assert_eq!(worker.dispatch(&json!({"action":"index-prepare-step"})).unwrap()["done"],true);
