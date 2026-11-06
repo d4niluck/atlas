@@ -2,6 +2,9 @@
 import {useEffect, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import {remarkCurrency} from './remarkCurrency';
+import rehypeKatex from 'rehype-katex';
 import {remarkSoftBreaks} from './remarkSoftBreaks';
 import {MarkdownCodePre as MarkdownPre} from './MarkdownCodePre';
 import {PythonCode} from './PythonCode';
@@ -29,7 +32,7 @@ export function PlainFilePreview({url, markdown=false, filename=''}: {url:string
  let left=start-base,right=Math.min(bytes.length,end-base);while(left<bytes.length&&(bytes[left]&192)===128)left++;while(right<bytes.length&&(bytes[right]&192)===128)right++;
  const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(left,right));if(!abort.signal.aborted){setValue(text);setStatus('')}
  }catch{if(!abort.signal.aborted)setStatus('Не удалось открыть файл.')}})();return()=>abort.abort()},[url,page]);
- return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm,remarkSoftBreaks]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{/\.py$/i.test(filename)?<PythonCode source={value}/>:value}</pre>}</>;
+ return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{/\.py$/i.test(filename)?<PythonCode source={value}/>:value}</pre>}</>;
 }
 
 export function PdfPreview({url, title, search}: {url:string; title:string; search?:SearchChunk|null}) {

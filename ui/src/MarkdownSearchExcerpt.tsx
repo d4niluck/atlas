@@ -1,6 +1,10 @@
 import React, {useEffect, useMemo, useRef} from 'react';
 import ReactMarkdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import {remarkCurrency} from './remarkCurrency';
+import {markMathSearch} from './mathSearchMark';
+import rehypeKatex from 'rehype-katex';
 import {remarkSoftBreaks} from './remarkSoftBreaks';
 import './search-highlight.css';
 
@@ -17,6 +21,7 @@ export function MarkdownSearchExcerpt({text, start, end, components}: {text:stri
         if (!Array.isArray(node.children)) return;
         node.children=node.children.flatMap((child:any) => {
           const a=child.position?.start?.offset,b=child.position?.end?.offset;
+          const mathMark=markMathSearch(child,from,to);if(mathMark){marked=true;return [mathMark]}
           if(child.type==='inlineCode' && typeof a==='number' && typeof b==='number' && to>a && from<b) {
             const raw=text.slice(a,b), normalized=raw.replace(/\r\n/g,'\n');
             const sourceStart=normalized.indexOf(child.value);
@@ -77,5 +82,5 @@ export function MarkdownSearchExcerpt({text, start, end, components}: {text:stri
     focus();settle();const timeout=window.setTimeout(stop,15000);
     return()=>{window.clearTimeout(timeout);stop()};
   },[text,start,end]);
-  return <div ref={container} key={`${start}:${end}`} className="search-highlight"><ReactMarkdown components={components} remarkPlugins={[remarkGfm,plugin,remarkSoftBreaks]}>{text}</ReactMarkdown></div>;
+  return <div ref={container} key={`${start}:${end}`} className="search-highlight"><ReactMarkdown components={components} remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,plugin,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]}>{text}</ReactMarkdown></div>;
 }
