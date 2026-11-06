@@ -51,3 +51,50 @@ test('undo restores image width while preserving current metadata',()=>{
  assert.equal(restored?.objects[0].imageWidth,230);
  assert.equal(restored?.objects[0].title,'new');
 });
+
+test('cancelled drag restores only dragged positions and preserves earlier undo',async()=>{
+ const {restoreDragPositions}=await import('../src/boardHistory.ts');
+ const h=new BoardHistory();const initial=base();const saved={...initial,objects:initial.objects.map(o=>o.id==='a'?{...o,x:12}:o)};h.record(initial,saved);
+ const preview={...saved,objects:saved.objects.map(o=>o.id==='a'?{...o,x:40,y:50,title:'renamed'}:o)};
+ const cancelled=restoreDragPositions(preview,{a:{x:12,y:0}});
+ assert.deepEqual(cancelled.objects,[{id:'a',x:12,y:0,title:'renamed'},{id:'b',x:20,y:10,title:'b'}]);
+ const undo=h.undo(cancelled);assert.equal(undo?.objects[0].x,0);assert.equal(undo?.objects[0].title,'renamed');
+});
+test('cancelled multi-card drag restores coordinates without undoing other data',async()=>{
+ const {restoreDragPositions}=await import('../src/boardHistory.ts');
+ const current={objects:[{id:'a',x:90,y:100,title:'new'},{id:'b',x:130,y:140,title:'b'},{id:'c',x:5,y:6,title:'other'}],edges:[{id:'edge'}],stacks:[{id:'stack'}]};
+ const result=restoreDragPositions(current,{a:{x:1,y:2},b:{x:3,y:4}});
+ assert.deepEqual(result.objects.map(({x,y})=>({x,y})),[{x:1,y:2},{x:3,y:4},{x:5,y:6}]);
+ assert.equal(result.objects[0].title,'new');assert.deepEqual(result.edges,current.edges);assert.deepEqual(result.stacks,current.stacks);
+});
+
+test('independent change during drag saves original coordinates and remains undoable after cancellation',async()=>{
+ const {dragSafeSnapshots}=await import('../src/boardHistory.ts');
+ const h=new BoardHistory();const baseBoard=base();
+ const preview={...baseBoard,objects:baseBoard.objects.map(o=>o.id==='a'?{...o,x:77,y:33}:o)};
+ const edited={...preview,edges:[{id:'new-edge',from:'a',to:'b'}]};
+ const snapshots=dragSafeSnapshots(preview,edited,{a:{x:0,y:0}});
+ h.record(snapshots.before,snapshots.after);
+ assert.deepEqual(snapshots.after.objects.map(({x,y})=>({x,y})),[{x:0,y:0},{x:20,y:10}]);
+ assert.deepEqual(snapshots.after.edges,edited.edges);
+ const restored=h.undo(snapshots.after);assert.deepEqual(restored?.edges,[]);assert.equal(restored?.objects[0].x,0);
+ assert.equal(edited.objects[0].x,77,'rendered preview stays intact');
+});
+
+test('completing a drag after independent change preserves the independent change in undo',async()=>{
+ const {restoreDragPositions}=await import('../src/boardHistory.ts');
+ const start=base();const withEdge={...start,edges:[{id:'e',from:'a',to:'b'}]};
+ const preview={...withEdge,objects:withEdge.objects.map(o=>o.id==='a'?{...o,x:60,y:30}:o)};
+ const h=new BoardHistory();h.record(start,withEdge);h.record(restoreDragPositions(preview,{a:{x:0,y:0}}),preview);
+ const undoDrag=h.undo(preview);assert.equal(undoDrag?.objects[0].x,0);assert.deepEqual(undoDrag?.edges,withEdge.edges);
+ const undoEdge=h.undo(undoDrag!);assert.deepEqual(undoEdge?.edges,[]);
+});
+
+test('creation finishing during a cancelled drag remains undoable',async()=>{
+ const {dragSafeSnapshots}=await import('../src/boardHistory.ts');const h=new BoardHistory();const before=base();
+ const preview={...before,objects:before.objects.map(o=>o.id==='a'?{...o,x:100,y:100}:o)};
+ const added={...preview,objects:[...preview.objects,{id:'c',x:8,y:9,title:'created'}]};
+ const safe=dragSafeSnapshots(preview,added,{a:{x:0,y:0}});
+ h.recordCreated(safe.before,safe.after,'c','revision');
+ assert.deepEqual(h.prepareUndo(safe.after),{kind:'created',id:'c',revision:'revision'});
+});

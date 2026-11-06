@@ -8,6 +8,14 @@ function snapshot(board:Layout):Layout {
 }
 function same(a:Layout,b:Layout){return JSON.stringify(snapshot(a))===JSON.stringify(snapshot(b));}
 function ids(x:Layout){return JSON.stringify(x.objects.map(o=>o.id).sort());}
+// Cancel only the positions moved by the interrupted drag; preserve unrelated edits.
+export function restoreDragPositions<T extends {objects:{id:string;x:number;y:number}[]}>(board:T,positions:Record<string,{x:number;y:number}>):T {
+ return {...board,objects:board.objects.map(item=>positions[item.id]?{...item,...positions[item.id]}:item)};
+}
+// A concurrent save must not commit a drag preview before pointer release.
+export function dragSafeSnapshots<T extends {objects:{id:string;x:number;y:number}[]}>(before:T,after:T,positions:Record<string,{x:number;y:number}>|null):{before:T;after:T} {
+ return positions?{before:restoreDragPositions(before,positions),after:restoreDragPositions(after,positions)}:{before,after};
+}
 export class BoardHistory {
  private entries:Entry[]=[];
  private push(entry:Entry){this.entries.push(entry);if(this.entries.length>100)this.entries.shift();}

@@ -4,3 +4,5 @@
 .lines.lines-front{z-index:4}
 .card.group-card-open{z-index:3}
 .card.group-card-front{z-index:5}
+
+.canvas.viewport-moving .stack.stack-open,.canvas.viewport-moving .stack.stack-front{backdrop-filter:none;-webkit-backdrop-filter:none}
