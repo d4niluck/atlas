@@ -1,0 +1,117 @@
+import React, {useEffect, useRef, useState} from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import {MarkdownLink} from './MarkdownLink';
+import {AnswerWaiting} from './AnswerWaiting';
+import {citedSources} from './citedSources';
+import {MenuSearchResults} from './MenuSearchResults';
+import type {SearchChunk, SearchResult} from './SearchResults';
+import {selectSearchMode, type SearchMode, type SimpleSearchMode} from './searchMode';
+import {searchWithRetry} from './searchRetry';
+import {watchRagEvents} from './ragEvents';
+import './menu-bar-search.css';
+
+type Workspace = {id:string;name:string;protected?:boolean;available?:boolean};
+type Settings = {lexical_enabled:boolean;semantic_enabled:boolean;rag_enabled:boolean;agentic:boolean};
+type Source = SearchChunk & {id:string;title:string;missing?:boolean};
+type Props = {onNavigate:(workspaceId:string,target:{id:string;chunk:SearchChunk|null})=>void|Promise<void>;onOpenAtlas:()=>void|Promise<void>;onExit:()=>void|Promise<void>;onOpenSettings?:()=>void|Promise<void>};
+type Request = {workspaceId:string;workspaceName:string;protected:boolean;query:string;mode:SearchMode;agentic:boolean};
+
+export function clearFinishedAttempt(operation:{id:string|null;poll:AbortController|null}){operation.poll?.abort();operation.id=null}
+export async function cancelRagAttempt(operation:{id:string|null;prefix:string},fetcher:typeof fetch=fetch){if(!operation.id)return;const response=await fetcher(operation.prefix+'/rag/cancel/'+encodeURIComponent(operation.id),{method:'POST',keepalive:true});if(!response.ok)throw Error()}
+export async function reportCancelFailure(operation:{id:string|null;prefix:string},isCurrent:()=>boolean,report:()=>void,fetcher:typeof fetch=fetch){try{await cancelRagAttempt(operation,fetcher)}catch{if(isCurrent())report()}}
+
+export function MenuBarSearch({onNavigate,onOpenAtlas,onOpenSettings,onExit}:Props) {
+ const [workspaces,setWorkspaces]=useState<Workspace[]>([]);
+ const [workspaceId,setWorkspaceId]=useState('');
+ const [settings,setSettings]=useState<Settings>({lexical_enabled:true,semantic_enabled:false,rag_enabled:false,agentic:false});
+ const [mode,setMode]=useState<SearchMode>('lexical');
+ const previous=useRef<SimpleSearchMode>('lexical');
+ const initialized=useRef(false);
+ const [query,setQuery]=useState('');
+ const [results,setResults]=useState<SearchResult[]|null>(null);
+ const [answer,setAnswer]=useState<string|null>(null);
+ const [sources,setSources]=useState<Source[]>([]);
+ const [resultRequest,setResultRequest]=useState<Request|null>(null);
+ const resultRef=useRef<Request|null>(null);resultRef.current=resultRequest;
+ const [privateVisible,setPrivateVisible]=useState(true);
+ const visibilityRevision=useRef(0);
+ const [searching,setSearching]=useState(false);
+ const [waiting,setWaiting]=useState(false);
+ const [stopped,setStopped]=useState(false);
+ const [error,setError]=useState('');
+ const [locked,setLocked]=useState<Request|null>(null);
+ const [password,setPassword]=useState('');
+ const [unlocking,setUnlocking]=useState(false);
+ const active=useRef<{controller:AbortController;poll:AbortController|null;id:string|null;prefix:string}|null>(null);
+ const searchGeneration=useRef(0);
+ const selected=workspaces.find(w=>w.id===workspaceId);
+ function refresh(){
+  document.documentElement.dataset.theme=localStorage.getItem('atlas-theme')==='light'?'light':'dark';
+  void fetch('/api/workspaces').then(async r=>{if(!r.ok)throw Error();return r.json() as Promise<{workspaces:Workspace[]}>}).then(data=>{
+   setWorkspaces(data.workspaces);
+   setWorkspaceId(current=>data.workspaces.some(w=>w.id===current)?current:(data.workspaces.find(w=>w.available!==false)?.id??''));
+  }).catch(()=>setError('Не удалось загрузить пространства'));
+  void fetch('/api/settings/app').then(async r=>{if(!r.ok)throw Error();return r.json() as Promise<Settings>}).then(value=>{setSettings(value);if(!initialized.current){initialized.current=true;setMode(value.rag_enabled?'rag':value.lexical_enabled?'lexical':'semantic')}}).catch(()=>setError('Не удалось загрузить настройки поиска'));
+ }
+ useEffect(()=>{
+  const blur=()=>{visibilityRevision.current++;setPassword('');if(resultRef.current?.protected)setPrivateVisible(false)};
+  const focus=()=>{refresh();const result=resultRef.current;if(!result?.protected)return;const revision=++visibilityRevision.current;setPrivateVisible(false);void fetch('/api/w/'+encodeURIComponent(result.workspaceId)+'/board').then(response=>{if(revision!==visibilityRevision.current||resultRef.current!==result)return;if(response.ok){setPrivateVisible(true);return}stop(false);setResultRequest(null);setResults(null);setAnswer(null);setSources([]);setPassword('');setError(response.status===423?'Пространство заблокировано. Введите пароль для нового поиска.':'Пространство недоступно.')}).catch(()=>{if(revision!==visibilityRevision.current||resultRef.current!==result)return;stop(false);setResultRequest(null);setResults(null);setAnswer(null);setSources([]);setPassword('');setError('Не удалось проверить доступ к пространству.')})};
+  refresh();window.addEventListener('focus',focus);window.addEventListener('blur',blur);return()=>{window.removeEventListener('focus',focus);window.removeEventListener('blur',blur);stop(false)}
+ },[]);
+ function stop(show=true){
+  const request=active.current;if(!request)return;
+  active.current=null;
+  const generation=searchGeneration.current;void reportCancelFailure(request,()=>show&&searchGeneration.current===generation,()=>setError('Не удалось подтвердить остановку ответа'));
+  request.poll?.abort();request.controller.abort();
+  setSearching(false);setWaiting(false);if(show)setStopped(true);
+ }
+ async function run(request:Request){
+  stop(false);searchGeneration.current++;
+  const controller=new AbortController();
+  const prefix='/api/w/'+encodeURIComponent(request.workspaceId);
+  const operation={controller,poll:null as AbortController|null,id:null as string|null,prefix};active.current=operation;
+  const options:RequestInit={method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal};
+  const attempt=()=>{
+   operation.poll?.abort();
+   const id=request.mode==='rag'?crypto.randomUUID():null;operation.id=id;
+   options.body=JSON.stringify({query:request.query,mode:request.mode,...(id?{agentic:request.agentic,request_id:id}:{})});
+   if(id){const poll=new AbortController();operation.poll=poll;void watchRagEvents(prefix,id,poll.signal,event=>{
+    if(active.current!==operation||operation.id!==id)return;
+    if(event.type==='results'){setResults(event.results);setWaiting(false)}
+    else if(event.type==='token'){setAnswer(old=>(old??'')+event.text);setWaiting(false)}
+    else if(event.type==='reset')setAnswer(null);
+   }).catch(e=>{if(!poll.signal.aborted&&active.current===operation)setError(e instanceof Error?e.message:'Не удалось получить ход ответа')});}
+  };
+  setLocked(null);setPassword('');setPrivateVisible(true);setResultRequest(request);setResults(null);setAnswer(null);setSources([]);setError('');setWaiting(false);setStopped(false);setSearching(true);
+  attempt();
+  try{
+   const response=await searchWithRetry(prefix+(request.mode==='rag'?'/rag/search':'/search'),options,()=>{clearFinishedAttempt(operation);setWaiting(true)},attempt);
+   const data=await response.json();if(active.current!==operation)return;
+   if(response.status===423){setLocked(request);setPassword('');return}
+   if(!response.ok)throw Error(data.error||'Не удалось выполнить поиск');
+   setResults(data.results);setAnswer(data.answer??null);setSources(data.sources??[]);
+   if(data.error&&data.error!=='Ответ может быть неполным: проверьте найденные фрагменты')setError(data.error);
+  }catch(e){if(active.current===operation&&!controller.signal.aborted)setError(e instanceof Error?e.message:'Не удалось выполнить поиск')}
+  finally{operation.poll?.abort();if(active.current===operation){active.current=null;setSearching(false);setWaiting(false)}}
+ }
+ async function unlock(e:React.FormEvent){
+  e.preventDefault();if(!locked||!password||unlocking)return;setUnlocking(true);setError('');
+  try{const response=await fetch('/api/workspaces/'+encodeURIComponent(locked.workspaceId)+'/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});const data=await response.json();if(!response.ok)throw Error(data.error||'Не удалось открыть пространство');const request=locked;setLocked(null);setPassword('');void run(request)}catch(e){setError(e instanceof Error?e.message:'Не удалось открыть пространство')}finally{setUnlocking(false)}
+ }
+ function submit(e:React.FormEvent){e.preventDefault();if(!query.trim()||!workspaceId)return;if(selected?.available===false){setError('Пространство недоступно. Подключите носитель в Atlas.');return}const enabled=mode==='hybrid'?settings.lexical_enabled&&settings.semantic_enabled:settings[`${mode}_enabled` as 'lexical_enabled'|'semantic_enabled'|'rag_enabled'];if(!enabled){setError('Включите этот режим в настройках поиска Atlas.');return}void run({workspaceId,workspaceName:selected?.name??workspaceId,protected:!!selected?.protected,query:query.trim(),mode,agentic:settings.agentic})}
+ function selectSimple(value:'lexical'|'semantic'){const next=selectSearchMode(mode,previous.current,value);previous.current=next;setMode(next)}
+ function action(fn:()=>void|Promise<void>){void Promise.resolve().then(fn).catch(e=>setError(e instanceof Error?e.message:'Не удалось открыть Atlas'))}
+ const isRag=resultRequest?.mode==='rag';
+ return <main className="menu-search">
+  <header className="menu-search-head"><label className="menu-search-workspace"><span className="sr-only">Пространство</span><select aria-label="Пространство" value={workspaceId} onChange={e=>{setWorkspaceId(e.target.value);setLocked(null);setPassword('')}}><option value="" disabled>Выберите пространство</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.protected?'🔒 ':''}{w.name}{w.available===false?' · недоступно':''}</option>)}</select></label><button type="button" className="menu-search-icon" aria-label="Открыть Atlas" title="Открыть Atlas" onClick={()=>action(onOpenAtlas)}>↗</button>{onOpenSettings&&<button type="button" className="menu-search-icon" aria-label="Настройки поиска" title="Настройки поиска" onClick={()=>action(onOpenSettings)}>⚙</button>}<button type="button" className="menu-search-icon" aria-label="Выйти из Atlas" title="Выйти из Atlas" onClick={()=>action(onExit)}>⏻</button></header>
+  <div className="menu-search-controls"><div className="menu-search-modes" role="group" aria-label="Режим поиска"><button type="button" aria-pressed={mode==='lexical'||mode==='hybrid'} disabled={!settings.lexical_enabled} title="По словам" aria-label="По словам" onClick={()=>selectSimple('lexical')}>T</button><button type="button" aria-pressed={mode==='semantic'||mode==='hybrid'} disabled={!settings.semantic_enabled} title="По смыслу" aria-label="По смыслу" onClick={()=>selectSimple('semantic')}>≋</button><button type="button" aria-pressed={mode==='rag'} disabled={!settings.rag_enabled} title="Умный поиск" aria-label="Умный поиск" onClick={()=>{if(mode!=='rag')previous.current=mode;setMode('rag')}}>🧠</button></div></div>
+  <form className="menu-search-form" onSubmit={submit}><input aria-label="Поисковый запрос" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Найти в пространстве…"/><button type="submit" disabled={!workspaceId||!query.trim()} aria-label="Искать" title="Искать">⌕</button>{searching&&<button type="button" className="menu-search-stop" aria-label="Остановить поиск" title="Остановить поиск" onClick={()=>stop()}>■</button>}</form>
+  {error&&<p className="menu-search-error" role="alert">{error}</p>}
+  {locked&&<form className="menu-search-unlock" onSubmit={unlock}><label>Пароль пространства<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoFocus autoComplete="off"/></label><button type="submit" disabled={!password||unlocking}>Открыть</button><button type="button" onClick={()=>{setLocked(null);setPassword('')}}>Отмена</button></form>}
+  {resultRequest&&(!resultRequest.protected||privateVisible)&&<div className="menu-search-result-area"><p className="menu-search-context">{resultRequest.workspaceName} · {resultRequest.query}{resultRequest.protected&&!locked?' · защищённое пространство':''}</p><div className={'menu-search-output'+(isRag?' menu-search-output-rag':'')}>
+   {isRag&&<section className="menu-search-answer" aria-label="Ответ"><h2>Ответ</h2>{searching&&!answer&&<AnswerWaiting/>}{answer&&<div className="menu-search-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{a:MarkdownLink}}>{answer}</ReactMarkdown></div>}{stopped&&<small>Остановлено</small>}{citedSources(answer,sources).map(({number,source})=><button type="button" className="menu-search-citation" key={number} disabled={source.missing} onClick={()=>action(()=>onNavigate(resultRequest.workspaceId,{id:source.id,chunk:source.stale?null:source}))}>[{number}] {source.title}</button>)}</section>}
+   <section className="menu-search-results" aria-label="Результаты поиска">{isRag&&<h2>Фрагменты</h2>}{waiting&&<p role="status">Подготавливаем поиск…</p>}<MenuSearchResults results={results} onOpen={(id,chunk)=>action(()=>onNavigate(resultRequest.workspaceId,{id,chunk}))}/>{searching&&results===null&&!isRag&&!waiting&&<p role="status">Ищем…</p>}</section>
+  </div></div>}
+ </main>;
+}

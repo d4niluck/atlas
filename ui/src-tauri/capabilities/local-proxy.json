@@ -11,6 +11,10 @@
   },
   "permissions": [
     "core:default",
+    "allow-take-quick-result",
+    "allow-take-atlas-exit-request",
+    "allow-take-search-settings-request",
+    "allow-finish-atlas-exit",
     "allow-models-intro-seen",
     "allow-dismiss-models-intro",
     "allow-download-vision-model",
