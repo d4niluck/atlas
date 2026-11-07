@@ -4,6 +4,8 @@
 #include <cstring>
 #include <faiss/impl/IDSelector.h>
 #include <cstdint>
+#include <cstdio>
+#include <unistd.h>
 extern "C" {
 void* af_memory_write(void* p) noexcept {try {auto* writer=new faiss::VectorIOWriter();try{faiss::write_index(static_cast<faiss::Index*>(p),writer);return writer;}catch(...){delete writer;return nullptr;}}catch(...){return nullptr;}}
 int64_t af_memory_size(void* w) noexcept {return static_cast<faiss::VectorIOWriter*>(w)->data.size();}
@@ -16,6 +18,12 @@ int64_t af_count(void* p) noexcept { return static_cast<faiss::Index*>(p)->ntota
 int af_reconstruct(void* p,int64_t id,float* out) noexcept {try {auto* index=static_cast<faiss::Index*>(p);if(id<0||id>=index->ntotal)return -1;index->reconstruct(id,out);return 0;} catch (...) {return -1;} }
 int af_add(void* p,const float* v,int64_t n) noexcept {try {static_cast<faiss::Index*>(p)->add(n,v);return 0;} catch (...) {return -1;} }
 int af_search(void* p,const float* q,const int64_t* ids,int64_t count,int64_t k,float* scores,int64_t* out) noexcept {try {faiss::IDSelectorBatch selector(count,ids); faiss::SearchParameters params; params.sel=&selector; static_cast<faiss::Index*>(p)->search(1,q,k,scores,out,&params);return 0;} catch (...) {return -1;} }
+int af_save_fd(void* p,int fd) noexcept {
+ int copy=dup(fd);if(copy<0)return -1;
+ FILE* file=fdopen(copy,"wb");if(!file){close(copy);return -1;}
+ int result=0;try{faiss::write_index(static_cast<faiss::Index*>(p),file);if(fflush(file)!=0||ferror(file))result=-1;}catch(...){result=-1;}
+ if(fclose(file)!=0)result=-1;return result;
+}
 int af_save(void* p,const char* path) noexcept {try {faiss::write_index(static_cast<faiss::Index*>(p),path);return 0;} catch (...) {return -1;} }
 void* af_load(const char* path) noexcept {try {auto* p=faiss::read_index(path);if(p->d!=512 || !dynamic_cast<faiss::IndexFlatIP*>(p)){delete p;return nullptr;}return p;} catch (...) {return nullptr;} }
 }

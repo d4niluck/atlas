@@ -1,4 +1,6 @@
 //! Process-local workspace adapter. No model is loaded here; indexing work is delegated.
+#[path="native_purge.rs"] mod native_purge;
+#[path="fd_index_store.rs"] mod fd_index_store;
 use std::{fs,io::{self,BufRead,Read,Write},os::{fd::AsRawFd,unix::process::CommandExt},path::Path,process::{Child,ChildStdin,ChildStdout,Command,Stdio}};
 use crate::worker_overlay::{WorkerOverlayPlan,WorkerOverlayPrepared};
 use serde_json::{json,Value};use sha2::{Digest,Sha256};
@@ -47,9 +49,9 @@ impl Workers {
 #[cfg(feature="test-hook")] fn document_limit()->i64{std::env::var("ATLAS_TEST_WORKER_DOC_LIMIT").ok().and_then(|v|v.parse().ok()).unwrap_or(100_000_000)}
 #[cfg(not(feature="test-hook"))] fn document_limit()->i64{100_000_000}
 struct NativeCheck {generation:String,data_version:i64,counter:i64,hash:Sha256,verifier:atlas_joined_probe::overlay_gen::ContentVerifier,vision:bool,after:String}
-struct RevisionTracker {db:rusqlite::Connection,data_version:i64,revision:String,native_ready:Option<(String,String)>,native_check:Option<NativeCheck>}
+struct RevisionTracker {db:rusqlite::Connection,data_version:i64,revision:String,native_ready:Option<(String,String)>,native_check:Option<NativeCheck>,purge_revision:Option<(String,String)>,purge_stages_cleaned:bool}
 impl RevisionTracker {
- fn new()->R<Self>{let db=rusqlite::Connection::open_with_flags("atlas.sqlite3",rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS atlas_content_revision(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL); INSERT OR IGNORE INTO atlas_content_revision VALUES(1,0); CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_insert AFTER INSERT ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_update AFTER UPDATE ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_delete AFTER DELETE ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_insert AFTER INSERT ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_update AFTER UPDATE ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_delete AFTER DELETE ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; COMMIT;")?;Ok(Self{db,data_version:-1,revision:String::new(),native_ready:None,native_check:None})}
+ fn new()->R<Self>{let db=rusqlite::Connection::open_with_flags("atlas.sqlite3",rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS atlas_content_revision(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL); INSERT OR IGNORE INTO atlas_content_revision VALUES(1,0); CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_insert AFTER INSERT ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_update AFTER UPDATE ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_objects_delete AFTER DELETE ON objects BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_insert AFTER INSERT ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_update AFTER UPDATE ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; CREATE TRIGGER IF NOT EXISTS atlas_revision_trash_delete AFTER DELETE ON trash BEGIN UPDATE atlas_content_revision SET revision=revision+1 WHERE id=1; END; COMMIT;")?;Ok(Self{db,data_version:-1,revision:String::new(),native_ready:None,native_check:None,purge_revision:None,purge_stages_cleaned:false})}
  fn revision(&mut self)->R<String>{let dv:i64=self.db.query_row("PRAGMA data_version",[],|r|r.get(0))?;if dv!=self.data_version{#[cfg(feature="test-hook")] SCAN_COUNT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);let counter:i64=self.db.query_row("SELECT revision FROM atlas_content_revision WHERE id=1",[],|r|r.get(0))?;let mut stmt=self.db.prepare("SELECT objects.id,objects.title,COALESCE(search_index.body,''),objects.description,length(CAST(COALESCE(search_index.body,'') AS BLOB))+length(CAST(objects.description AS BLOB)) FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id NOT IN (SELECT id FROM trash) ORDER BY objects.id")?;let mut rows=stmt.query([])?;let mut hash=Sha256::new();while let Some(row)=rows.next()?{if row.get::<_,i64>(4)?>document_limit(){return Err("document exceeds worker memory limit".into())}let item=json!({"id":row.get::<_,String>(0)?,"title":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?});let value=serde_json::to_vec(&item)?;hash.update((value.len() as u64).to_be_bytes());hash.update(value)}self.revision=format!("{counter}:{:x}",hash.finalize());self.data_version=dv;}Ok(self.revision.clone())}
  fn page(&mut self,after:Option<&str>,hidden:bool)->R<(String,Vec<Value>,Option<String>)>{let revision=self.revision()?;let mut stmt=self.db.prepare("SELECT objects.id,objects.title,length(COALESCE(search_index.body,'')) FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE ((?2=1 AND objects.id IN (SELECT id FROM trash)) OR (?2=0 AND objects.id NOT IN (SELECT id FROM trash))) AND NOT (objects.kind='note' AND objects.title='Новая заметка' AND trim(COALESCE(search_index.body,''), char(9)||char(10)||char(13)||' ')='') AND objects.id>?1 ORDER BY objects.id LIMIT 101")?;let mut rows=stmt.query(rusqlite::params![after.unwrap_or(""),hidden])?;let mut docs=Vec::new();let mut more=false;while let Some(row)=rows.next()?{if docs.len()>=100{more=true;break}docs.push(json!({"id":row.get::<_,String>(0)?,"title":row.get::<_,String>(1)?,"body_empty":row.get::<_,i64>(2)?==0}))}let cursor=if more{docs.last().and_then(|v|v["id"].as_str()).map(str::to_owned)}else{None};Ok((revision,docs,cursor))}
 }
@@ -62,7 +64,7 @@ struct ChunkCache {id:String,revision:String,hidden:bool,entries:Vec<Value>,body
 fn old_cache(model:&str)->R<crate::worker_models::VectorCache>{let root=Path::new(".atlas-worker-index");let mut name=String::new();open_relative_file(&root.join("current"))?.read_to_string(&mut name)?;if !name.starts_with("gen-")||!name.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'){return Err("invalid index".into())}let dir=root.join(name);let mut expected=String::new();open_relative_file(&dir.join("metadata.sha256"))?.take(256).read_to_string(&mut expected)?;let meta=crate::stream_metadata::read_checked(open_relative_file(&dir.join("metadata.json"))?,&expected,model)?;let mut file=open_relative_file(&dir.join("index.faiss"))?;if meta.index_sha256!=file_hash(&mut file)?{return Err("index checksum".into())}use std::os::fd::AsRawFd;#[cfg(target_os="macos")] let path=format!("/dev/fd/{}",file.as_raw_fd());#[cfg(target_os="linux")] let path=format!("/proc/self/fd/{}",file.as_raw_fd());let index=atlas_faiss_probe::Index::load(Path::new(&path))?;Ok(crate::worker_models::make_cache_partial(&index,&meta.records.first,meta.records.count))}
 // The external worker can reuse vectors from the portable local index, but must
 // still scan current documents before publishing its own generation.
-struct NativeCache {base:atlas_faiss_probe::Index,delta:Option<atlas_faiss_probe::Index>,locations:std::collections::HashMap<String,(bool,i64)>,base_rows:Vec<Value>,delta_rows:Vec<Value>,snapshot:Option<atlas_faiss_probe::overlay::DeltaSnapshot>}
+struct NativeCache {key:String,base:atlas_faiss_probe::Index,delta:Option<atlas_faiss_probe::Index>,locations:std::collections::HashMap<String,(bool,i64)>,base_rows:Vec<Value>,delta_rows:Vec<Value>,snapshot:Option<atlas_faiss_probe::overlay::DeltaSnapshot>}
 impl NativeCache {
  fn load(model:&str,alternate:Option<&str>)->R<Self>{
   let root=Path::new(".atlas-semantic-native");
@@ -125,7 +127,7 @@ impl NativeCache {
     Some(delta)
    }
   };
-  Ok(Self{base,delta,locations,base_rows:rows.clone(),delta_rows:saved_rows,snapshot})
+  Ok(Self{key:key.to_owned(),base,delta,locations,base_rows:rows.clone(),delta_rows:saved_rows,snapshot})
  }
  fn verify_content(&self)->R<atlas_joined_probe::overlay_gen::ContentVerifier>{Ok(atlas_joined_probe::overlay_gen::ContentVerifier::from_verified_parts(&self.base_rows,self.snapshot.as_ref(),&self.delta_rows)?)}
  fn search(self,vector:&[f32;512],ids:Option<&[String]>)->R<Vec<Value>>{
@@ -175,8 +177,22 @@ fn dispatch(v:&Value,pending:&mut Option<Pending>,upload:&mut std::collections::
  if matches!(action,"get-description"|"search-text") {let id=v["id"].as_str().ok_or("invalid id")?;let db=rusqlite::Connection::open_with_flags("atlas.sqlite3",rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;if action=="get-description"{let value:String=db.query_row("SELECT description FROM objects WHERE id=? AND kind='file' AND id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;return Ok(json!({"id":id,"description":value}))}let value:Option<String>=db.query_row("SELECT search_index.body FROM search_index JOIN objects ON objects.id=search_index.object_id WHERE objects.id=? AND objects.id NOT IN (SELECT id FROM trash)",[id],|r|r.get(0))?;return Ok(json!({"id":id,"text":value.unwrap_or_default()}))}
  if action=="lexical-search" {let query=v["query"].as_str().ok_or("invalid query")?;let ids:Option<Vec<String>>=match v.get("ids"){None|Some(Value::Null)=>None,Some(Value::Array(ids))=>Some(ids.iter().map(|id|id.as_str().map(str::to_owned).ok_or("invalid id")).collect::<Result<_,_>>()?),_=>return Err("invalid search filter".into())};let ids=atlas_native_storage_contract::search_scope(Path::new("."),ids)?;let db=rusqlite::Connection::open_with_flags("atlas.sqlite3",rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;let results=atlas_native_storage_contract::search::lexical(&db,query,ids.as_deref(),128)?;let revision=tracker.revision().ok();return Ok(json!({"results":results,"revision":revision}))}
  if action=="index-chunks" {let revision=tracker.revision()?;if v["revision"].as_str()!=Some(revision.as_str()){return Err("workspace changed".into())}let id=v["id"].as_str().ok_or("invalid id")?;let hidden=v["hidden"].as_bool().unwrap_or(false);if chunks.as_ref().is_none_or(|cache|cache.id!=id||cache.revision!=revision||cache.hidden!=hidden){let size:(i64,i64)=tracker.db.query_row("SELECT length(CAST(COALESCE(search_index.body,'') AS BLOB)),length(CAST(objects.description AS BLOB)) FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?1 AND ((?2=1 AND objects.id IN (SELECT id FROM trash)) OR (?2=0 AND objects.id NOT IN (SELECT id FROM trash)))",rusqlite::params![id,hidden],|r|Ok((r.get(0)?,r.get(1)?)))?;if size.0.saturating_add(size.1)>document_limit(){return Err("document exceeds worker memory limit".into())}let(body,description):(String,String)=tracker.db.query_row("SELECT COALESCE(search_index.body,''),objects.description FROM objects JOIN search_index ON objects.id=search_index.object_id WHERE objects.id=?1 AND ((?2=1 AND objects.id IN (SELECT id FROM trash)) OR (?2=0 AND objects.id NOT IN (SELECT id FROM trash)))",rusqlite::params![id,hidden],|r|Ok((r.get(0)?,r.get(1)?)))?;let body_empty=body.trim().is_empty();let mut entries=Vec::new();for(field,text)in [("body",body),("description",description)]{if text.trim().is_empty(){continue}for mut chunk in atlas_joined_probe::worker_chunks(&text){chunk["field"]=json!(field);entries.push(chunk)}}*chunks=Some(ChunkCache{id:id.to_owned(),revision:revision.clone(),hidden,entries,body_empty})}let cache=chunks.as_ref().ok_or("chunk cache")?;let offset=v["offset"].as_u64().unwrap_or(0) as usize;if offset>cache.entries.len(){return Err("invalid chunk cursor".into())}let end=(offset+64).min(cache.entries.len());let page=&cache.entries[offset..end];let next=if end<cache.entries.len(){Some(end)}else{None};return Ok(json!({"revision":revision,"chunks":page,"next":next,"body_empty":cache.body_empty}))}
- if action=="purge-expired" {let cutoff=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()-86400.0;let expired:bool=tracker.db.query_row("SELECT EXISTS(SELECT 1 FROM trash WHERE deleted_at <= ?)",[cutoff],|r|r.get(0))?;if expired{atlas_native_storage_contract::purge_trash(Path::new("."))?;}return Ok(json!({"purged":expired}))}
+ if action=="purge-expired" {
+  if !tracker.purge_stages_cleaned{cleanup_purge_stages()?;tracker.purge_stages_cleaned=true;}
+  let cutoff=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()-86400.0;
+  let expired:bool=tracker.db.query_row("SELECT EXISTS(SELECT 1 FROM trash WHERE deleted_at <= ?)",[cutoff],|r|r.get(0))?;
+  let pending=purge_pending()?;let had_pending=pending.is_some();
+  if expired||had_pending {
+   let data=match pending{Some(data)=>data,None=>begin_purge(tracker,cutoff)?};
+   let before=tracker.revision()?;let saved_cutoff=data["cutoff"].as_f64().ok_or("invalid purge cutoff")?;
+   let _=atlas_native_storage_contract::purge_trash_rows_before(Path::new("."),saved_cutoff)?;
+   let after=tracker.revision()?;if before!=after{let original=tracker.purge_revision.as_ref().filter(|(_,previous)|*previous==before).map(|(original,_)|original.clone()).unwrap_or(before);tracker.purge_revision=Some((original,after));}
+   recover_purged_files(tracker,&data)?;compact_worker_orphans(tracker)?;compact_native_orphans(tracker)?;finish_purge()?;
+  }
+  return Ok(json!({"purged":expired||had_pending}))
+ }
  if action=="index-native-ready" {
+  compact_worker_orphans(tracker)?;
   #[cfg(feature="test-hook")] if std::env::var_os("ATLAS_TEST_NATIVE_READ_ERROR").is_some(){return Err(io::Error::from_raw_os_error(libc::EIO).into())}
   tracker.native_ready=None;tracker.native_check=None;
   let native_current=open_relative_file(&Path::new(".atlas-semantic-native").join("current"));
@@ -187,8 +203,10 @@ fn dispatch(v:&Value,pending:&mut Option<Pending>,upload:&mut std::collections::
   }return Err(e)}
   let checking=(||->R<Option<NativeCheck>>{
    let model=v["model"].as_str().ok_or("missing model identity")?;let alternate=v["alternate_model"].as_str().unwrap_or(model);
-   let root=Path::new(".atlas-semantic-native");let generation=match read_worker_bytes(&root.join("current"),256){Ok(bytes)=>String::from_utf8(bytes)?,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>return Ok(None),Err(e)=>return Err(e)};if !valid_worker_generation(&generation){return Err("invalid native index generation".into())}
-   let native=match NativeCache::load(model,Some(alternate)){Ok(v)=>v,Err(e) if e.to_string()=="incompatible native index"=>return Ok(None),Err(e)=>return Err(e)};let verifier=native.verify_content()?;let data_version=tracker.db.query_row("PRAGMA data_version",[],|r|r.get(0))?;let counter=tracker.db.query_row("SELECT revision FROM atlas_content_revision WHERE id=1",[],|r|r.get(0))?;
+   let root=Path::new(".atlas-semantic-native");let mut generation=match read_worker_bytes(&root.join("current"),256){Ok(bytes)=>String::from_utf8(bytes)?,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>return Ok(None),Err(e)=>return Err(e)};if !valid_worker_generation(&generation){return Err("invalid native index generation".into())}
+   let mut native=match NativeCache::load(model,Some(alternate)){Ok(v)=>v,Err(e) if e.to_string()=="incompatible native index"=>return Ok(None),Err(e)=>return Err(e)};
+   let existing={let mut stmt=tracker.db.prepare("SELECT id FROM objects")?;let rows=stmt.query_map([],|row|row.get::<_,String>(0))?;rows.collect::<Result<std::collections::HashSet<_>,_>>()?};
+   native=match native_purge::compact(native,&existing,&generation)?{Some(cache)=>cache,None=>{generation=String::from_utf8(read_worker_bytes(&root.join("current"),256)?)?;NativeCache::load(model,Some(alternate))?}};let verifier=native.verify_content()?;let data_version=tracker.db.query_row("PRAGMA data_version",[],|r|r.get(0))?;let counter=tracker.db.query_row("SELECT revision FROM atlas_content_revision WHERE id=1",[],|r|r.get(0))?;
    Ok(Some(NativeCheck{generation,data_version,counter,hash:Sha256::new(),verifier,vision:model.ends_with(":vision-q8-v1"),after:String::new()}))
   })()?;
   tracker.native_check=checking;return Ok(json!({"ready":false,"checking":tracker.native_check.is_some()}))
@@ -273,6 +291,137 @@ fn read_worker_overlay(model:&str)->R<Option<LoadedWorkerOverlay>>{
 }
 
 
+// A purge may remove database rows before an index generation is published.
+// Reconcile orphaned IDs on the next verification as well, including after a crash.
+fn compact_worker_orphans(tracker:&mut RevisionTracker)->R<()> {
+ let root=Path::new(".atlas-worker-index");
+ let current=match read_worker_bytes(&root.join("current"),256){Ok(v)=>String::from_utf8(v)?,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>return Ok(()),Err(e)=>return Err(e)};
+ if !valid_worker_generation(&current){return Err("invalid worker generation".into())}
+ let dir=root.join(&current);
+ let model=match fs::symlink_metadata(dir.join("overlay.json")){
+  Ok(_)=>{let value:Value=serde_json::from_slice(&read_worker_bytes(&dir.join("overlay.json"),100_000_000)?)?;value["key"].as_str().ok_or("invalid model identity")?.to_owned()},
+  Err(e) if e.kind()==io::ErrorKind::NotFound=>{let value:Value=serde_json::from_slice(&read_worker_bytes(&dir.join("metadata.json"),200_000_000)?)?;value["model"].as_str().ok_or("invalid model identity")?.to_owned()},
+  Err(e)=>return Err(e.into()),
+ };
+ let loaded=read_worker_overlay(&model)?.ok_or("invalid worker index")?;
+ // Resume removal of old generations if a previous publish was interrupted.
+ let store=fd_index_store::Store::open(".atlas-worker-index")?;if store.current()?!=current{return Err("worker index changed during cleanup".into())}store.cleanup(&current,Some(&loaded.base_generation))?;
+ let present={ let mut stmt=tracker.db.prepare("SELECT id FROM objects")?;let rows=stmt.query_map([],|row|row.get::<_,String>(0))?;rows.collect::<Result<std::collections::HashSet<_>,_>>()? };
+ let mut expired=std::collections::HashSet::new();
+ for row in loaded.base_rows.iter().chain(loaded.delta_rows.iter()){let id=row["id"].as_str().ok_or("invalid record id")?;if !present.contains(id){expired.insert(id.to_owned());}}
+ let current_revision=tracker.revision()?;
+ // The workspace lock spans both purge and recording the exact before/after revisions.
+ // Without that proof (e.g. after a crash), retain the old revision and fail stale.
+ let confirmed_purge=tracker.purge_revision.as_ref().is_some_and(|(before,after)|&loaded.revision==before&&&current_revision==after);
+ if expired.is_empty()&&(!confirmed_purge||current_revision==loaded.revision){return Ok(())}
+ let revision=if confirmed_purge{current_revision}else{loaded.revision.clone()};
+ let trash={let mut stmt=tracker.db.prepare("SELECT id FROM trash")?;let rows=stmt.query_map([],|row|row.get::<_,String>(0))?;rows.collect::<Result<std::collections::HashSet<_>,_>>()?};
+ let mut plan=WorkerOverlayPlan::new(loaded.base,loaded.base_rows,loaded.snapshot,loaded.delta_rows)?;plan.trash=trash;
+ let mut prepared=plan.prepare_expired(&expired.into_iter().collect::<Vec<_>>())?;while !prepared.step()?{}
+ let (_,_,compacted)=prepared.finish()?;let(index,records,hidden)=compacted.ok_or("missing purge compaction")?;
+ publish_worker_purge(&current,&revision,&loaded.actual_model,index,records,hidden)?;Ok(())
+}
+
+// Publish only the cleanup generation through an anchored directory descriptor.
+fn publish_worker_purge(previous:&str,revision:&str,model:&str,index:atlas_faiss_probe::Index,records:Vec<Value>,hidden:Vec<String>)->R<()> {
+ let store=fd_index_store::Store::open(".atlas-worker-index")?;if store.current()?!=previous{return Err("worker index changed during cleanup".into())}
+ let serial=uuid::Uuid::new_v4().simple().to_string();let base_name=format!("gen-{serial}-base");let final_name=if hidden.is_empty(){base_name.clone()}else{format!("gen-{serial}")};
+ let mut base_created=false;let mut final_created=false;let mut publication_attempted=false;
+ let result=(||->R<()>{
+  let base=store.create_gen(&base_name)?;base_created=true;let index_sha=store.write_index(&base,&index)?;
+  let metadata=serde_json::to_vec(&json!({"revision":revision,"model":model,"index_sha256":index_sha,"records":records}))?;
+  let metadata_sha=hash_bytes(&metadata);store.write(&base,"metadata.json",&metadata)?;store.write(&base,"metadata.sha256",metadata_sha.as_bytes())?;base.sync_all()?;
+  if !hidden.is_empty(){
+   let final_dir=store.create_gen(&final_name)?;final_created=true;
+   let ids=records.iter().map(|r|r["id"].as_str().map(str::to_owned).ok_or("invalid worker id")).collect::<Result<Vec<_>,_>>()?;
+   let mut overlay=atlas_faiss_probe::overlay::FlatOverlay::new(index,ids)?;for id in hidden{overlay.hide(&id)?}let snapshot=overlay.snapshot_delta()?;
+   store.write(&final_dir,"delta.faiss",&snapshot.index)?;
+   let m=serde_json::to_vec(&json!({"revision":revision,"key":model,"base_generation":base_name,"base_metadata_sha256":metadata_sha,"base_index_sha256":index_sha,"delta_sha256":hash_bytes(&snapshot.index),"changed_keys":snapshot.changed_keys,"delta_records":snapshot.records,"removed":snapshot.removed,"hidden":snapshot.hidden,"delta_metadata":[],"encoded_count":0}))?;
+   store.write(&final_dir,"overlay.json",&m)?;store.write(&final_dir,"overlay.sha256",hash_bytes(&m).as_bytes())?;final_dir.sync_all()?;
+  }
+  publication_attempted=true;store.publish(&final_name,previous)?;
+  #[cfg(feature="test-hook")] {static FAIL_ONCE:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);if std::env::var_os("ATLAS_TEST_WORKER_PURGE_FAIL_AFTER_PUBLISH").is_some()&&!FAIL_ONCE.swap(true,std::sync::atomic::Ordering::SeqCst){return Err("injected failure after worker purge publication".into())}}
+  store.cleanup(&final_name,if final_name==base_name{None}else{Some(&base_name)})?;Ok(())
+ })();
+ if result.is_err()&&!publication_attempted {if final_created{let _=store.remove_gen(&final_name);}if base_created{let _=store.remove_gen(&base_name);}}
+ result
+}
+
+const PURGE_PENDING:&str=".atlas-purge-pending";
+fn validate_purge_item(item:&Value)->R<(String,String,String)>{
+ let id=item["id"].as_str().filter(|v|!v.is_empty()&&v.len()<=255&&*v!="."&&*v!=".."&&!v.contains(['/', '\\', '\0'])).ok_or("invalid purge id")?;
+ let kind=item["kind"].as_str().ok_or("invalid purge kind")?;let path=item["path"].as_str().ok_or("invalid purge path")?;
+ match kind {"note" if path==format!("notes/{id}.md")=>{},"file" if path.starts_with(&format!("files/{id}/"))&&Path::new(path).components().all(|c|matches!(c,std::path::Component::Normal(_)))=>{},_=>return Err("invalid purge path".into())}
+ Ok((id.to_owned(),kind.to_owned(),path.to_owned()))
+}
+fn purge_pending()->R<Option<Value>>{
+ let file=match open_relative_file(Path::new(PURGE_PENDING)){Ok(file)=>file,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>return Ok(None),Err(e)=>return Err(e)};
+ if !file.metadata()?.is_file()||file.metadata()?.len()>4*1024*1024{return Err("invalid purge marker".into())}let mut bytes=Vec::new();file.take(4*1024*1024+1).read_to_end(&mut bytes)?;let data:Value=serde_json::from_slice(&bytes)?;
+ if data["version"]!=1||!data["cutoff"].as_f64().is_some_and(|n|n.is_finite()&&n>=0.0&&n<=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t|t.as_secs_f64()-86400.0).unwrap_or(-1.0)){return Err("invalid purge marker".into())}
+ let items=data["items"].as_array().ok_or("invalid purge marker")?;let mut ids=std::collections::HashSet::new();for item in items{let(id,_,_)=validate_purge_item(item)?;if !ids.insert(id){return Err("duplicate purge id".into())}}Ok(Some(data))
+}
+// Only stages with our durable ownership marker and known contents are ours to remove.
+fn cleanup_purge_stages()->R<()> {
+ use std::ffi::OsStr;let workspace=fs::File::open(".")?;
+ for name in crate::direct_export::entries(&workspace)?{
+  let Some(name_str)=name.to_str() else{continue};let Some(id)=name_str.strip_prefix(".atlas-purge-stage-") else{continue};if id.len()!=32||!id.bytes().all(|b|b.is_ascii_hexdigit()){continue}
+  let dir=match crate::direct_export::openat(&workspace,&name,libc::O_RDONLY|libc::O_DIRECTORY,0){Ok(dir)=>dir,Err(_)=>continue};
+  let mut owner=match crate::direct_export::openat(&dir,OsStr::new(".owner"),libc::O_RDONLY|libc::O_NONBLOCK,0){Ok(file)=>file,Err(_)=>continue};if !owner.metadata()?.is_file()||owner.metadata()?.len()>64{continue}let mut value=Vec::new();owner.read_to_end(&mut value)?;if value!=b"atlas-purge-stage-v1"{continue}
+  let entries=crate::direct_export::entries(&dir)?;if entries.iter().any(|v|v!=OsStr::new(".owner")&&v!=OsStr::new("plan")){continue}
+  if entries.iter().any(|v|v==OsStr::new("plan")){let file=match crate::direct_export::openat(&dir,OsStr::new("plan"),libc::O_RDONLY|libc::O_NONBLOCK,0){Ok(file)=>file,Err(_)=>continue};if !file.metadata()?.is_file(){continue}}
+  fd_index_store::remove_dir(&workspace,&name)?;
+ }
+ workspace.sync_all()?;Ok(())
+}
+// Both directory descriptors are anchored; the publication never replaces an existing marker.
+fn publish_purge_stage(stage:&fs::File,workspace:&fs::File)->R<()> {
+ use std::{ffi::CString,os::fd::AsRawFd};let source=CString::new("plan")?;let target=CString::new(PURGE_PENDING)?;
+ #[cfg(target_os="linux")] let result=unsafe{libc::renameat2(stage.as_raw_fd(),source.as_ptr(),workspace.as_raw_fd(),target.as_ptr(),libc::RENAME_NOREPLACE)};
+ #[cfg(target_os="macos")] let result={unsafe extern "C"{fn renameatx_np(fromfd:libc::c_int,from:*const libc::c_char,tofd:libc::c_int,to:*const libc::c_char,flags:libc::c_uint)->libc::c_int;}unsafe{renameatx_np(stage.as_raw_fd(),source.as_ptr(),workspace.as_raw_fd(),target.as_ptr(),4)}};
+ if result!=0{return Err(io::Error::last_os_error().into())}workspace.sync_all()?;Ok(())
+}
+fn begin_purge(tracker:&RevisionTracker,cutoff:f64)->R<Value>{
+ if let Some(data)=purge_pending()?{return Ok(data)}
+ let mut stmt=tracker.db.prepare("SELECT objects.id,objects.kind,objects.path FROM objects JOIN trash ON objects.id=trash.id WHERE trash.deleted_at <= ? ORDER BY objects.id")?;
+ let items=stmt.query_map([cutoff],|r|Ok(json!({"id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"path":r.get::<_,String>(2)?})))?.collect::<Result<Vec<_>,_>>()?;for item in &items{validate_purge_item(item)?;}
+ let data=json!({"version":1,"cutoff":cutoff,"items":items});let bytes=serde_json::to_vec(&data)?;if bytes.len()>4*1024*1024{return Err("purge marker too large".into())}
+ use std::ffi::OsStr;
+ let name=format!(".atlas-purge-stage-{}",uuid::Uuid::new_v4().simple());let workspace=fs::File::open(".")?;let stage=crate::direct_export::mkdirat(&workspace,OsStr::new(&name))?;
+ let mut owner=crate::direct_export::openat(&stage,OsStr::new(".owner"),libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL,0o600)?;owner.write_all(b"atlas-purge-stage-v1")?;owner.sync_all()?;stage.sync_all()?;workspace.sync_all()?;
+ let mut file=crate::direct_export::openat(&stage,OsStr::new("plan"),libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL,0o600)?;file.write_all(&bytes)?;file.sync_all()?;stage.sync_all()?;
+ #[cfg(feature="test-hook")] if let Some(path)=std::env::var_os("ATLAS_TEST_PURGE_MARKER_BEFORE_PUBLISH"){let dir=Path::new(&path);fs::write(dir.join("ready"),b"ready")?;let started=std::time::Instant::now();while !dir.join("go").exists()&&started.elapsed()<std::time::Duration::from_secs(30){std::thread::sleep(std::time::Duration::from_millis(10));}}
+ publish_purge_stage(&stage,&workspace)?;fd_index_store::remove_dir(&workspace,OsStr::new(&name))?;workspace.sync_all()?;Ok(data)
+}
+fn recover_purged_files(tracker:&RevisionTracker,data:&Value)->R<()> {
+ use std::{ffi::OsStr,os::unix::fs::MetadataExt};
+ let workspace=fs::File::open(".")?;
+ for item in data["items"].as_array().ok_or("invalid purge marker")?{
+  let(id,kind,path)=validate_purge_item(item)?;let exists:bool=tracker.db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE id=?)",[&id],|r|r.get(0))?;if exists{continue}
+  let folder=if kind=="note"{"notes"}else{"files"};
+  let parent=match crate::direct_export::openat(&workspace,OsStr::new(folder),libc::O_RDONLY|libc::O_DIRECTORY,0){Ok(dir)=>dir,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>continue,Err(e)=>return Err(e)};
+  let used:bool=if kind=="note"{tracker.db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE path=?)",[&path],|r|r.get(0))?}else{tracker.db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE substr(path,1,?)=?)",rusqlite::params![format!("files/{id}/").len() as i64,format!("files/{id}/")],|r|r.get(0))?};if used{return Err("purge path is in use".into())}
+  let reopened=crate::direct_export::openat(&workspace,OsStr::new(folder),libc::O_RDONLY|libc::O_DIRECTORY,0)?;let a=parent.metadata()?;let b=reopened.metadata()?;if (a.dev(),a.ino())!=(b.dev(),b.ino()){return Err("purge directory changed".into())}
+  if kind=="note"{
+   let name=format!("{id}.md");let file=match crate::direct_export::openat(&parent,OsStr::new(&name),libc::O_RDONLY|libc::O_NONBLOCK,0){Ok(file)=>file,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>continue,Err(e)=>return Err(e)};if !file.metadata()?.is_file(){return Err("invalid purge target".into())}fd_index_store::unlink(&parent,OsStr::new(&name),0)?;
+  }else{
+   match crate::direct_export::openat(&parent,OsStr::new(&id),libc::O_RDONLY|libc::O_DIRECTORY,0){Ok(_)=>fd_index_store::remove_dir(&parent,OsStr::new(&id))?,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>continue,Err(e)=>return Err(e)}
+  }
+  parent.sync_all()?;
+ }
+ Ok(())
+}
+fn finish_purge()->R<()>{fs::remove_file(PURGE_PENDING)?;fs::File::open(".")?.sync_all()?;Ok(())}
+fn compact_native_orphans(tracker:&RevisionTracker)->R<()> {
+ let root=Path::new(".atlas-semantic-native");
+ let current=match read_worker_bytes(&root.join("current"),256){Ok(v)=>String::from_utf8(v)?,Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e|e.kind()==io::ErrorKind::NotFound)=>return Ok(()),Err(e)=>return Err(e)};
+ if !valid_worker_generation(&current){return Err("invalid native generation".into())}let dir=root.join(&current);
+ let key=match fs::symlink_metadata(dir.join("overlay.json")){
+  Ok(_)=>{let v:Value=serde_json::from_slice(&read_worker_bytes(&dir.join("overlay.json"),100_000_000)?)?;v["key"].as_str().ok_or("invalid model identity")?.to_owned()},
+  Err(e) if e.kind()==io::ErrorKind::NotFound=>{let v:Value=serde_json::from_slice(&read_worker_bytes(&dir.join("metadata.json"),200_000_000)?)?;v["key"].as_str().ok_or("invalid model identity")?.to_owned()},Err(e)=>return Err(e.into())};
+ let cache=NativeCache::load(&key,None)?;let existing={let mut stmt=tracker.db.prepare("SELECT id FROM objects")?;let rows=stmt.query_map([],|row|row.get::<_,String>(0))?;rows.collect::<Result<std::collections::HashSet<_>,_>>()?};
+ let _=native_purge::compact(cache,&existing,&current)?;Ok(())
+}
+
 // The index may have been replaced by another process while this scan ran.
 // Validate the referenced base while holding the workspace lock at commit time.
 fn verify_worker_base(generation:&str,model:&str,expected_metadata:&str,expected_index:&str)->R<()>{if !valid_worker_generation(generation){return Err("invalid base".into())}let dir=Path::new(".atlas-worker-index").join(generation);let data=read_worker_bytes(&dir.join("metadata.json"),200_000_000)?;if hash_bytes(&data)!=expected_metadata{return Err("base changed".into())}let meta:Value=serde_json::from_slice(&data)?;if meta["model"]!=model||meta["index_sha256"]!=expected_index{return Err("base changed".into())}let mut index=open_relative_file(&dir.join("index.faiss"))?;if file_hash(&mut index)?!=expected_index{return Err("base changed".into())}Ok(())}
@@ -294,6 +443,7 @@ fn publish_worker_compacted(revision:&str,model:&str,index:atlas_faiss_probe::In
 
 #[cfg(test)] mod external_overlay_contract {
  use super::*;
+ #[test] fn purge_accepts_legacy_single_segment_ids(){let item=json!({"id":"legacy_user-42","kind":"note","path":"notes/legacy_user-42.md"});assert_eq!(validate_purge_item(&item).unwrap().0,"legacy_user-42");}
  #[test] fn unchanged_sources_keep_base_vectors_and_changed_sources_are_replaced() {
   let mut index=atlas_faiss_probe::Index::new().unwrap();let a=[0.1;512];let b=[0.2;512];index.add(&[a,b]).unwrap();
   let old=vec![json!({"id":"a","title":"A","field":"body","text":"first","input_hash":"a"}),json!({"id":"b","title":"B","field":"body","text":"second","input_hash":"b"})];

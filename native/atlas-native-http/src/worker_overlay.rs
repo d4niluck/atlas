@@ -28,6 +28,12 @@ impl WorkerOverlayPlan {
  pub(crate) fn push(&mut self,row:Value,vector:[f32;512],hidden:bool)->R<()>{let id=row["id"].as_str().ok_or("invalid record id")?.to_owned();if hidden!=self.trash.contains(&id){return Err("invalid document visibility".into())}if self.pending.as_ref().is_some_and(|(old,_,_,_)|*old!=id){self.flush()?;}if self.seen.contains(&id){return Err("non-contiguous document".into())}let pending=self.pending.get_or_insert_with(||(id,Vec::new(),Vec::new(),hidden));if pending.3!=hidden{return Err("visibility changed".into())}pending.1.push(row);pending.2.push(vector);Ok(())}
  fn flush(&mut self)->R<()>{if let Some((id,rows,vectors,hidden))=self.pending.take(){self.seen.insert(id.clone());if hidden{self.hide_after.insert(id.clone());}else{self.overlay.revive(&id)?;}if self.old.get(&id).is_some_and(|old|old.as_ref()==&rows){}else{self.delta.insert(id.clone(),std::sync::Arc::new(rows));self.updates.push((id,Some(vectors)));}}Ok(())}
 
+ // Existing records remain untouched; remove only IDs known to be absent from the database.
+ pub(crate) fn prepare_expired(mut self,expired:&[String])->R<WorkerOverlayPrepared>{
+  let expired:std::collections::HashSet<&str>=expired.iter().map(String::as_str).collect();
+  self.seen.extend(self.old.keys().filter(|id|!expired.contains(id.as_str())).cloned());
+  let mut prepared=self.prepare()?;prepared.force_compaction()?;Ok(prepared)
+ }
  pub(crate) fn prepare(mut self)->R<WorkerOverlayPrepared>{
   self.flush()?;for id in self.old.keys(){if !self.seen.contains(id){if self.trash.contains(id){self.overlay.hide(id)?;}else{self.delta.remove(id);self.updates.push((id.clone(),None));}}}
   self.overlay.apply_batch(self.updates)?;for id in self.hide_after{self.overlay.hide(&id)?;}let snapshot=self.overlay.snapshot_delta()?;let mut rows=Vec::with_capacity(snapshot.records.len());for (id,pos) in &snapshot.records{rows.push(self.delta.get(id).and_then(|v|v.get(*pos)).ok_or("missing delta metadata")?.clone())}
@@ -62,6 +68,22 @@ impl WorkerOverlayPrepared {
 #[cfg(test)] mod rename_tests {
  use super::*;
  use serde_json::json;
+ #[test] fn purge_without_reembedding_keeps_visible_and_retained_trash(){
+  let mut index=atlas_faiss_probe::Index::new().unwrap();
+  index.add(&[[0.1;512],[0.2;512],[0.3;512]]).unwrap();
+  let rows=vec![json!({"id":"visible","text":"alive"}),json!({"id":"expired","text":"private expired"}),json!({"id":"retained","text":"retained"})];
+  let mut original=atlas_faiss_probe::overlay::FlatOverlay::new(index,vec!["visible".into(),"expired".into(),"retained".into()]).unwrap();
+  original.hide("expired").unwrap();original.hide("retained").unwrap();
+  let saved=original.snapshot_delta().unwrap();
+  let mut base=atlas_faiss_probe::Index::new().unwrap();base.add(&[[0.1;512],[0.2;512],[0.3;512]]).unwrap();
+  let mut plan=WorkerOverlayPlan::new(base,rows,Some(saved),vec![]).unwrap();
+  plan.trash.insert("retained".into());
+  let mut prepared=plan.prepare_expired(&["expired".into()]).unwrap();
+  while !prepared.step().unwrap(){}
+  let (_,_,compact)=prepared.finish().unwrap();
+  let (index,rows,hidden)=compact.expect("expired records must be physically removed");
+  assert_eq!(index.count(),2);assert_eq!(rows.iter().map(|r|r["id"].as_str().unwrap()).collect::<Vec<_>>(),vec!["visible","retained"]);assert_eq!(hidden,vec!["retained"]);
+ }
  #[test] fn rename_reuses_every_vector_beyond_sixteen_thousand_chunks(){
   let count=16_005usize;let mut index=atlas_faiss_probe::Index::new().unwrap();let vector=[0.125f32;512];
   let mut records=Vec::with_capacity(count);

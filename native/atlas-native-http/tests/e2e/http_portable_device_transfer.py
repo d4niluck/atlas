@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Test model identity across portable workspace exports, with synthetic encoder only."""
-import argparse, base64, concurrent.futures, hashlib, json, os, pathlib, shutil, signal, subprocess, tempfile, time
+import argparse, base64, concurrent.futures, hashlib, json, os, pathlib, shutil, signal, sqlite3, subprocess, tempfile, time
 from urllib.request import Request, urlopen, install_opener, build_opener, ProxyHandler
 from urllib.error import HTTPError
 install_opener(build_opener(ProxyHandler({})))
-p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--source-backend');p.add_argument('--resources',default='');p.add_argument('--protected',action='store_true');p.add_argument('--external',action='store_true');p.add_argument('--attach-export',action='store_true');p.add_argument('--corrupt-worker',action='store_true');p.add_argument('--require-direct',action='store_true');p.add_argument('--stale-direct',action='store_true');p.add_argument('--symlink-direct',action='store_true');p.add_argument('--io-error-direct',action='store_true');p.add_argument('--search-io-error-direct',action='store_true');p.add_argument('--worker-reopen',action='store_true');p.add_argument('--worker-reopen-stale',action='store_true');p.add_argument('--cancel-direct',action='store_true');p.add_argument('--image-replace-direct',action='store_true');p.add_argument('--from-device',choices=['cpu','metal'],default='cpu');p.add_argument('--compatible-models',nargs=2,metavar=('Q8','BF16'),help='known tested model files, read-only');p.add_argument('--start-bf16',action='store_true');args=p.parse_args();assert not args.start_bf16 or args.compatible_models, '--start-bf16 requires --compatible-models'
+p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--source-backend');p.add_argument('--resources',default='');p.add_argument('--protected',action='store_true');p.add_argument('--external',action='store_true');p.add_argument('--attach-export',action='store_true');p.add_argument('--corrupt-worker',action='store_true');p.add_argument('--require-direct',action='store_true');p.add_argument('--stale-direct',action='store_true');p.add_argument('--symlink-direct',action='store_true');p.add_argument('--io-error-direct',action='store_true');p.add_argument('--failed-purge',action='store_true');p.add_argument('--search-io-error-direct',action='store_true');p.add_argument('--worker-reopen',action='store_true');p.add_argument('--worker-expired-ready',action='store_true');p.add_argument('--worker-expired-recovery',action='store_true');p.add_argument('--switch-incompatible-live',action='store_true');p.add_argument('--worker-reopen-stale',action='store_true');p.add_argument('--cancel-direct',action='store_true');p.add_argument('--duplicate-checking',action='store_true');p.add_argument('--expired-checking',action='store_true');p.add_argument('--many-expired',action='store_true');p.add_argument('--expired-disabled',action='store_true');p.add_argument('--disabled-recovery',action='store_true');p.add_argument('--before-marker-recovery',action='store_true');p.add_argument('--native-expired-recovery',action='store_true');p.add_argument('--cancel-restart',action='store_true');p.add_argument('--edit-checking',action='store_true');p.add_argument('--image-replace-direct',action='store_true');p.add_argument('--from-device',choices=['cpu','metal'],default='cpu');p.add_argument('--compatible-models',nargs=2,metavar=('Q8','BF16'),help='known tested model files, read-only');p.add_argument('--start-bf16',action='store_true');args=p.parse_args();assert not args.start_bf16 or args.compatible_models, '--start-bf16 requires --compatible-models'
 root=pathlib.Path(tempfile.mkdtemp(prefix='atlas-index-independent-'));models=root/'models';models.mkdir();log=root/'calls.jsonl';actions=root/'index-actions.log'
 q8=models/'embeddinggemma-2-q8.gguf';bf16=models/'embeddinggemma-2.gguf'
 if args.compatible_models:
@@ -17,7 +17,10 @@ if args.image_replace_direct:
  assert args.attach_export and args.require_direct and not args.protected
  source=mock.read_text().replace("text=value['input'];","text=value['input'];text=json.dumps(text,sort_keys=True) if isinstance(text,list) else text;")
  mock=root/'mock-with-images.py';mock.write_text(source);mock.chmod(0o700)
+if args.worker_expired_recovery:assert args.worker_expired_ready
 settings={'embedding_variant':'bf16' if args.start_bf16 else 'q8','embedding':args.from_device,'llm':'cpu','semantic_enabled':True,'rag_enabled':False,'lexical_enabled':True,'image_enabled':args.image_replace_direct,'agentic':False,'idle_enabled':True,'idle_minutes':15,'model':'e2b'};(models/'settings.json').write_text(json.dumps(settings));marker='UNIQUE_PORTABLE_VECTOR_ALPHA_7381';password='test-password-01';token='independent-test-token';env=os.environ.copy();env.update(NO_PROXY='*',ATLAS_TEST_FAKE_ENCODER_LOG=str(log),ATLAS_TEST_INDEX_ACTION_LOG=str(actions),DYLD_LIBRARY_PATH=args.resources,LD_LIBRARY_PATH=args.resources);proc=None;data_root=root/'data'
+
+if args.worker_expired_recovery:env['ATLAS_TEST_WORKER_PURGE_FAIL_AFTER_PUBLISH']='1'
 
 def req(path,body=None,method=None):
  data=None if body is None else json.dumps(body,ensure_ascii=False).encode();q=Request(base+path,data=data,method=method,headers={'X-Atlas-Token':token,'Content-Type':'application/json'})
@@ -30,6 +33,9 @@ def ok(status,r):assert r[0]==status,r;return r[1]
 def count():
  if not log.exists():return 0
  return sum(marker in x.get('input','') and x['input'].startswith('title: none | text: ') for x in map(json.loads,log.read_text().splitlines()))
+def document_calls():
+ if not log.exists():return 0
+ return sum(isinstance(x.get('input'),str) and x['input'].startswith('title: none | text: ') for x in map(json.loads,log.read_text().splitlines()))
 def search(wid,obj):
  end=time.monotonic()+(20 if args.corrupt_worker else 120)
  while time.monotonic()<end:
@@ -52,6 +58,50 @@ try:
   q=Request(base+'/api/w/'+wid+'/files?filename=image.png',data=image_a,method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
   with urlopen(q,timeout=30) as r: assert r.status in (200,201); image_id=json.load(r)['id']
   assert search(wid,image_id),'initial image missing from search'
+ if args.switch_incompatible_live:
+  assert args.external and not args.protected and not args.attach_export
+  cfg=ok(200,req('/api/settings/app'));ok(200,req('/api/settings/app',dict(cfg,image_enabled=True),'PUT'))
+  deadline=time.monotonic()+12
+  while time.monotonic()<deadline:
+   code,result=req('/api/w/'+wid+'/search',{'mode':'semantic','query':'test','object_ids':[obj]})
+   if code==200:break
+   assert code==503,(code,result)
+   time.sleep(.1)
+  else:raise AssertionError(('search stayed unavailable after incompatible model switch',result))
+  assert result.get('results'),'no results after incompatible model switch'
+  print('PASS incompatible mode change recovers without re-opening workspace',flush=True);raise SystemExit(0)
+ if args.worker_expired_ready:
+  assert args.external and not args.protected and not args.attach_export
+  trash_id=ok(201,req('/api/w/'+wid+'/notes',{'title':'Will expire','text':'OLD_TRASH_CONTENT'}))['id'];assert search(wid,trash_id)
+  ok(200,req('/api/w/'+wid+'/objects/delete-many',{'ids':[trash_id]}))
+  cfg=ok(200,req('/api/settings/app'));ok(200,req('/api/settings/app',dict(cfg,semantic_enabled=False,rag_enabled=False),'PUT'))
+  expire_at=time.time()+8
+  with sqlite3.connect(external_path/'atlas.sqlite3',timeout=10) as db:db.execute('update trash set deleted_at=? where id=?',(expire_at-86400,trash_id))
+  cfg=ok(200,req('/api/settings/app'));ok(200,req('/api/settings/app',dict(cfg,semantic_enabled=True),'PUT'));assert search(wid,obj)
+  current=external_path/'.atlas-worker-index/current';generation=current.read_text();worker_doc_calls=document_calls()
+  if actions.exists():actions.unlink()
+  while time.time()<expire_at+.1:time.sleep(.05)
+  board_response=req('/api/w/'+wid+'/board')
+  if args.worker_expired_recovery:
+   assert board_response[0] in (409,500),('injected post-publication failure not reported',board_response)
+   ok(200,req('/api/workspaces/'+wid+'/close',{}))
+   wid=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',external_path),'id':wid}))['id']
+  else:assert board_response[0]==200,board_response
+  deadline=time.monotonic()+15
+  while time.monotonic()<deadline:
+   state=ok(200,req('/api/w/'+wid+'/semantic/status'))
+   assert not state.get('indexing'),('worker-only expired trash triggered rebuild',state)
+   if state.get('available') and not state.get('message'):break
+   time.sleep(.03)
+  else:raise AssertionError(('worker-only index did not become ready',state))
+  assert search(wid,obj),'worker-only search failed after purge'
+  assert current.read_text().startswith('gen-'),'worker-only current generation invalid'
+  assert not actions.exists() or not actions.read_text().strip(),'worker-only purge entered rebuild'
+  assert document_calls()==worker_doc_calls,'worker-only purge reencoded text'
+  for name in ('metadata.json','overlay.json'):
+   for meta in (external_path/'.atlas-worker-index').rglob(name):
+    assert 'OLD_TRASH_CONTENT' not in meta.read_text(), 'expired trash remains in index metadata'
+  print('PASS worker-only ready index survives expired trash purge and recovery' if args.worker_expired_recovery else 'PASS worker-only ready index survives expired trash purge',flush=True);raise SystemExit(0)
  if args.worker_reopen:
   assert args.external and not args.protected and not args.attach_export
   target=external_path;current=target/'.atlas-worker-index/current';before_generation=current.read_text()
@@ -86,6 +136,21 @@ try:
   removed=ok(201,req('/api/w/'+wid+'/notes',{'title':'Delete','text':'UNIQUE_REMOVED_BODY'}))['id'];assert search(wid,removed)
   stable=ok(201,req('/api/w/'+wid+'/notes',{'title':'Stable','text':'UNIQUE_STABLE_BODY'}))['id'];assert search(wid,stable)
   predeleted=ok(201,req('/api/w/'+wid+'/notes',{'title':'Trash','text':'UNIQUE_TRASHED_BODY'}))['id'];assert search(wid,predeleted);ok(200,req('/api/w/'+wid+'/objects/delete-many',{'ids':[predeleted]}));assert not search(wid,predeleted)
+  if args.expired_checking or args.expired_disabled:
+   q=Request(base+'/api/w/'+wid+'/files?filename=trashed.txt',data=b'UNIQUE_TRASHED_FILE_BODY',method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
+   with urlopen(q,timeout=30) as response: assert response.status in (200,201);predeleted_file=json.load(response)['id']
+   assert search(wid,predeleted_file),'file index missing before trash'
+   ok(200,req('/api/w/'+wid+'/objects/delete-many',{'ids':[predeleted_file]}));assert not search(wid,predeleted_file)
+  if args.many_expired:
+   assert args.expired_checking and not args.protected and not args.external
+   bulk_ids=[ok(201,req('/api/w/'+wid+'/notes',{'title':f'Bulk trash {i}','text':f'BULK_TRASH_BODY_{i}'}))['id'] for i in range(47)]
+   assert search(wid,bulk_ids[-1]),'bulk source documents not indexed'
+   ok(200,req('/api/w/'+wid+'/objects/delete-many',{'ids':bulk_ids}));assert not search(wid,bulk_ids[0])
+  if args.expired_checking:
+   assert not args.protected and not args.external
+   for i in range(35):
+    last=ok(201,req('/api/w/'+wid+'/notes',{'title':f'Extra {i}','text':f'EXTRA_DOCUMENT_{i}'}))['id']
+   assert search(wid,last),'source index not ready'
   if not args.protected:
    native=data_root/'.default/.atlas-semantic-native';native_gen=native/(native/'current').read_text();assert (native_gen/'overlay.json').is_file() and (native_gen/'delta.faiss').is_file(), 'test needs a native base+delta overlay'
  if args.stale_direct:
@@ -99,9 +164,32 @@ try:
  exp=ok(200,req('/api/workspaces/export',params));folder=pathlib.Path(exp.get('path') or dest/exp['folder']);assert folder.is_dir()
  # Simulate second machine: separate Atlas data root and fresh model settings/process.
  os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=15);data_root=root/'destination-data';next_device='metal' if args.from_device=='cpu' else 'cpu';settings['embedding']=next_device;(models/'settings.json').write_text(json.dumps(settings))
- if args.cancel_direct:
+ if args.expired_checking or args.expired_disabled or args.failed_purge:
+  with sqlite3.connect(folder/'workspace-1'/'atlas.sqlite3') as db:
+   db.execute('update trash set deleted_at=1 where id=?',(predeleted,))
+   if args.expired_checking or args.expired_disabled:
+    db.execute('update trash set deleted_at=1 where id=?',(predeleted_file,));file_relpath=db.execute('select path from objects where id=?',(predeleted_file,)).fetchone()[0]
+   if args.many_expired:db.execute('update trash set deleted_at=1')
+ if args.failed_purge:assert args.io_error_direct and args.attach_export
+ if args.expired_disabled:
+  assert args.attach_export and not args.protected
+  settings['semantic_enabled']=False;(models/'settings.json').write_text(json.dumps(settings))
+ if args.disabled_recovery or args.before_marker_recovery:
+  assert args.expired_disabled
+  purge_barrier=root/'purge-barrier';purge_barrier.mkdir();env['ATLAS_TEST_PURGE_MARKER_BEFORE_PUBLISH' if args.before_marker_recovery else 'ATLAS_TEST_NATIVE_PURGE_BARRIER']=str(purge_barrier)
+ if args.cancel_direct or args.duplicate_checking or args.expired_checking or args.edit_checking:
   assert args.attach_export and not args.protected
   barrier=root/'native-step-barrier';barrier.mkdir();env['ATLAS_TEST_NATIVE_STEP_BARRIER']=str(barrier)
+ if args.duplicate_checking:
+  assert args.require_direct
+  loading_barrier=root/'loading-barrier';loading_barrier.mkdir();env['ATLAS_TEST_LOADING_BARRIER']=str(loading_barrier)
+ if args.native_expired_recovery:
+  assert args.expired_checking and args.require_direct and not args.protected
+  purge_barrier=root/'purge-barrier';purge_barrier.mkdir();env['ATLAS_TEST_NATIVE_PURGE_BARRIER']=str(purge_barrier)
+ if args.cancel_restart:
+  assert args.require_direct and args.attach_export and not args.protected
+  restart_barrier=root/'restart-barrier';restart_barrier.mkdir();env['ATLAS_TEST_CHECK_RESTART_BARRIER']=str(restart_barrier)
+  finish_barrier=root/'finish-barrier';finish_barrier.mkdir();env['ATLAS_TEST_CHECK_FINISH_BARRIER']=str(finish_barrier)
  if args.io_error_direct:
   assert args.attach_export and not args.protected
   env['ATLAS_TEST_NATIVE_READ_ERROR']='1'
@@ -125,6 +213,164 @@ try:
  else:
   items=ok(201,req('/api/workspaces/import',{'capability':cap('import',folder)}))['workspaces'];assert len(items)==1;copy=items[0]['id']
   if args.protected:ok(200,req('/api/workspaces/'+copy+'/unlock',{'password':password}))
+ if args.disabled_recovery or args.before_marker_recovery:
+  before_purge_calls=document_calls()
+  try:
+   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    board=executor.submit(req,'/api/w/'+copy+'/board');deadline=time.monotonic()+20
+    while not (purge_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+    assert (purge_barrier/'ready').exists(),'database purge did not reach barrier'
+    os.killpg(proc.pid,signal.SIGKILL);proc.wait(timeout=15)
+    try:board.result(timeout=10)
+    except Exception:pass
+   if args.before_marker_recovery:
+    with sqlite3.connect(target/'atlas.sqlite3') as db:assert db.execute('select count(*) from trash where id=?',(predeleted,)).fetchone()[0]==1,'DB purge happened before marker publication'
+    assert (target/'notes'/f'{predeleted}.md').exists(),'note deleted before durable marker'
+    assert (target/file_relpath).exists(),'file deleted before durable marker'
+   restart_env=env.copy();restart_env.pop('ATLAS_TEST_NATIVE_PURGE_BARRIER',None);restart_env.pop('ATLAS_TEST_PURGE_MARKER_BEFORE_PUBLISH',None)
+   proc=subprocess.Popen([args.backend,'--root',str(data_root),'--port','0','--token-stdin','--model-path',str(models/'embeddinggemma-2-q8.gguf'),'--rag-model-dir',str(models),'--llama-server',str(mock)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=True,env=restart_env)
+   proc.stdin.write(token+'\n');proc.stdin.flush();port=proc.stdout.readline().strip();assert port.isdigit(),('recovery backend failed',port);base='http://127.0.0.1:'+port
+   copy=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',target),'id':copy}))['id']
+   assert req('/api/w/'+copy+'/board')[0]==200
+   for name in ('metadata.json','overlay.json'):
+    for meta in (target/'.atlas-semantic-native').rglob(name):
+     assert all(x not in meta.read_text() for x in ('UNIQUE_TRASHED_BODY','UNIQUE_TRASHED_FILE_BODY')),('expired trash survived disabled-search recovery',meta)
+   assert not (target/'notes'/f'{predeleted}.md').exists(),'expired note file survived recovery'
+   assert not (target/file_relpath).exists(),'expired original file survived recovery'
+   assert not list(target.glob('.atlas-purge-stage-*')),'owned marker stage not cleaned after recovery'
+   assert not (target/'.atlas-purge-pending').exists(),'purge marker not cleared after recovery'
+   assert document_calls()==before_purge_calls,'disabled-search recovery reencoded text'
+   assert not (target/'.atlas-worker-index').exists(),'disabled-search recovery built second index'
+   print('PASS interrupted purge recovers with semantic search disabled',flush=True)
+  finally:(purge_barrier/'go').touch()
+  raise SystemExit(0)
+ if args.expired_disabled:
+  before_purge_calls=document_calls();assert (target/'notes'/f'{predeleted}.md').exists(),'expired note fixture missing';assert req('/api/w/'+copy+'/board')[0]==200
+  deadline=time.monotonic()+8
+  while time.monotonic()<deadline:
+   remaining=[meta for name in ('metadata.json','overlay.json') for meta in (target/'.atlas-semantic-native').rglob(name) if 'UNIQUE_TRASHED_BODY' in meta.read_text()]
+   if not remaining:break
+   time.sleep(.05)
+  assert not remaining,('expired trash remains while semantic search disabled',remaining)
+  assert not (target/'notes'/f'{predeleted}.md').exists(),'expired note file remains after cleanup'
+  assert not (target/file_relpath).exists(),'expired original file remains after cleanup'
+  assert document_calls()==before_purge_calls,'cleanup with semantic search disabled loaded model'
+  assert not (target/'.atlas-worker-index').exists(),'cleanup with semantic search disabled built second index'
+  print('PASS expired trash cleaned with semantic search disabled',flush=True);raise SystemExit(0)
+ if args.native_expired_recovery:
+  before_purge_calls=document_calls()
+  try:
+   ok(200,req('/api/w/'+copy+'/semantic/status'));deadline=time.monotonic()+20
+   while not (barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert (barrier/'ready').exists(),'validation did not reach barrier'
+   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    board=executor.submit(req,'/api/w/'+copy+'/board');time.sleep(.25);(barrier/'go').touch();deadline=time.monotonic()+20
+    while not (purge_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+    assert (purge_barrier/'ready').exists(),'database purge did not reach barrier'
+    os.killpg(proc.pid,signal.SIGKILL);proc.wait(timeout=15)
+    try:board.result(timeout=10)
+    except Exception:pass
+   restart_env=env.copy();restart_env.pop('ATLAS_TEST_NATIVE_PURGE_BARRIER',None);restart_env.pop('ATLAS_TEST_NATIVE_STEP_BARRIER',None)
+   proc=subprocess.Popen([args.backend,'--root',str(data_root),'--port','0','--token-stdin','--model-path',str(models/'embeddinggemma-2-q8.gguf'),'--rag-model-dir',str(models),'--llama-server',str(mock)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=True,env=restart_env)
+   proc.stdin.write(token+'\n');proc.stdin.flush();port=proc.stdout.readline().strip();assert port.isdigit(),('recovery backend failed',port);base='http://127.0.0.1:'+port
+   copy=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',target),'id':copy}))['id']
+   if actions.exists():actions.unlink()
+   assert search(copy,obj),'search failed after purge recovery'
+   assert not (target/'notes'/f'{predeleted}.md').exists(),'expired note file survived native recovery'
+   assert not (target/file_relpath).exists(),'expired original file survived native recovery'
+   assert document_calls()==before_purge_calls,'purge recovery reencoded document text'
+   assert not (target/'.atlas-worker-index').exists(),'purge recovery built second index'
+   assert not actions.exists() or not actions.read_text().strip(),'purge recovery entered rebuild'
+   for name in ('metadata.json','overlay.json'):
+    for meta in (target/'.atlas-semantic-native').rglob(name):
+     assert all(x not in meta.read_text() for x in ('UNIQUE_TRASHED_BODY','UNIQUE_TRASHED_FILE_BODY')),('expired trash survived recovery',meta)
+   print('PASS interrupted native purge recovers without rebuilding',flush=True)
+  finally:(barrier/'go').touch();(purge_barrier/'go').touch()
+  raise SystemExit(0)
+ if args.cancel_restart:
+  try:
+   ok(200,req('/api/w/'+copy+'/semantic/status'));deadline=time.monotonic()+15
+   while not (finish_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert (finish_barrier/'ready').exists(),'validation did not reach finish barrier'
+   ok(200,req('/api/w/'+copy+'/notes/'+obj,{'title':'A','text':'CHANGED_AT_CHECK_FINISH'},'PUT'))
+   (finish_barrier/'go').touch();deadline=time.monotonic()+15
+   while not (restart_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert (restart_barrier/'ready').exists(),'check restart did not reach barrier'
+   ok(200,req('/api/w/'+copy+'/semantic/cancel',{}));(restart_barrier/'go').touch();time.sleep(.25)
+   state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+   assert state.get('cancelled') and not state.get('indexing') and not state.get('checking'),('cancel during restart was lost',state)
+   assert not (target/'.atlas-worker-index').exists(),'cancel during restart built second index'
+   assert not actions.exists() or not actions.read_text().strip(),'cancel during restart entered rebuild'
+   ok(202,req('/api/w/'+copy+'/semantic/rebuild',{'force':False}))
+   matches=search(copy,obj);assert 'CHANGED_AT_CHECK_FINISH' in json.dumps(matches,ensure_ascii=False),'resume lost actual edit'
+   print('PASS cancel at check restart and resume edited content',flush=True)
+  finally:(finish_barrier/'go').touch();(restart_barrier/'go').touch()
+  raise SystemExit(0)
+ if args.edit_checking:
+  ok(200,req('/api/w/'+copy+'/semantic/status'));deadline=time.monotonic()+20
+  while not (barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+  assert (barrier/'ready').exists(),'validation did not reach barrier'
+  try:
+   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future=executor.submit(req,'/api/w/'+copy+'/notes/'+obj,{'title':'A','text':'EDIT_DURING_INDEX_CHECK'},'PUT')
+    time.sleep(.25);(barrier/'go').write_text('go');updated=future.result(timeout=20)
+   assert updated[0]==200,('note update failed',updated)
+   matches=search(copy,obj)
+   assert 'EDIT_DURING_INDEX_CHECK' in json.dumps(matches,ensure_ascii=False),('updated note missing',matches)
+   print('PASS edit during checking is searchable',flush=True)
+  finally:(barrier/'go').touch()
+  raise SystemExit(0)
+ if args.expired_checking:
+  before_purge_calls=document_calls()
+  ok(200,req('/api/w/'+copy+'/semantic/status'));deadline=time.monotonic()+20
+  while not (barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+  assert (barrier/'ready').exists(),'validation did not reach barrier'
+  try:
+   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future=executor.submit(req,'/api/w/'+copy+'/board')
+    time.sleep(.25)
+    (barrier/'go').write_text('go')
+    board=future.result(timeout=20)
+   assert board[0]==200,('board failed',board)
+   deadline=time.monotonic()+20
+   while time.monotonic()<deadline:
+    state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+    assert not state.get('indexing'),('expired trash purge triggered full index rebuild',state)
+    if state.get('available') and not state.get('message'):break
+    time.sleep(.02)
+   else:raise AssertionError(('index did not become ready after purge',state))
+   assert search(copy,obj),'existing note missing after trash purge'
+   assert not (target/'.atlas-worker-index').exists(), 'trash purge built a second index'
+   assert not actions.exists() or not actions.read_text().strip(), 'trash purge entered rebuild'
+   assert not (target/'notes'/f'{predeleted}.md').exists(),'expired note file remains after purge'
+   assert not (target/file_relpath).exists(),'expired original file remains after purge'
+   if args.many_expired:assert all(not (target/'notes'/f'{identifier}.md').exists() for identifier in bulk_ids),'bulk expired note remains on disk'
+   assert document_calls()==before_purge_calls,'trash cleanup reencoded document text'
+   for name in ('metadata.json','overlay.json'):
+    for meta in (target/'.atlas-semantic-native').rglob(name):
+     assert all(x not in meta.read_text() for x in ('UNIQUE_TRASHED_BODY','UNIQUE_TRASHED_FILE_BODY','BULK_TRASH_BODY_')), ('expired trash remains in native index',meta)
+   print('PASS expired trash cleanup physically removes metadata without reencoding',flush=True)
+  finally:(barrier/'go').touch()
+  raise SystemExit(0)
+ if args.duplicate_checking:
+  # Both status calls must see the initial loading state before either enqueues.
+  try:
+   with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    futures=[executor.submit(req,'/api/w/'+copy+'/semantic/status') for _ in range(2)]
+    deadline=time.monotonic()+10
+    while not all((loading_barrier/f'seen-{n}').exists() for n in range(2)) and time.monotonic()<deadline:time.sleep(.01)
+    assert all((loading_barrier/f'seen-{n}').exists() for n in range(2)), 'two status requests did not reach barrier'
+    (loading_barrier/'go').write_text('go')
+    statuses=[future.result(timeout=10) for future in futures]
+    assert all(r[0]==200 for r in statuses), statuses
+    observed=ok(200,req('/api/w/'+copy+'/semantic/status'))
+    assert not observed.get('indexing'), ('duplicate startup requests triggered index rebuild',observed)
+  finally:
+   (loading_barrier/'go').touch();(barrier/'go').touch()
+  assert search(copy,obj),'portable index not searchable after concurrent startup'
+  assert not (target/'.atlas-worker-index').exists(), 'concurrent startup built second index'
+  assert not actions.exists() or not actions.read_text().strip(), 'concurrent startup entered rebuild'
+  print('PASS concurrent startup status requests retain index',flush=True);raise SystemExit(0)
  if args.cancel_direct:
   # Start the validation, pause its first step and verify cancellation itself
   # does not wait for the storage worker to finish that step.
@@ -154,6 +400,20 @@ try:
   assert not (target/'.atlas-worker-index').exists(), 'resume unnecessarily built a second index'
   assert not actions.exists() or not actions.read_text().strip(), 'resume unnecessarily entered index build'
   print('PASS cancellation and resume verify without rebuilding index',flush=True);raise SystemExit(0)
+ if args.failed_purge:
+  deadline=time.monotonic()+20
+  while time.monotonic()<deadline:
+   state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+   if not state.get('checking') and not state.get('available') and state.get('message'):break
+   time.sleep(.05)
+  else:raise AssertionError(('failed state did not appear',state))
+  assert req('/api/w/'+copy+'/board')[0]==200
+  time.sleep(.25);state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+  assert not state.get('indexing') and not state.get('checking') and not state.get('available'),('purge masked failed state',state)
+  assert not (target/'.atlas-worker-index').exists(),'failed purge built second index'
+  assert not actions.exists() or not actions.read_text().strip(),'failed purge triggered rebuild'
+  assert (log.read_bytes() if log.exists() else b'')==encoder_before,'failed purge caused model inference'
+  print('PASS expired trash purge preserves failed state',flush=True);raise SystemExit(0)
  if args.symlink_direct or args.io_error_direct:
   deadline=time.monotonic()+20
   while time.monotonic()<deadline:

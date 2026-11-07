@@ -1,5 +1,5 @@
 use std::{ffi::{c_void,CString},path::Path};
-unsafe extern "C" {fn af_memory_write(p:*mut c_void)->*mut c_void;fn af_memory_size(w:*mut c_void)->i64;fn af_memory_copy(w:*mut c_void,out:*mut u8);fn af_memory_free(w:*mut c_void);fn af_memory_read(data:*const u8,n:i64)->*mut c_void;fn af_create()->*mut c_void;fn af_free(p:*mut c_void);fn af_count(p:*mut c_void)->i64;fn af_reconstruct(p:*mut c_void,id:i64,out:*mut f32)->i32;fn af_add(p:*mut c_void,v:*const f32,n:i64)->i32;fn af_search(p:*mut c_void,q:*const f32,ids:*const i64,n:i64,k:i64,scores:*mut f32,out:*mut i64)->i32;fn af_save(p:*mut c_void,path:*const std::ffi::c_char)->i32;fn af_load(path:*const std::ffi::c_char)->*mut c_void;}
+unsafe extern "C" {fn af_memory_write(p:*mut c_void)->*mut c_void;fn af_memory_size(w:*mut c_void)->i64;fn af_memory_copy(w:*mut c_void,out:*mut u8);fn af_memory_free(w:*mut c_void);fn af_memory_read(data:*const u8,n:i64)->*mut c_void;fn af_create()->*mut c_void;fn af_free(p:*mut c_void);fn af_count(p:*mut c_void)->i64;fn af_reconstruct(p:*mut c_void,id:i64,out:*mut f32)->i32;fn af_add(p:*mut c_void,v:*const f32,n:i64)->i32;fn af_search(p:*mut c_void,q:*const f32,ids:*const i64,n:i64,k:i64,scores:*mut f32,out:*mut i64)->i32;fn af_save(p:*mut c_void,path:*const std::ffi::c_char)->i32;fn af_save_fd(p:*mut c_void,fd:i32)->i32;fn af_load(path:*const std::ffi::c_char)->*mut c_void;}
 pub struct Index(*mut c_void);
 impl Drop for Index {fn drop(&mut self){unsafe{af_free(self.0)}}}
 impl Index {
@@ -11,6 +11,7 @@ impl Index {
  pub fn add(&mut self,v:&[[f32;512]])->Result<(),&'static str>{if unsafe{af_add(self.0,v.as_ptr().cast(),v.len() as i64)}!=0 {Err("add failed")}else{Ok(())}}
  pub fn search(&self,q:&[f32;512],ids:&[i64],k:usize)->Result<Vec<(i64,f32)>,&'static str>{if k==0||ids.is_empty(){return Ok(vec![])} let mut scores=vec![0.;k];let mut out=vec![-1;k];if unsafe{af_search(self.0,q.as_ptr(),ids.as_ptr(),ids.len() as i64,k as i64,scores.as_mut_ptr(),out.as_mut_ptr())}!=0{return Err("search failed")} Ok(out.into_iter().zip(scores).filter(|(id,_)|*id>=0).collect())}
  pub fn save(&self,path:&Path)->Result<(),&'static str>{let s=CString::new(path.to_str().ok_or("invalid path")?).map_err(|_|"invalid path")?;if unsafe{af_save(self.0,s.as_ptr())}!=0{Err("save failed")}else{Ok(())}}
+ pub fn save_file(&self,file:&mut std::fs::File)->Result<(),&'static str>{use std::io::{Seek,SeekFrom};use std::os::fd::AsRawFd;file.set_len(0).map_err(|_|"save failed")?;file.seek(SeekFrom::Start(0)).map_err(|_|"save failed")?;if unsafe{af_save_fd(self.0,file.as_raw_fd())}!=0{Err("save failed")}else{Ok(())}}
  pub fn load(path:&Path)->Result<Self,&'static str>{let s=CString::new(path.to_str().ok_or("invalid path")?).map_err(|_|"invalid path")?;let p=unsafe{af_load(s.as_ptr())};if p.is_null(){Err("load failed")}else{Ok(Self(p))}}
 }
 #[cfg(test)] mod tests {use super::*;
