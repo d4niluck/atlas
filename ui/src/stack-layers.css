@@ -1,8 +1,13 @@
 /* Keep the active group above intersecting cards; its own cards stay sharp. */
 .stack.stack-open{z-index:2}
 .stack.stack-front{z-index:4}
-.stack.stack-blur{backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+/* An opaque surface hides overlapping cards without a backdrop filter. */
+.stack.stack-open,.stack.stack-front{background:#24202f}
+:root[data-theme=light] .stack.stack-open,:root[data-theme=light] .stack.stack-front{background:#ede7f3}
+:root[data-theme=light] .stack.stack-open .stack-header span,:root[data-theme=light] .stack.stack-front .stack-header span,:root[data-theme=light] .stack.stack-open .stack-header button,:root[data-theme=light] .stack.stack-front .stack-header button{color:#5d437a}
 .lines.lines-group{z-index:3}
 .lines.lines-front{z-index:4}
 .card.group-card-open{z-index:3}
 .card.group-card-front{z-index:5}
+:root[data-theme=light] .lines-group .edge-path,:root[data-theme=light] .lines-front .edge-path{stroke:#6b508a}
+:root[data-theme=light] .lines-group marker path,:root[data-theme=light] .lines-front marker path{fill:#6b508a}
