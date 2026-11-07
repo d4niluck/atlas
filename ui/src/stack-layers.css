@@ -2,8 +2,9 @@
 .stack.stack-open{z-index:2}
 .stack.stack-front{z-index:4}
 /* An opaque surface hides overlapping cards without a backdrop filter. */
-.stack.stack-open,.stack.stack-front{background:#24202f}
-:root[data-theme=light] .stack.stack-open,:root[data-theme=light] .stack.stack-front{background:#ede7f3}
+.stack.stack-open,.stack.stack-front{background:transparent}
+.stack.stack-filled{background:#24202f}
+:root[data-theme=light] .stack.stack-filled{background:#ede7f3}
 :root[data-theme=light] .stack.stack-open .stack-header span,:root[data-theme=light] .stack.stack-front .stack-header span,:root[data-theme=light] .stack.stack-open .stack-header button,:root[data-theme=light] .stack.stack-front .stack-header button{color:#5d437a}
 .lines.lines-group{z-index:3}
 .lines.lines-front{z-index:4}

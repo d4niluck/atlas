@@ -25,3 +25,17 @@ export function stackFocusForObject(stacks:Stack[],objectId:string,previous:stri
 export function stackFocusAfterDrop(stacks:Stack[],target:string|undefined,previous:string|null){
  return stacks.find(stack=>stack.id===target&&!stack.collapsed)?.id??previous;
 }
+
+type Rect={x:number;y:number;w:number;h:number};
+
+// Board coordinates keep the fill stable while panning and zooming.
+export function stackNeedsFill(stackId:string,stacks:Stack[],cards:{id:string;rect:Rect}[],stackRects:Map<string,Rect>,activeId:string|null){
+ const target=stacks.find(stack=>stack.id===stackId);
+ const frame=stackRects.get(stackId);
+ if(!target||target.collapsed||!frame)return false;
+ const overlaps=(rect:Rect)=>frame.x<rect.x+rect.w&&frame.x+frame.w>rect.x&&frame.y<rect.y+rect.h&&frame.y+frame.h>rect.y;
+ const own=new Set(target.ids);
+ const grouped=new Set(stacks.filter(stack=>!stack.collapsed).flatMap(stack=>stack.ids));
+ if(cards.some(card=>!own.has(card.id)&&(stackId===activeId||!grouped.has(card.id))&&overlaps(card.rect)))return true;
+ return stacks.some(stack=>stack.collapsed&&stack.id!==stackId&&!!stackRects.get(stack.id)&&overlaps(stackRects.get(stack.id)!));
+}

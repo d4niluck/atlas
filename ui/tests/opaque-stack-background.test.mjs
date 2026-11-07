@@ -15,8 +15,12 @@ function assertOpaque(color) {
  assert.match(color, /^#[\da-f]{3}(?:[\da-f]{3})?$/i, `expected an opaque colour, got ${color}`);
 }
 
-test('expanded groups cover objects behind them in both themes', () => {
- for (const selector of ['.stack.stack-open','.stack.stack-front',':root[data-theme=light] .stack.stack-open',':root[data-theme=light] .stack.stack-front']) assertOpaque(background(selector));
+test('only expanded groups with overlapping objects get opaque backgrounds in both themes', () => {
+ for (const selector of ['.stack.stack-filled',':root[data-theme=light] .stack.stack-filled']) assertOpaque(background(selector));
+ for (const selector of ['.stack.stack-open','.stack.stack-front']) assert.equal(background(selector), 'transparent', `${selector} without overlap must be transparent`);
+ for (const selector of [':root[data-theme=light] .stack.stack-open',':root[data-theme=light] .stack.stack-front']) assert.equal(background(selector), undefined, `${selector} must not override transparency`);
+ assert.match(main, /stackNeedsFill/);
+ assert.match(main, /stack-filled/);
 });
 
 test('expanded groups do not blur the board or calculate overlap solely to blur', () => {
@@ -32,7 +36,7 @@ test('group cards and internal connections remain above their backgrounds', () =
 });
 
 test('internal connections remain visible with matching arrows against the light group surface', () => {
- const bg = background(':root[data-theme=light] .stack.stack-open');
+ const bg = background(':root[data-theme=light] .stack.stack-filled');
  const luminance = color => {
   assert.match(color, /^#[\da-f]{6}$/i);
   const channels = [1,3,5].map(i => parseInt(color.slice(i,i+2),16)/255).map(v => v <= .04045 ? v/12.92 : ((v+.055)/1.055)**2.4);

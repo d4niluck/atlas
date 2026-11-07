@@ -1,0 +1,13 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {stackNeedsFill} from '../src/stackLayers.ts';
+const rect=(x:number,y:number,w=50,h=50)=>({x,y,w,h});
+const group=(id:string,ids:string[],collapsed=false)=>({id,ids,collapsed});
+const card=(id:string,x:number,y:number,w=50,h=50)=>({id,rect:rect(x,y,w,h)});
+const box=new Map([['a',rect(0,0,100,100)],['b',rect(200,0,100,100)],['c',rect(300,0,100,100)]]);
+test('own cards do not require a fill; an unrelated overlapping card does',()=>{const s=[group('a',['one','two'])];assert.equal(stackNeedsFill('a',s,[card('one',10,10),card('two',20,20)],box,'a'),false);assert.equal(stackNeedsFill('a',s,[card('one',10,10),card('other',99,99)],box,'a'),true)});
+test('touching an edge or corner does not count as overlap',()=>{const s=[group('a',['one'])];for(const c of [card('right',100,20),card('bottom',10,100),card('corner',100,100),card('left',-50,0)])assert.equal(stackNeedsFill('a',s,[c],box,'a'),false,c.id)});
+test('foreign cards above a non-active group do not need covering',()=>{const s=[group('a',['own']),group('b',['above'])];assert.equal(stackNeedsFill('a',s,[card('own',10,10),card('above',10,10)],box,'b'),false);assert.equal(stackNeedsFill('a',s,[card('independent',10,10),card('above',10,10)],box,'b'),true)});
+test('active group covers overlapping cards from another group behind it',()=>{const s=[group('a',['own']),group('b',['other'])];assert.equal(stackNeedsFill('a',s,[card('own',10,10),card('other',10,10)],box,'a'),true)});
+test('collapsed groups count by their visible rectangle, not hidden members',()=>{const s=[group('a',['own']),group('c',['hidden'],true)];assert.equal(stackNeedsFill('a',s,[card('own',10,10)],box,'a'),false);const b=new Map(box);b.set('c',rect(99,0));assert.equal(stackNeedsFill('a',s,[card('own',10,10)],b,'a'),true)});
+test('collapsed or missing target never receives expanded-group fill',()=>{const s=[group('a',['own'],true)];assert.equal(stackNeedsFill('a',s,[card('other',10,10)],box,'a'),false);assert.equal(stackNeedsFill('missing',s,[card('other',10,10)],box,'a'),false)});
