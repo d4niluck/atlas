@@ -249,3 +249,23 @@ fn incremental_materialize_is_bounded_restartable_and_rejects_stale_or_foreign_o
  let mut first=fixture();let mut second=fixture();first.replace("a",&[v(0.5,0.0)]).unwrap();second.replace("a",&[v(0.2,0.0)]).unwrap();let mut foreign=first.start_materialize(true).unwrap();assert!(foreign.step(&second,1).is_err());
  let after=idx.snapshot_delta().unwrap();assert_eq!(after.index,before.index);assert_eq!(after.changed_keys,before.changed_keys);assert_eq!(after.hidden,Vec::<String>::new());
 }
+
+#[test]
+fn preloaded_delta_preserves_search_and_checks_metadata_without_serialized_buffer() {
+    let mut original=fixture();
+    original.apply_batch(vec![("a".into(),Some(vec![v(0.33,0.0),v(0.21,0.0)])),("b".into(),None), ("new".into(),Some(vec![v(0.99,0.0)]))]).unwrap();
+    let mut snap=original.snapshot_delta().unwrap();
+    let delta=Index::from_memory(&snap.index).unwrap();
+    snap.index.clear();
+    let (base,keys)=base_for_snapshot();
+    let loaded=FlatOverlay::from_snapshot_index(base,keys,snap,delta).unwrap();
+    for filter in [None,Some(vec!["a".into(),"new".into()]),Some(vec!["b".into()])] {
+        assert_eq!(loaded.search(&v(1.0,0.0),filter.as_deref(),10).unwrap(),original.search(&v(1.0,0.0),filter.as_deref(),10).unwrap());
+    }
+    let mut bad=original.snapshot_delta().unwrap();
+    let delta=Index::from_memory(&bad.index).unwrap();
+    bad.index.clear();
+    bad.records[0].1=1;
+    let (base,keys)=base_for_snapshot();
+    assert!(FlatOverlay::from_snapshot_index(base,keys,bad,delta).is_err());
+}

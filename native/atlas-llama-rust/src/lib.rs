@@ -19,6 +19,20 @@ fn clear_model_environment(command:&mut Command) {
   if name.to_string_lossy().to_ascii_uppercase().starts_with("LLAMA_") {command.env_remove(name);}
  }
 }
+// These are legacy v2 index identities for the exact evaluated Q8/BF16 weights.
+// Other weights and image modes remain separate, even when filenames match.
+pub fn index_keys_compatible(left:&str,right:&str)->bool {
+ if left==right {return true}
+ const VERIFIED:[&str;4]=[
+  "242feaef290d2510c2074d7276184c6a6e2026fbdd50f592dabe7213a9cfdd9e",
+  "6f0854163647a583811c00bd0ca24eb8ff49f9b5898b2311804ff1871d90b4d6",
+  "4aafee636d8617521f67f926b2addc41797394d3eefd3927dbd66fcb4a4e47dd",
+  "d0e160e8253cf51d313fd886df6f0af258239e39366e7f33a9baa37fbe289302",
+ ];
+ fn parse(key:&str)->(&str,bool){match key.strip_suffix(":vision-q8-v1") {Some(base)=>(base,true),None=>(key,false)}}
+ let (left,li)=parse(left);let (right,ri)=parse(right);
+ li==ri && VERIFIED.contains(&left) && VERIFIED.contains(&right)
+}
 pub struct Encoder { child: Child, address: PathBuf, identity: String, alternate_identity: String, diagnostic: String, key:KeyFile, images:bool }
 
 pub struct Generator { child: Child, address: PathBuf, key:KeyFile }
@@ -146,7 +160,7 @@ impl Encoder {
  #[cfg(feature="test-hook")] pub fn socket_path(&self)->&std::path::Path {&self.address}
  pub fn identity(&self)->&str {&self.identity}
  pub fn alternate_identity(&self)->&str {&self.alternate_identity}
- pub fn matches_identity(&self,value:&str)->bool {value==self.identity || value==self.alternate_identity}
+ pub fn matches_identity(&self,value:&str)->bool {index_keys_compatible(value,&self.identity) || index_keys_compatible(value,&self.alternate_identity)}
  pub fn diagnostic(&self)->&str {&self.diagnostic}
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"cpu")}
  pub fn model_identities(model:&str,device:&str)->Result<(String,String),String>{

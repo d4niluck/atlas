@@ -108,8 +108,12 @@ impl FlatOverlay {
   Ok(DeltaSnapshot{index:self.delta.to_memory().map_err(str::to_string)?,changed_keys:self.changed.keys().cloned().collect(),records:self.delta_records.clone(),removed,hidden})
  }
  pub fn from_snapshot(base:Index,base_keys:Vec<String>,snap:DeltaSnapshot)->Result<Self,String>{
-  let mut result=Self::new(base,base_keys)?;
   let index=Index::from_memory(&snap.index).map_err(str::to_string)?;
+  Self::from_snapshot_index(base,base_keys,snap,index)
+ }
+ /// Load an already verified delta without retaining its serialized bytes in memory.
+ pub fn from_snapshot_index(base:Index,base_keys:Vec<String>,snap:DeltaSnapshot,index:Index)->Result<Self,String>{
+  let mut result=Self::new(base,base_keys)?;
   if index.count()!=snap.records.len() as i64{return Err("delta count mismatch".into())}
   let mut changed=BTreeMap::new();
   for key in snap.changed_keys {if changed.insert(key,Vec::new()).is_some(){return Err("duplicate changed key".into())}}
