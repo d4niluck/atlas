@@ -1,6 +1,10 @@
 import React, {useEffect, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import {remarkCurrency} from './remarkCurrency';
+import {remarkSoftBreaks} from './remarkSoftBreaks';
+import rehypeKatex from 'rehype-katex';
 import {MarkdownLink} from './MarkdownLink';
 import {AnswerWaiting} from './AnswerWaiting';
 import {citedSources} from './citedSources';
@@ -112,7 +116,7 @@ export function MenuBarSearch({onNavigate,onOpenSettings}:Props) {
   {error&&<p className="menu-search-error" role="alert">{error}</p>}
   {locked&&<form className="menu-search-unlock" onSubmit={unlock}><label>Пароль пространства<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoFocus autoComplete="off"/></label><button type="submit" disabled={!password||unlocking}>Открыть</button><button type="button" onClick={()=>{setLocked(null);setPassword('')}}>Отмена</button></form>}
   {resultRequest&&(!resultRequest.protected||privateVisible)&&<div className="menu-search-result-area"><div className={'menu-search-output'+(isRag?' menu-search-output-rag':'')}>
-   {isRag&&<section className="menu-search-answer" aria-label="Ответ"><h2>Ответ</h2>{searching&&!answer&&<AnswerWaiting/>}{answer&&<div className="menu-search-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{a:MarkdownLink}}>{answer}</ReactMarkdown></div>}{stopped&&<small>Остановлено</small>}{citedSources(answer,sources).map(({number,source})=><button type="button" className="menu-search-citation" key={number} disabled={source.missing} onClick={()=>action(()=>onNavigate(resultRequest.workspaceId,{id:source.id,chunk:source.stale?null:source}))}>[{number}] {source.title}</button>)}</section>}
+   {isRag&&<section className="menu-search-answer" aria-label="Ответ"><h2>Ответ</h2>{searching&&!answer&&<AnswerWaiting/>}{answer&&<div className="menu-search-markdown"><ReactMarkdown remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]} components={{a:MarkdownLink}}>{answer}</ReactMarkdown></div>}{stopped&&<small>Остановлено</small>}{citedSources(answer,sources).map(({number,source})=><button type="button" className="menu-search-citation" key={number} disabled={source.missing} onClick={()=>action(()=>onNavigate(resultRequest.workspaceId,{id:source.id,chunk:source.stale?null:source}))}>[{number}] {source.title}</button>)}</section>}
    <section className="menu-search-results" aria-label="Результаты поиска">{isRag&&<h2>Фрагменты</h2>}{waiting&&<p role="status">Подготавливаем поиск…</p>}<MenuSearchResults results={results} onOpen={(id,chunk)=>action(()=>onNavigate(resultRequest.workspaceId,{id,chunk}))}/>{searching&&results===null&&!isRag&&!waiting&&<p role="status">Ищем…</p>}</section>
   </div></div>}
  </main>;
