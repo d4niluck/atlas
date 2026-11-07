@@ -45,8 +45,8 @@ fn metadata(doc:&Source<'_>)->Result<Vec<Value>,String>{let mut rows=Vec::new();
  }
 }
 // Reindex retained trash when the model changes, then hide it before publication.
-fn rebuild_with_trash(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,trash:&[String],dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<String,String>{
- let base_generation=prepare_sources_with_progress(model,docs,images,dir,&should_continue,&progress)?;let initial_base=dir.join(&base_generation);
+fn rebuild_with_trash(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,trash:&[String],dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize),reuse_existing:bool)->Result<String,String>{
+ let base_generation=prepare_sources_with_progress_mode(model,docs,images,dir,&should_continue,&progress,reuse_existing)?;let initial_base=dir.join(&base_generation);
  if trash.is_empty(){return Ok(base_generation)}
  let result=(||->Result<Option<String>,String>{
   if !should_continue(){return Err("indexing cancelled".into())}let meta=read_json(&initial_base.join("metadata.json"))?;let rows=records(&meta)?;let index=Index::load(&initial_base.join("index.faiss")).map_err(str::to_string)?;let keys=rows.iter().map(|r|r["id"].as_str().map(str::to_owned).ok_or("invalid source id")).collect::<Result<Vec<_>,_>>()?;let mut overlay=FlatOverlay::new(index,keys)?;for id in trash{if overlay.has_key(id){overlay.hide(id)?;}}if !overlay.has_hidden(){return Ok(None)}
@@ -58,14 +58,13 @@ fn rebuild_with_trash(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Ite
 /// Build a new delta generation. The existing base stays immutable and referenced by name.
 pub struct Prepared {pub generation:String,pub owned:bool}
 pub fn prepare(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<String,String>{prepare_with_trash(model,docs,images,&[],dir,should_continue,progress).map(|v|v.generation)}
-/// When independent index histories coexist, rebuild from the current sources,
-/// including the trash, before publishing. Neither cache establishes which is newer.
+/// Recompute a fresh index without using any previously published vectors.
 pub fn prepare_fresh_with_trash(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,trash:&[String],dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<Prepared,String>{
- rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress).map(|generation|Prepared{generation,owned:true})
+ rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress,false).map(|generation|Prepared{generation,owned:true})
 }
 pub fn prepare_with_trash(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,trash:&[String],dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<Prepared,String>{
- if !dir.join("current").is_file(){return rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress).map(|generation|Prepared{generation,owned:true})}
- let loaded=match load(dir,model.identity()){Err(e) if e=="model mismatch"=>match load(dir,model.alternate_identity()){Ok(x)=>x,Err(e) if e=="model mismatch"=>return rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress).map(|generation|Prepared{generation,owned:true}),Err(e)=>return Err(e)},other=>other?};
+ if !dir.join("current").is_file(){return rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress,true).map(|generation|Prepared{generation,owned:true})}
+ let loaded=match load(dir,model.identity()){Err(e) if e=="model mismatch"=>match load(dir,model.alternate_identity()){Ok(x)=>x,Err(e) if e=="model mismatch"=>return rebuild_with_trash(model,docs,images,trash,dir,should_continue,progress,true).map(|generation|Prepared{generation,owned:true}),Err(e)=>return Err(e)},other=>other?};
  let base_rows=records(&loaded.base_data)?;let old=visible(base_rows,loaded.snapshot.as_ref(),&loaded.delta_rows)?;
  let trash_set:HashSet<&str>=trash.iter().map(String::as_str).collect();let mut desired=Records::new();for doc in docs{if !should_continue(){return Err("indexing cancelled".into())}if !trash_set.contains(doc.id){desired.insert(doc.id.to_owned(),metadata(doc)?);}}
  let delta_index=loaded.snapshot.as_ref().map(|s|Index::from_memory(&s.index).map_err(str::to_string)).transpose()?;
@@ -134,7 +133,7 @@ pub fn prepare_from_worker(model:&Encoder,docs:&[Source<'_>],images:impl Iterato
  fn sync_write(path:&Path,data:&[u8])->Result<(),String>{let mut f=std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e|e.to_string())?;f.write_all(data).and_then(|_|f.sync_all()).map_err(|e|e.to_string())}
  fn sync_dir(path:&Path)->Result<(),String>{std::fs::File::open(path).and_then(|f|f.sync_all()).map_err(|e|e.to_string())}
  fn adjust(rows:&mut Value){if let Some(rows)=rows.as_array_mut(){for row in rows{if row["field"]=="image"{if let Some(k)=row["input_hash"].as_str(){if let Some((_,hash))=k.strip_prefix("image:").and_then(|x|x.split_once(':')){row["input_hash"]=json!(format!("image:{hash}"));}}}}}}
- if dir.join("current").exists()||!worker.join("current").exists(){return Ok(None)}
+ if !worker.join("current").exists(){return Ok(None)}
  let current=String::from_utf8(read(&worker.join("current"))?).map_err(|e|e.to_string())?;if !valid_generation(&current){return Err("invalid worker generation".into())}let active=worker.join(&current);if !std::fs::symlink_metadata(&active).map_err(|e|e.to_string())?.file_type().is_dir(){return Err("invalid worker generation".into())}
  let manifest=match read(&active.join("overlay.json")){Ok(bytes)=>{let checksum=String::from_utf8(read(&active.join("overlay.sha256"))?).map_err(|e|e.to_string())?;if checksum!=content_hash(&bytes){return Err("worker overlay checksum mismatch".into())}Some(serde_json::from_slice::<Value>(&bytes).map_err(|e|e.to_string())?)},Err(_) if !active.join("overlay.json").exists()=>None,Err(e)=>return Err(e)};
  let base_name=match &manifest{Some(m)=>m["base_generation"].as_str().ok_or("invalid worker base")?.to_owned(),None=>current.clone()};if !valid_generation(&base_name){return Err("invalid worker base".into())}let base=if worker.join(&base_name).is_dir(){worker.join(&base_name)}else{active.clone()};if !std::fs::symlink_metadata(&base).map_err(|e|e.to_string())?.file_type().is_dir(){return Err("invalid worker base".into())}

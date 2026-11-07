@@ -227,7 +227,7 @@ match atlas_sqlcipher_proof::protected_marker::is_protected_dir(&fd){Ok(false)=>
   if resource==["rag","status"]&&method=="GET" {return Ok((200,rag_status(rag,choice)?))}
   if resource==["semantic","status"]&&method=="GET" {return if let Some(service)=semantic {Ok((200,service.status(&dir)))}else{let message=match &model_state {ModelState::Loading=>"Загрузка модели".to_string(),ModelState::Failed(e)=>format!("Ошибка загрузки модели: {e}"),_=>"Модель не загружена".to_string()};Ok((200,json!({"available":false,"message":message,"processing_ids":[],"failed_ids":[]})))}}
   if resource==["semantic","cancel"]&&method=="POST" {prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;return if let Some(service)=semantic {service.cancel(&dir);Ok((200,json!({"ok":true})))}else{Ok((503,json!({"error":"Модель не загружена"})))}}
-  if resource==["semantic","rebuild"]&&method=="POST" {prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;return if let Some(service)=semantic {service.resume(&dir)?;Ok((202,json!({"ok":true})))}else{Ok((503,json!({"error":"Модель не загружена"})))}}
+  if resource==["semantic","rebuild"]&&method=="POST" {let body=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;return if let Some(service)=semantic {if body["force"]==true{service.rebuild_fresh(&dir)?}else{service.resume(&dir)?};Ok((202,json!({"ok":true})))}else{Ok((503,json!({"error":"Модель не загружена"})))}}
   if (resource==["search"] || resource==["rag","search"])&&method=="POST" {
    let b=prepared.clone().ok_or("invalid body")?.map_err(|_|"invalid body")?;let query=b["query"].as_str().ok_or("query")?;
    let is_rag=resource==["rag","search"];
