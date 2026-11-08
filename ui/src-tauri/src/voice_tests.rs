@@ -111,3 +111,18 @@ fn shutdown_prevents_starting_new_recognizer(){
  assert!(!marker.exists());
  assert!(!std::env::temp_dir().join(format!("atlas-voice-{}-{id}.wav",std::process::id())).exists());
 }
+
+#[test]
+fn recognizer_large_output_does_not_deadlock(){
+ let dir=temporary("large-output");let exe=dir.join("mock");
+ std::fs::write(&exe,b"#!/bin/sh\nexec /usr/bin/head -c 131072 /dev/zero\n").unwrap();
+ std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("large-output-{}",std::process::id());let thread_id=id.clone();let model=dir.join("model");
+ let (send,recv)=std::sync::mpsc::channel();
+ let worker=thread::spawn(move||{let result=transcribe(&exe,&model,&thread_id,b"RIFF fake");send.send(result).ok();});
+ let result=recv.recv_timeout(Duration::from_secs(2));
+ if result.is_err(){voice_cancel(id).unwrap();}
+ worker.join().unwrap();
+ assert!(result.is_ok(),"recognizer blocked while its output pipe filled");
+ assert!(result.unwrap().unwrap_err().contains("слишком длинный"),"a very long output must produce the bounded-output error");
+}

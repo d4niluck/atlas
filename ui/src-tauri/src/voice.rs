@@ -1,4 +1,4 @@
-use std::{fs::{self,OpenOptions},io::Write,os::unix::fs::{MetadataExt,OpenOptionsExt},path::{Path,PathBuf},process::{Child,Command,Stdio},sync::Mutex,time::Duration};
+use std::{fs::{self,OpenOptions},io::{Read,Write},os::unix::fs::{MetadataExt,OpenOptionsExt},path::{Path,PathBuf},process::{Child,Command,Stdio},sync::Mutex,time::Duration};
 use tauri::Manager;
 static DOWNLOAD: Mutex<Option<String>> = Mutex::new(None);
 static DOWNLOAD_CHILD: Mutex<Option<(Child,PathBuf)>> = Mutex::new(None);
@@ -91,11 +91,14 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
   if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst){return Err("Atlas завершает работу".into())}
   {let mut cancelled=CANCELLED.lock().map_err(|_|"Ошибка остановки")?;if let Some(i)=cancelled.iter().position(|x|x==id){cancelled.remove(i);return Err("Распознавание остановлено".into())}}
   if active.is_some(){return Err("Распознавание уже выполняется".into())}
-  let child=Command::new(executable).arg("-m").arg(model).arg("-f").arg(&path).args(["-l","auto","-nt","-t","4"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
+  let mut child=Command::new(executable).arg("-m").arg(model).arg("-f").arg(&path).args(["-l","auto","-nt","-t","4"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
+  let mut stdout=child.stdout.take().ok_or("Не удалось прочитать результат распознавания")?;
+  // Drain the pipe even after the limit, otherwise a verbose child can block forever.
+  let reader=std::thread::spawn(move||{let mut result=Vec::new();let mut chunk=[0u8;4096];let mut overflow=false;loop{let n=stdout.read(&mut chunk)?;if n==0{break}let keep=n.min(65536usize.saturating_sub(result.len()));result.extend_from_slice(&chunk[..keep]);overflow|=keep<n}Ok::<_,std::io::Error>((result,overflow))});
   *active=Some((id.to_string(),child,path.clone()));drop(active);
   loop{std::thread::sleep(Duration::from_millis(50));let mut active=ACTIVE.lock().map_err(|_|"Ошибка распознавания")?;
    let done=active.as_mut().ok_or("Распознавание остановлено")?.1.try_wait().map_err(|e|e.to_string())?.is_some();
-   if done{let(_,child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let output=child.wait_with_output().map_err(|e|e.to_string())?;if !output.status.success(){return Err("Распознавание остановлено или не удалось".into())}return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())}
+   if done{let(_,mut child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let status=child.wait().map_err(|e|e.to_string())?;let(output,overflow)=reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(String::from_utf8_lossy(&output).trim().to_owned())}
   }
  })();let _=fs::remove_file(path);result
 }
