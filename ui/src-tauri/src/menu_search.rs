@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{LazyLock, Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -9,16 +9,21 @@ const WIDE_WIDTH: f64 = 760.;
 const HEIGHT: f64 = 680.;
 
 #[derive(Default)]
-struct MicrophonePrompt(AtomicBool);
+struct MicrophonePrompt(Mutex<std::collections::HashSet<String>>);
 impl MicrophonePrompt {
-    fn set(&self, active:bool){self.0.store(active,Ordering::SeqCst)}
-    fn hide_on_blur(&self)->bool{!self.0.load(Ordering::SeqCst)}
+    fn set(&self,id:&str,active:bool)->Result<(),String>{
+        if id.is_empty()||id.len()>64||!id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'){return Err("Некорректный запрос микрофона".into())}
+        let mut pending=self.0.lock().map_err(|_|"Не удалось проверить микрофон")?;
+        if active{if pending.len()>=8&&!pending.contains(id){return Err("Слишком много запросов микрофона".into())}pending.insert(id.into());}else{pending.remove(id);}
+        Ok(())
+    }
+    fn hide_on_blur(&self)->bool{self.0.lock().map(|v|v.is_empty()).unwrap_or(true)}
 }
-static MICROPHONE_PROMPT:MicrophonePrompt=MicrophonePrompt(AtomicBool::new(false));
+static MICROPHONE_PROMPT:LazyLock<MicrophonePrompt>=LazyLock::new(MicrophonePrompt::default);
 
 #[tauri::command]
-pub fn voice_microphone_prompt(window:tauri::WebviewWindow,active:bool){
-    if window.label()==QUICK {MICROPHONE_PROMPT.set(active)}
+pub fn voice_microphone_prompt(window:tauri::WebviewWindow,active:bool,id:String)->Result<(),String>{
+    if window.label()==QUICK {MICROPHONE_PROMPT.set(&id,active)?}Ok(())
 }
 
 #[derive(Default)]
@@ -56,9 +61,12 @@ mod tests {
     #[test] fn microphone_permission_keeps_menu_open_until_request_finishes() {
         let state=MicrophonePrompt::default();
         assert!(state.hide_on_blur());
-        state.set(true);
+        state.set("first",true).unwrap();
         assert!(!state.hide_on_blur());
-        state.set(false);
+        state.set("second",true).unwrap();
+        state.set("first",false).unwrap();
+        assert!(!state.hide_on_blur());
+        state.set("second",false).unwrap();
         assert!(state.hide_on_blur());
     }
     #[test] fn keeps_popup_on_monitor_near_edges() {

@@ -7,10 +7,10 @@ type Quality='base'|'small'|'medium';
 const choices:readonly [Quality,string,string][]=[['base','Низкое','60 МБ'],['small','Среднее','190 МБ'],['medium','Высокое','539 МБ']];
 const invoke=(name:string,args?:object):Promise<any> => (window as any).__TAURI__.core.invoke(name,args);
 async function selected():Promise<Quality>{const q=await invoke('voice_get_quality');if(q==='base'||q==='small'||q==='medium')return q;throw Error('Неизвестная модель распознавания')}
-export async function requestMicrophone(){
- await invoke('voice_microphone_prompt',{active:true});
- try{return await navigator.mediaDevices.getUserMedia({audio:true})}
- finally{await invoke('voice_microphone_prompt',{active:false}).catch(()=>{})}
+export async function requestMicrophone(pending:{current:string|null}={current:null}){
+ const id=crypto.randomUUID();pending.current=id;let started=false;
+ try{await invoke('voice_microphone_prompt',{active:true,id});started=true;if(pending.current!==id)throw Error('Запись отменена');return await navigator.mediaDevices.getUserMedia({audio:true})}
+ finally{if(pending.current===id)pending.current=null;if(started)await invoke('voice_microphone_prompt',{active:false,id}).catch(()=>{})}
 }
 
 export function VoiceSettings(){
@@ -37,8 +37,8 @@ async function capture(stream:MediaStream,onLevel:(level:number)=>void){
 export function VoiceInput({onText,active=true}:{onText:(text:string)=>void;active?:boolean}){
  const [state,setState]=useState<'idle'|'starting'|'recording'|'thinking'|'missing'|'corrupt'|'downloading'>('idle'),[error,setError]=useState('');
  const [level,setLevel]=useState(0);
- const quality=useRef<Quality>('small'),session=useRef<ReturnType<typeof createVoiceSession>|null>(null),generation=useRef(0);
- if(!session.current)session.current=createVoiceSession({getUserMedia:requestMicrophone,capture:stream=>capture(stream,setLevel),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
+ const quality=useRef<Quality>('small'),session=useRef<ReturnType<typeof createVoiceSession>|null>(null),generation=useRef(0),permission=useRef<string|null>(null);
+ if(!session.current)session.current=createVoiceSession({getUserMedia:()=>requestMicrophone(permission),cancelPermission:async()=>{const id=permission.current;permission.current=null;if(id)await invoke('voice_microphone_prompt',{active:false,id})},capture:stream=>capture(stream,setLevel),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
  useEffect(()=>()=>{void session.current?.cancel()},[]);
  useEffect(()=>{if(!active){generation.current++;void session.current?.cancel();setState('idle')}},[active]);
  useEffect(()=>{if(state!=='recording')return;const timer=setTimeout(()=>void stop(),60000);return()=>clearTimeout(timer)},[state]);

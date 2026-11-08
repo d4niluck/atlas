@@ -4,7 +4,7 @@ mod voice_temp;
 mod voice;
 #[cfg(target_os="macos")] mod menu_search;
 #[cfg(not(target_os="macos"))] mod menu_search {
- #[tauri::command] pub fn voice_microphone_prompt(_window:tauri::WebviewWindow,_active:bool){}
+ #[tauri::command] pub fn voice_microphone_prompt(_window:tauri::WebviewWindow,_active:bool,_id:String)->Result<(),String>{Ok(())}
  #[tauri::command] pub fn set_quick_search_mode()->Result<(),String>{Err("Доступно только на macOS".into())}
  #[tauri::command] pub fn show_main_window()->Result<(),String>{Err("Доступно только на macOS".into())}
  #[tauri::command] pub fn hide_quick_search()->Result<(),String>{Err("Доступно только на macOS".into())}

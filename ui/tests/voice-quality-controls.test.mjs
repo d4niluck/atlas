@@ -42,6 +42,16 @@ test('системный запрос микрофона удерживает о
  await assert.rejects(requestMicrophone(),/denied/);assert.deepEqual(calls,[['voice_microphone_prompt',true],['voice_microphone_prompt',false]]);
 }));
 
+test('поздний ответ разрешения не снимает защиту нового запроса',async()=>withComponents(async({requestMicrophone})=>{
+ const pending={current:null},active=new Set();let first,second,calls=0;
+ Object.defineProperty(globalThis,'window',{configurable:true,value:{__TAURI__:{core:{invoke:async(name,args)=>{if(args.active)active.add(args.id);else active.delete(args.id)}}}}});
+ Object.defineProperty(globalThis,'navigator',{configurable:true,value:{platform:'MacIntel',mediaDevices:{getUserMedia:()=>new Promise(resolve=>{if(++calls===1)first=resolve;else second=resolve})}}});
+ const a=requestMicrophone(pending);await flush();const old=pending.current;pending.current=null;active.delete(old);
+ const b=requestMicrophone(pending);await flush();const current=pending.current;assert.ok(active.has(current));
+ first({});await a;assert.ok(active.has(current));assert.equal(pending.current,current);
+ second({});await b;assert.equal(active.size,0);assert.equal(pending.current,null);
+}));
+
 test('оба окна перед началом записи читают актуальный выбор и не загружают модель',async()=>withComponents(async({VoiceInput})=>{
  let current='small';const calls=[];
  Object.defineProperty(globalThis,'window',{configurable:true,value:{__TAURI__:{core:{invoke:async(name,args)=>{calls.push([name,args]);if(name==='voice_get_quality')return current;if(name==='voice_model_status')return 'missing';throw Error('unexpected call '+name)}}}}});

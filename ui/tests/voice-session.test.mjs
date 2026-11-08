@@ -70,6 +70,16 @@ test('отмена во время системного запроса разр�
  assert.ok(!calls.includes('transcribe'));
 }));
 
+test('отмена ожидания разрешения сразу освобождает защиту окна',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let grant;
+ dependencies.getUserMedia=()=>new Promise(resolve=>{grant=resolve});
+ dependencies.cancelPermission=async()=>calls.push('release-permission');
+ const session=create(dependencies);const starting=session.start();
+ await session.cancel();assert.ok(calls.includes('release-permission'));
+ grant({getTracks:()=>[{stop:()=>calls.push('track-stop')}]});await starting;
+ assert.ok(calls.includes('track-stop'));assert.ok(!calls.includes('capture'));
+}));
+
 test('ошибка подготовки записи освобождает микрофон',async()=>withSession(async create=>{
  const {calls,dependencies}=fixture();dependencies.capture=async()=>{throw new Error('capture failed')};
  const session=create(dependencies);await assert.rejects(session.start(),/capture failed/);
