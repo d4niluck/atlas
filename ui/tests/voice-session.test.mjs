@@ -50,6 +50,21 @@ test('отмена во время подготовки выгружает им�
  finish();await Promise.resolve();assert.ok(!calls.includes('transcribe'));
 }));
 
+test('зависшая подготовка ограничена по времени и отменяет поздний процесс',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let finish,preparedId;
+ dependencies.preparationTimeoutMs=20;dependencies.prepare=id=>{preparedId=id;return new Promise(resolve=>{finish=resolve})};
+ dependencies.cancel=async id=>{assert.equal(id,preparedId);calls.push('cancel-preparing')};
+ const session=create(dependencies);await session.start();await assert.rejects(session.stop(),/время подготовки/);
+ assert.ok(calls.includes('cancel-preparing'));assert.ok(!calls.includes('transcribe'));finish();await Promise.resolve();
+}));
+
+test('отмена во время ожидания подготовки немедленно завершает остановку',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let finish;dependencies.prepare=()=>new Promise(resolve=>{finish=resolve});
+ const session=create(dependencies);await session.start();const stopped=session.stop();await new Promise(r=>setImmediate(r));await session.cancel();
+ const result=await Promise.race([stopped,new Promise((_,reject)=>setTimeout(()=>reject(Error('остановка зависла')),100))]);
+ assert.equal(result,null);assert.ok(!calls.includes('transcribe'));finish();
+}));
+
 test('по окончании записи освобождаются дорожки, возвращается распознанный текст',async()=>withSession(async create=>{
  const {calls,dependencies}=fixture();const session=create(dependencies);
  await session.start();const text=await session.stop();

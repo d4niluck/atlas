@@ -185,6 +185,13 @@ fn status_distinguishes_missing_valid_and_corrupt_model(){
 }
 
 #[test]
+fn model_check_timeout_reaps_hash_process(){
+ let dir=temporary("hash-timeout");let marker=dir.join("pid");let exe=dir.join("mock");std::fs::write(&exe,format!("#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 30\n",marker.display())).unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let start=Instant::now();let result=bounded_hash(Command::new(&exe),Duration::from_millis(500));assert!(result.is_err());assert!(start.elapsed()<Duration::from_secs(3));
+ let pid=std::fs::read_to_string(marker).unwrap().trim().parse::<libc::pid_t>().unwrap();assert_eq!(unsafe{libc::kill(pid,0)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ESRCH));
+}
+
+#[test]
 fn shutdown_cancels_active_recognizer_and_cleans_recording(){
  let _reset=ShutdownReset;SHUTTING_DOWN.store(false,std::sync::atomic::Ordering::SeqCst);
  let dir=temporary("shutdown");let exe=dir.join("mock");

@@ -43,13 +43,19 @@ pub fn voice_get_quality(app:tauri::AppHandle)->Result<String,String>{let _guard
 pub fn voice_set_quality(app:tauri::AppHandle,quality:String)->Result<(),String>{let _guard=QUALITY_GATE.lock().map_err(|_|"Не удалось сохранить настройки")?;set_quality(&super::model_data_dir(&app)?,&quality)}
 #[tauri::command]
 pub async fn voice_model_status(app:tauri::AppHandle,quality:String)->Result<String,String>{let(name,sha,size)=model(&quality)?;if DOWNLOAD.lock().map_err(|_|"Ошибка загрузки")?.as_deref()==Some(&quality){return Ok("downloading".into())}let path=dir(&app)?.join(name);tauri::async_runtime::spawn_blocking(move||model_status(&path,sha,size)).await.map_err(|e|e.to_string())?}
+fn bounded_hash(mut command:Command,timeout:Duration)->Result<std::process::Output,String>{
+ let mut child=command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;let deadline=std::time::Instant::now()+timeout;
+ loop{match child.try_wait(){Ok(Some(_))=>return child.wait_with_output().map_err(|e|e.to_string()),Ok(None)=>{},Err(e)=>{let _=child.kill();let _=child.wait();return Err(e.to_string())}}
+  if std::time::Instant::now()>=deadline{let _=child.kill();let _=child.wait();return Err("Превышено время проверки модели".into())}std::thread::sleep(Duration::from_millis(25));
+ }
+}
 fn model_status(path:&Path,sha:&str,size:u64)->Result<String,String>{
  if !path.exists(){return Ok("missing".into())}
  let metadata=fs::metadata(path).map_err(|e|e.to_string())?;if !metadata.is_file()||metadata.len()!=size{return Ok("corrupt".into())}
  let modified=metadata.modified().map_err(|e|e.to_string())?;
  let mut cache=MODEL_CACHE.lock().map_err(|_|"Ошибка проверки модели")?;
  if cache.as_ref().is_some_and(|(p,n,t,h,dev,ino,ctime,ctime_ns)|p==path&&*n==size&&*t==modified&&h==sha&&*dev==metadata.dev()&&*ino==metadata.ino()&&*ctime==metadata.ctime()&&*ctime_ns==metadata.ctime_nsec()){return Ok("installed".into())}
- let digest=Command::new("/usr/bin/shasum").args(["-a","256"]).arg(path).output().map_err(|e|e.to_string())?;
+ let mut command=Command::new("/usr/bin/shasum");command.args(["-a","256"]).arg(path);let digest=bounded_hash(command,Duration::from_secs(30))?;
  let unchanged=fs::metadata(path).is_ok_and(|m|m.len()==size&&m.modified().ok()==Some(modified)&&m.dev()==metadata.dev()&&m.ino()==metadata.ino()&&m.ctime()==metadata.ctime()&&m.ctime_nsec()==metadata.ctime_nsec());
  if unchanged&&digest.status.success()&&String::from_utf8_lossy(&digest.stdout).split_whitespace().next()==Some(sha){*cache=Some((path.to_path_buf(),size,modified,sha.to_owned(),metadata.dev(),metadata.ino(),metadata.ctime(),metadata.ctime_nsec()));Ok("installed".into())}else{Ok("corrupt".into())}
 }
