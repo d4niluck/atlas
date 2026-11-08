@@ -82,9 +82,9 @@ pub fn handle(root:&std::path::Path,default:&std::path::Path,serial:&Mutex<()>,w
  ("POST",["chat","send"])=>{
   let query=b["query"].as_str().ok_or("Некорректный запрос")?;
   let snapshot=send_session(&workers,&id,&session,json!({"action":"chat-get"}))?;
-  let state=crate::chat::State::read(&snapshot["state"])?;let revision=snapshot["revision"].as_i64().ok_or("История недоступна")?;
+  let mut state=crate::chat::State::read(&snapshot["state"])?;let revision=snapshot["revision"].as_i64().ok_or("История недоступна")?;
   let scope=send_session(&workers,&id,&session,json!({"action":"search-scope","ids":b["object_ids"]}))?["ids"].clone();
-  let ids:Option<Vec<String>>=match &scope{Value::Null=>None,Value::Array(a)=>Some(a.iter().map(|v|v.as_str().map(str::to_owned).ok_or("Некорректный фильтр")).collect::<Result<_,_>>()?),_=>return Err("Некорректный фильтр".into())};
+  state.restrict(scope.clone());let ids:Option<Vec<String>>=match &scope{Value::Null=>None,Value::Array(a)=>Some(a.iter().map(|v|v.as_str().map(str::to_owned).ok_or("Некорректный фильтр")).collect::<Result<_,_>>()?),_=>return Err("Некорректный фильтр".into())};
   atlas_llama_probe::set_search_deadline(std::time::Instant::now()+std::time::Duration::from_secs(300));
   let model={let slot=rag.lock().map_err(|_|"Модель недоступна")?;match &*slot{crate::RagState::Ready(v)=>v.clone(),_=>return Err("Модель ответа не загружена".into())}};let generator=model.acquire()?;let mut search_revision=None;
   let(state,answer,sources)=crate::chat::run(&*generator,&state,query,crate::chat_limit(&choice),|q|{let model=semantic.as_ref().ok_or("Модель поиска не загружена")?;let result=crate::worker_models::search_session(&workers,&id,&session,model,q,ids.as_deref()).map_err(|e|e.to_string())?;let revision=result["revision"].as_str().ok_or("Ревизия недоступна")?.to_owned();if search_revision.as_ref().is_some_and(|r|r!=&revision){return Err("Данные изменились во время поиска".into())}search_revision=Some(revision);let rows=crate::exclude_image_chunks(result["results"].as_array().ok_or("Результаты недоступны")?.clone());crate::chat::answer_search(&*generator,q,&rows)},&mut |stage,text|crate::rag_stream::progress(stage,text))?;drop(generator);

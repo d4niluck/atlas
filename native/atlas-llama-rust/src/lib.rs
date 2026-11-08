@@ -4,9 +4,11 @@ use std::{fs::{File,OpenOptions},os::unix::{fs::{OpenOptionsExt,DirBuilderExt},n
 
 type StreamSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 thread_local! { static STREAM: std::cell::RefCell<Option<(StreamSink,std::sync::Arc<std::sync::atomic::AtomicBool>)>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { static FINISH_REASON:std::cell::RefCell<Option<String>>=const {std::cell::RefCell::new(None)}; }
 pub fn set_stream_sink(sink:StreamSink,cancelled:std::sync::Arc<std::sync::atomic::AtomicBool>) { STREAM.with(|s|*s.borrow_mut()=Some((sink,cancelled))); }
 pub fn clear_stream_sink(){ STREAM.with(|s|*s.borrow_mut()=None); }
 fn cancelled()->bool {STREAM.with(|s|s.borrow().as_ref().is_some_and(|(_,c)|c.load(std::sync::atomic::Ordering::Acquire)))}
+fn note_truncation(text:String,reason:Option<&str>)->String{if reason==Some("length"){format!("{text}\n\n*Ответ прерван по ограничению длины. Попросите продолжить.*")}else{text}}
 thread_local! { static SEARCH_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) }; }
 pub fn set_search_deadline(deadline:Instant) { SEARCH_DEADLINE.with(|d|d.set(Some(deadline))); }
 pub fn remaining_search_time()->Result<Option<Duration>,String>{if cancelled(){return Err("cancelled".into())}SEARCH_DEADLINE.with(|d|match d.get(){Some(end)=>end.checked_duration_since(Instant::now()).filter(|v|!v.is_zero()).map(Some).ok_or_else(||"search deadline exceeded".into()),None=>Ok(None)})}
@@ -54,8 +56,8 @@ impl Generator {
   let mut body=serde_json::json!({"messages":messages,"temperature":0.0,"max_tokens":max_tokens,"chat_template_kwargs":{"enable_thinking":false},"stream":stream});
   if json_output{body["response_format"]=serde_json::json!({"type":"json_object","schema":{"type":"object","properties":{"action":{"type":"string","enum":["answer","search"]},"query":{"type":"string"}},"required":["action"]}});}
   let payload=serde_json::to_vec(&body).map_err(|e|e.to_string())?;
-  let value=if stream {let streaming=STREAM.with(|s|s.borrow().clone()).ok_or("stream unavailable")?;let(sink,cancelled)=streaming;sink("");request_stream(&self.address,"/v1/chat/completions",&payload,&self.key.token,&cancelled,&mut |text|sink(text))?}else{let response=request(&self.address,"/v1/chat/completions",Some(&payload),Some(&self.key.token))?;let value:serde_json::Value=serde_json::from_slice(&response).map_err(|_|"invalid model response")?;value["choices"][0]["message"]["content"].as_str().ok_or("empty model response")?.to_owned()};
-  if value.trim().is_empty(){return Err("empty model response".into())}Ok(value)
+  let value=if stream {let streaming=STREAM.with(|s|s.borrow().clone()).ok_or("stream unavailable")?;let(sink,cancelled)=streaming;sink("");request_stream(&self.address,"/v1/chat/completions",&payload,&self.key.token,&cancelled,&mut |text|sink(text))?}else{let response=request(&self.address,"/v1/chat/completions",Some(&payload),Some(&self.key.token))?;let value:serde_json::Value=serde_json::from_slice(&response).map_err(|_|"invalid model response")?;if value["choices"][0]["finish_reason"]=="length"{return Err("Промежуточный ответ модели обрезан".into())}value["choices"][0]["message"]["content"].as_str().ok_or("empty model response")?.to_owned()};
+  if value.trim().is_empty(){return Err("empty model response".into())}Ok(if stream{FINISH_REASON.with(|v|note_truncation(value,v.borrow().as_deref()))}else{value})
  }
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"metal")}
  pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
@@ -144,6 +146,7 @@ fn connect_unix(path:&std::path::Path,deadline:Instant,is_cancelled:&dyn Fn()->b
 
 // Reads llama.cpp's streaming HTTP response without buffering the whole answer.
 fn request_stream(address:&std::path::Path,path:&str,body:&[u8],key:&str,cancelled:&std::sync::atomic::AtomicBool,on_token:&mut dyn FnMut(&str))->Result<String,String>{
+ FINISH_REASON.with(|v|*v.borrow_mut()=None);
  use std::os::fd::AsRawFd;use std::sync::atomic::Ordering;
  let deadline=Instant::now()+remaining_search_time()?.unwrap_or(Duration::from_secs(120)).min(Duration::from_secs(120));
  let mut socket=connect_unix(address,deadline,&||cancelled.load(Ordering::Acquire))?;
@@ -162,7 +165,7 @@ fn request_stream(address:&std::path::Path,path:&str,body:&[u8],key:&str,cancell
  if !finished{return Err("model stream ended early".into())}Ok(answer)
 }
 fn consume_sse(buf:&mut Vec<u8>,answer:&mut String,finished:&mut bool,on_token:&mut dyn FnMut(&str))->Result<(),String>{
- while let Some(pos)=buf.iter().position(|&x|x==b'\n'){let mut line=buf.drain(..=pos).collect::<Vec<_>>();line.pop();if line.last()==Some(&b'\r'){line.pop();}let Some(data)=line.strip_prefix(b"data:") else{continue};let data=data.strip_prefix(b" ").unwrap_or(data);if data==b"[DONE]"{*finished=true;return Ok(())}let v:serde_json::Value=serde_json::from_slice(data).map_err(|_|"invalid model stream event")?;if let Some(s)=v["choices"][0]["delta"]["content"].as_str(){if !s.is_empty(){if answer.len().saturating_add(s.len())>8*1024*1024{return Err("model response too large".into())}answer.push_str(s);on_token(s)}}else if v.get("error").is_some(){return Err("local model stream failed".into())}}
+ while let Some(pos)=buf.iter().position(|&x|x==b'\n'){let mut line=buf.drain(..=pos).collect::<Vec<_>>();line.pop();if line.last()==Some(&b'\r'){line.pop();}let Some(data)=line.strip_prefix(b"data:") else{continue};let data=data.strip_prefix(b" ").unwrap_or(data);if data==b"[DONE]"{*finished=true;return Ok(())}let v:serde_json::Value=serde_json::from_slice(data).map_err(|_|"invalid model stream event")?;if let Some(reason)=v["choices"][0]["finish_reason"].as_str(){FINISH_REASON.with(|r|*r.borrow_mut()=Some(reason.to_owned()));}if let Some(s)=v["choices"][0]["delta"]["content"].as_str(){if !s.is_empty(){if answer.len().saturating_add(s.len())>8*1024*1024{return Err("model response too large".into())}answer.push_str(s);on_token(s)}}else if v.get("error").is_some(){return Err("local model stream failed".into())}}
  Ok(())
 }
 
@@ -249,6 +252,8 @@ impl Encoder {
  #[test] fn cancellation_interrupts_silent_server(){let dir=std::env::temp_dir().join(format!("atlas-stream-cancel-{}",std::process::id()));std::fs::create_dir_all(&dir).unwrap();let path=dir.join("sock");let l=UnixListener::bind(&path).unwrap();let (tx,rx)=std::sync::mpsc::channel();let server=thread::spawn(move||{let(mut s,_)=l.accept().unwrap();let mut b=[0;1024];let _=s.read(&mut b);s.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n").unwrap();tx.send(()).unwrap();thread::sleep(Duration::from_secs(2));});let cancelled=Arc::new(AtomicBool::new(false));let c=cancelled.clone();let reader=thread::spawn(move||request_stream(&path,"/x",b"{}","k",&c,&mut |_|{}));rx.recv_timeout(Duration::from_secs(3)).unwrap();let start=Instant::now();cancelled.store(true,Ordering::SeqCst);assert!(reader.join().unwrap().is_err());assert!(start.elapsed()<Duration::from_millis(700));server.join().unwrap();std::fs::remove_dir_all(dir).unwrap();}
 }
 #[cfg(test)] mod stream_limit_tests {
+ #[test] fn remembers_generation_length_stop(){super::FINISH_REASON.with(|v|*v.borrow_mut()=None);let mut answer=String::new();let mut buf=b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n".to_vec();super::consume_sse(&mut buf,&mut answer,&mut false,&mut |_|{}).unwrap();assert!(super::FINISH_REASON.with(|v|v.borrow().as_deref()==Some("length")));}
+ #[test] fn explains_truncated_answer(){assert!(super::note_truncation("incomplete".into(),Some("length")).contains("Ответ прерван"));assert_eq!(super::note_truncation("complete".into(),Some("stop")),"complete");}
  #[test] fn oversized_sse_before_done_rejected(){let mut answer="x".repeat(8*1024*1024);let mut buf=b"data: {\"choices\":[{\"delta\":{\"content\":\"z\"}}]}\n\ndata: [DONE]\n\n".to_vec();let mut done=false;assert!(super::consume_sse(&mut buf,&mut answer,&mut done,&mut |_|{}).is_err());assert!(!done);}
  #[test] fn malformed_event_is_rejected(){let mut answer=String::new();let mut buf=b"data: not-json\n\n".to_vec();assert!(super::consume_sse(&mut buf,&mut answer,&mut false,&mut |_|{}).is_err());}
 }
