@@ -81,7 +81,35 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   assert answer=='Первая часть [1][2].',('grouped references not normalized',answer)
   sources=output[0][2]['sources'];assert len(sources)==2,('grouped references lost sources',sources)
   assert sources[0]['id']!=sources[1]['id'],sources
-  print('PASS grouped citations linked to two distinct sources')
+  reqid2=str(uuid.uuid4());output2=[]
+  def followup():
+   try:output2.append(request(proxy,'POST',prefix+'/chat/send',{'query':'Продолжи предыдущий ответ','request_id':reqid2},auth))
+   except Exception as e:output2.append(e)
+  second=threading.Thread(target=followup,daemon=True);second.start()
+  deadline=time.monotonic()+30
+  while not (root/'started-2').exists():
+   if not second.is_alive():raise AssertionError(('followup ended before stream',output2))
+   assert time.monotonic()<deadline,output2;time.sleep(.05)
+  code,_,ev=request(proxy,'GET',prefix+'/rag/events/'+reqid2+'?after=0',headers=auth);assert code==200 and not any(e.get('stage')=='searching' for e in ev['events']),ev
+  (root/'start-2').write_text('go');(root/'finish-2').write_text('go');second.join(30)
+  assert not second.is_alive() and output2 and isinstance(output2[0],tuple) and output2[0][0]==200,output2
+  next_result=output2[0][2];assert next_result['sources']==[],('old sources automatically reused',next_result)
+  assert 'источник не подтверждён' in next_result['answer'].lower() and '[1]' not in next_result['answer'],next_result
+  code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200,(code,value)
+  (root/'invalid-mode').write_text('yes');reqid3=str(uuid.uuid4());output3=[]
+  def invalid():
+   try:output3.append(request(proxy,'POST',prefix+'/chat/send',{'query':'Проверь источники','request_id':reqid3},auth))
+   except Exception as e:output3.append(e)
+  third=threading.Thread(target=invalid,daemon=True);third.start()
+  deadline=time.monotonic()+30
+  while not (root/'started-3').exists():
+   if not third.is_alive():raise AssertionError(('invalid citation ended before stream',output3))
+   assert time.monotonic()<deadline,output3;time.sleep(.05)
+  (root/'start-3').write_text('go');(root/'finish-3').write_text('go');third.join(30)
+  assert not third.is_alive() and output3 and isinstance(output3[0],tuple) and output3[0][0]==200,output3
+  invalid_result=output3[0][2];assert invalid_result['sources']==[] and '[99]' not in invalid_result['answer'],invalid_result
+  assert 'источник не подтверждён' in invalid_result['answer'].lower(),invalid_result
+  print('PASS grouped citations, stale source isolation and invalid-source warning')
  finally:
   for process in processes:
    if process.poll() is None:

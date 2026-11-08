@@ -41,7 +41,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
         try:
             wait('start'); send('Первая '); (root / ('first-'+n)).write_text('sent')
-            wait('finish'); send('часть [1, 2].' if (root / 'group-mode').exists() else 'часть.'); self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+            wait('finish'); send('часть [99].' if (root / 'invalid-mode').exists() else 'часть [1, 2].' if (root / 'group-mode').exists() else 'часть.'); self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
         except (BrokenPipeError,ConnectionResetError): pass
         finally: (root / ('ended-'+n)).write_text('ended')
 
