@@ -7,3 +7,5 @@
 .chat-message .chat-progress{margin:0 0 10px}.chat-retry{align-self:flex-start;color:#eeeaf4;background:#30313a;border:1px solid #696574;border-radius:8px;padding:7px 12px}:root[data-theme=light] .chat-retry{color:#302b36;background:#f0edf3;border-color:#9d96a5}
 
 .chat-message-scope{font-size:11px;color:#cbbad9;margin-bottom:7px}:root[data-theme=light] .chat-message-scope{color:#62516d}
+
+.chat-readiness{padding:10px 12px;border:1px solid #665974;border-radius:10px;background:#302a39;color:#f1eaf6;font-size:12px;line-height:1.4}.chat-readiness p{margin:0 0 8px}.chat-readiness button{padding:6px 9px;background:#4d3f5f;border:1px solid #8d79a0;border-radius:8px;color:#fff}:root[data-theme=light] .chat-readiness{background:#f5effa;color:#30283a;border-color:#cbb9d8}:root[data-theme=light] .chat-readiness button{background:#e7d9f3;color:#30243b;border-color:#ad91c1}
