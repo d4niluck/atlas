@@ -46,7 +46,7 @@ fn cancelled_before_launch_does_not_start_process(){
  let id=format!("precancel-{}",std::process::id());voice_cancel(id.clone()).unwrap();
  let result=transcribe(&exe,&dir.join("model"),&id,b"RIFF fake");
  assert!(result.is_err());assert!(!marker.exists(),"cancelled request must not start recognizer");
- assert!(!std::env::temp_dir().join(format!("atlas-voice-{}-{id}.wav",std::process::id())).exists());
+ assert_no_recording_for(&id);
 
 }
 
@@ -59,9 +59,10 @@ fn cancellation_terminates_child_and_removes_temporary_audio(){
  let worker=thread::spawn(move||transcribe(&exe,&model,&thread_id,b"RIFF fake"));
  let limit=Instant::now()+Duration::from_secs(2);
  while !ACTIVE.lock().unwrap().as_ref().is_some_and(|entry|entry.0==id){assert!(Instant::now()<limit,"recognizer did not start");thread::sleep(Duration::from_millis(10));}
+ let audio=ACTIVE.lock().unwrap().as_ref().unwrap().2.clone();assert!(audio.exists());
  let start=Instant::now();voice_cancel(id.clone()).unwrap();assert!(worker.join().unwrap().is_err());
  assert!(start.elapsed()<Duration::from_secs(2),"cancel must not wait for the full decode");
- assert!(!std::env::temp_dir().join(format!("atlas-voice-{}-{id}.wav",std::process::id())).exists());
+ assert!(!audio.exists(),"the actual recording must be removed");
  assert!(ACTIVE.lock().unwrap().is_none());
 }
 
@@ -95,9 +96,11 @@ fn shutdown_cancels_active_recognizer_and_cleans_recording(){
  let worker=thread::spawn(move||transcribe(&exe,&model,&thread_id,b"RIFF fake"));
  let limit=Instant::now()+Duration::from_secs(2);
  while !ACTIVE.lock().unwrap().as_ref().is_some_and(|entry|entry.0==id){assert!(Instant::now()<limit,"recognizer did not start");thread::sleep(Duration::from_millis(10));}
- let begin=Instant::now();shutdown();assert!(worker.join().unwrap().is_err());
+ let audio=ACTIVE.lock().unwrap().as_ref().unwrap().2.clone();assert!(audio.exists());
+ let begin=Instant::now();shutdown();
+ let cleaned_before_join=!audio.exists();let result=worker.join().unwrap();
+ assert!(cleaned_before_join,"shutdown returned while actual audio still existed");assert!(result.is_err());
  assert!(begin.elapsed()<Duration::from_secs(2));assert!(ACTIVE.lock().unwrap().is_none());
- assert!(!std::env::temp_dir().join(format!("atlas-voice-{}-{id}.wav",std::process::id())).exists());
 }
 
 #[test]
@@ -124,7 +127,7 @@ fn shutdown_prevents_starting_new_recognizer(){
  shutdown();let id=format!("shutdown-before-{}",std::process::id());
  assert!(transcribe(&exe,&dir.join("model"),&id,b"RIFF fake").is_err());
  assert!(!marker.exists());
- assert!(!std::env::temp_dir().join(format!("atlas-voice-{}-{id}.wav",std::process::id())).exists());
+ assert_no_recording_for(&id);
 }
 
 #[test]
@@ -140,4 +143,30 @@ fn recognizer_large_output_does_not_deadlock(){
  worker.join().unwrap();
  assert!(result.is_ok(),"recognizer blocked while its output pipe filled");
  assert!(result.unwrap().unwrap_err().contains("слишком длинный"),"a very long output must produce the bounded-output error");
+}
+
+fn assert_no_recording_for(id:&str){
+ let temp=std::env::temp_dir();let entry_name=format!("{}-{id}",std::process::id());
+ for e in std::fs::read_dir(temp).unwrap().flatten(){
+  if e.file_name().to_string_lossy().starts_with("atlas-voice-recordings-v1") {
+   assert!(!e.path().join(&entry_name).join("audio.wav").exists(),"audio must be removed");
+  }
+ }
+}
+
+#[test]
+fn shutdown_waits_for_recording_created_before_child_registration(){
+ let _reset=ShutdownReset;SHUTTING_DOWN.store(false,std::sync::atomic::Ordering::SeqCst);
+ let dir=temporary("shutdown-pending");let parent=dir.0.clone();let (send,recv)=std::sync::mpsc::channel();
+ let worker=thread::spawn(move||{
+  let _guard=VoiceWorker::start().unwrap();
+  let (record,f)=super::super::voice_temp::create(&parent,std::process::id(),"pending").unwrap();drop(f);
+  send.send(record.path.clone()).unwrap();
+  let limit=Instant::now()+Duration::from_secs(1);
+  while !SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) && Instant::now()<limit {thread::sleep(Duration::from_millis(5));}
+  thread::sleep(Duration::from_millis(50));drop(record);
+ });
+ let audio=recv.recv_timeout(Duration::from_secs(2)).unwrap();assert!(audio.exists());
+ shutdown();let removed_before_join=!audio.exists();worker.join().unwrap();
+ assert!(removed_before_join,"shutdown returned before the pending recording was removed");
 }

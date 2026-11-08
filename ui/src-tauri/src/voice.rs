@@ -3,6 +3,12 @@ use tauri::Manager;
 static DOWNLOAD: Mutex<Option<String>> = Mutex::new(None);
 static DOWNLOAD_CHILD: Mutex<Option<(Child,PathBuf)>> = Mutex::new(None);
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static VOICE_WORKERS:(Mutex<usize>,std::sync::Condvar)=(Mutex::new(0),std::sync::Condvar::new());
+struct VoiceWorker;
+impl VoiceWorker{
+ fn start()->Result<Self,String>{let mut count=VOICE_WORKERS.0.lock().map_err(|_|"Ошибка распознавания")?;if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst){return Err("Atlas завершает работу".into())}*count+=1;Ok(Self)}
+}
+impl Drop for VoiceWorker{fn drop(&mut self){if let Ok(mut count)=VOICE_WORKERS.0.lock(){*count-=1;VOICE_WORKERS.1.notify_all()}}}
 static ACTIVE: Mutex<Option<(String,Child,PathBuf)>> = Mutex::new(None);
 static CANCELLED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MODEL_CACHE: Mutex<Option<(PathBuf,u64,std::time::SystemTime,String,u64,u64,i64,i64)>> = Mutex::new(None);
@@ -85,6 +91,7 @@ pub async fn voice_transcribe(app:tauri::AppHandle,quality:String,id:String,wav:
 }
 fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,String>{
  if !id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'){return Err("Некорректный идентификатор".into())}
+ let _worker=VoiceWorker::start()?;
  let (record,mut file)=super::voice_temp::create(&std::env::temp_dir(),std::process::id(),id).map_err(|e|e.to_string())?;
  let path=record.path.clone();
  let result=(||{
@@ -110,4 +117,9 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
 }
 fn clean_voice_output(text:&str)->String{text.replace("[BLANK_AUDIO]", "").trim().to_owned()}
 fn pcm_is_digital_silence(samples:&[u8])->bool{samples.iter().all(|x|*x==0)}
-pub fn shutdown(){SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,_))=active.take(){let _=child.kill();let _=child.wait();}}if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}}
+pub fn shutdown(){
+ SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);
+ if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,_))=active.take(){let _=child.kill();let _=child.wait();}}
+ if let Ok(workers)=VOICE_WORKERS.0.lock(){drop(VOICE_WORKERS.1.wait_timeout_while(workers,Duration::from_secs(2),|count|*count>0));}
+ if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}
+}
