@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod vision_model_download;
+mod voice_temp;
 mod voice;
 #[cfg(target_os="macos")] mod menu_search;
 #[cfg(not(target_os="macos"))] mod menu_search {
@@ -160,6 +161,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg(debug_assertions)]
 fn main() {
+    voice_temp::cleanup(&std::env::temp_dir());
     tauri::Builder::default()
         .setup(|app| { tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External("http://127.0.0.1:5173".parse()?)).disable_drag_drop_handler().title("Atlas").inner_size(1200.0, 800.0).build()?; #[cfg(target_os="macos")] menu_search::install(app,"http://127.0.0.1:5173".into())?; Ok(()) })
         .invoke_handler(tauri::generate_handler![voice::voice_model_status, voice::voice_repair_model, voice::voice_download_model, voice::voice_transcribe, voice::voice_cancel, models_intro_seen, dismiss_models_intro, select_workspace_directory, save_workspace_file, open_external_url, download_model, model_download_status, download_q8_model, q8_model_download_status, download_vision_model, vision_model_download_status, download_rag_model, rag_model_download_status, download_rag_e4b_model, rag_e4b_model_download_status, download_nemotron_model, nemotron_model_download_status, prepare_restart, restart_atlas, menu_search::set_quick_search_mode, menu_search::show_main_window, menu_search::hide_quick_search, menu_search::open_quick_result, menu_search::take_quick_result, menu_search::request_atlas_exit, menu_search::take_atlas_exit_request, menu_search::finish_atlas_exit, menu_search::open_search_settings, menu_search::take_search_settings_request])
@@ -248,6 +250,7 @@ fn restart_atlas()->Result<(),String>{Err("Перезапуск доступен
 
 #[cfg(not(debug_assertions))]
 fn main() {
+    voice_temp::cleanup(&std::env::temp_dir());
     use std::{fs,io::{BufRead,BufReader,Read,Write},process::{Child,Command,Stdio},sync::Mutex};
     use tauri::{Manager,WebviewUrl,WebviewWindowBuilder};
     use std::os::unix::process::CommandExt;

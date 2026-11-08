@@ -1,4 +1,4 @@
-use std::{fs::{self,OpenOptions},io::{Read,Write},os::unix::fs::{MetadataExt,OpenOptionsExt},path::{Path,PathBuf},process::{Child,Command,Stdio},sync::Mutex,time::Duration};
+use std::{fs::{self,OpenOptions},io::{Read,Write},os::unix::{fs::{MetadataExt,OpenOptionsExt},process::CommandExt},path::{Path,PathBuf},process::{Child,Command,Stdio},sync::Mutex,time::Duration};
 use tauri::Manager;
 static DOWNLOAD: Mutex<Option<String>> = Mutex::new(None);
 static DOWNLOAD_CHILD: Mutex<Option<(Child,PathBuf)>> = Mutex::new(None);
@@ -85,15 +85,19 @@ pub async fn voice_transcribe(app:tauri::AppHandle,quality:String,id:String,wav:
 }
 fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,String>{
  if !id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'){return Err("Некорректный идентификатор".into())}
- let path=std::env::temp_dir().join(format!("atlas-voice-{}-{}.wav",std::process::id(),id));
- let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e|e.to_string())?;
+ let (record,mut file)=super::voice_temp::create(&std::env::temp_dir(),std::process::id(),id).map_err(|e|e.to_string())?;
+ let path=record.path.clone();
  let result=(||{
   file.write_all(wav).map_err(|e|e.to_string())?;drop(file);
   let mut active=ACTIVE.lock().map_err(|_|"Ошибка распознавания")?;
   if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst){return Err("Atlas завершает работу".into())}
   {let mut cancelled=CANCELLED.lock().map_err(|_|"Ошибка остановки")?;if let Some(i)=cancelled.iter().position(|x|x==id){cancelled.remove(i);return Err("Распознавание остановлено".into())}}
   if active.is_some(){return Err("Распознавание уже выполняется".into())}
-  let mut child=Command::new(executable).arg("-m").arg(model).arg("-f").arg(&path).args(["-l","auto","-nt","-t","4"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e|e.to_string())?;
+  let lock_fd=record.lock_fd();
+  let mut command=Command::new(executable);command.arg("-m").arg(model).arg("-f").arg(&path).args(["-l","auto","-nt","-t","4"]).stdout(Stdio::piped()).stderr(Stdio::null());
+  // Only the recognizer inherits the lock; unrelated children must not retain it.
+  unsafe{command.pre_exec(move||{let flags=libc::fcntl(lock_fd,libc::F_GETFD);if flags<0||libc::fcntl(lock_fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(std::io::Error::last_os_error())}Ok(())});}
+  let mut child=command.spawn().map_err(|e|e.to_string())?;
   let mut stdout=child.stdout.take().ok_or("Не удалось прочитать результат распознавания")?;
   // Drain the pipe even after the limit, otherwise a verbose child can block forever.
   let reader=std::thread::spawn(move||{let mut result=Vec::new();let mut chunk=[0u8;4096];let mut overflow=false;loop{let n=stdout.read(&mut chunk)?;if n==0{break}let keep=n.min(65536usize.saturating_sub(result.len()));result.extend_from_slice(&chunk[..keep]);overflow|=keep<n}Ok::<_,std::io::Error>((result,overflow))});
@@ -102,7 +106,7 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
    let done=active.as_mut().ok_or("Распознавание остановлено")?.1.try_wait().map_err(|e|e.to_string())?.is_some();
    if done{let(_,mut child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let status=child.wait().map_err(|e|e.to_string())?;let(output,overflow)=reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(clean_voice_output(&String::from_utf8_lossy(&output)))}
   }
- })();let _=fs::remove_file(path);result
+ })();drop(record);result
 }
 fn clean_voice_output(text:&str)->String{text.replace("[BLANK_AUDIO]", "").trim().to_owned()}
 fn pcm_is_digital_silence(samples:&[u8])->bool{samples.iter().all(|x|*x==0)}
