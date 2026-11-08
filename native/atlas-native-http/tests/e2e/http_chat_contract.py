@@ -67,6 +67,18 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   messages=history['messages'];assert len(messages)==2,messages
   assert messages[0]['role']=='user' and messages[0]['content']==query,messages
   assert messages[1]['role']=='assistant' and messages[1]['content']==answer,messages
+  reqid2=str(uuid.uuid4());cancelled_query='cancel-synthetic-secret-538cf';cancelled_output=[]
+  def send_cancel():
+   try:cancelled_output.append(request(proxy,'POST',prefix+'/chat/send',{'query':cancelled_query,'request_id':reqid2},auth))
+   except Exception as e:cancelled_output.append(e)
+  second=threading.Thread(target=send_cancel,daemon=True);second.start()
+  wait(lambda:(root/'started-2').exists(),'second generation');(root/'start-2').write_text('go')
+  wait(lambda:(root/'first-2').exists(),'second token')
+  code,_,value=request(proxy,'POST',prefix+'/rag/cancel/'+reqid2,{},auth);assert code in (200,202,204),(code,value)
+  second.join(10);assert not second.is_alive(),'cancelled chat remained active'
+  (root/'finish-2').write_text('go')
+  code,_,after_cancel=request(proxy,'GET',prefix+'/chat/history',headers=auth)
+  assert code==200 and after_cancel['messages']==messages,('cancel saved a partial turn',code,after_cancel)
   password='synthetic-password-2df4'
   code,_,value=request(proxy,'PATCH','/api/workspaces/'+wid+'/protection',{'protected':True,'password':password},auth);assert code==200,(code,value)
   code,_,value=request(proxy,'POST','/api/workspaces/'+wid+'/close',{},auth);assert code in (200,204),(code,value)
@@ -79,12 +91,23 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   code,_,value=request(proxy,'POST','/api/workspaces/'+wid+'/close',{},auth);assert code in (200,204),(code,value)
   code,_,value=request(proxy,'PATCH','/api/workspaces/'+wid+'/protection',{'protected':False,'password':password},auth);assert code==200,(code,value)
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages,(code,history)
+  destination=root/'exports';destination.mkdir()
+  code,_,cap=request(backend,'POST','/api/workspaces/authorize',{'operation':'export','path':str(destination)},{'X-Atlas-Token':token});assert code==200,(code,cap)
+  code,_,exported=request(proxy,'POST','/api/workspaces/export',{'capability':cap['capability'],'ids':[wid]},auth);assert code==200,(code,exported)
+  folder=pathlib.Path(exported.get('path') or destination/exported['folder'])
+  code,_,cap=request(backend,'POST','/api/workspaces/authorize',{'operation':'import','path':str(folder)},{'X-Atlas-Token':token});assert code==200,(code,cap)
+  code,_,imported=request(proxy,'POST','/api/workspaces/import',{'capability':cap['capability']},auth);assert code==201,(code,imported)
+  copied=imported['workspaces'][0]['id'];code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth)
+  assert code==200 and copy_history['messages']==messages,('chat history lost during copy',code,copy_history)
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==[] and history['summary']=='',(code,history)
-  print('PASS chat streaming, history, encrypted conversion and context clearing')
+  code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('clear affected copied workspace',code,copy_history)
+  print('PASS chat streaming, cancellation, encrypted conversion, copy and context clearing')
  finally:
   for process in processes:
    if process.poll() is None:
     try:os.killpg(process.pid,signal.SIGTERM);process.wait(timeout=5)
     except ProcessLookupError:pass
     except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=5)
+   diagnostics=process.stderr.read()
+   assert 'chat-synthetic-secret-84c719' not in diagnostics and 'cancel-synthetic-secret-538cf' not in diagnostics, 'chat text leaked to process logs'
