@@ -5,3 +5,5 @@
 .chat-wrapper:not([hidden]){display:flex;flex-direction:column;min-height:0;flex:1}
 
 .chat-message .chat-progress{margin:0 0 10px}.chat-retry{align-self:flex-start;color:#eeeaf4;background:#30313a;border:1px solid #696574;border-radius:8px;padding:7px 12px}:root[data-theme=light] .chat-retry{color:#302b36;background:#f0edf3;border-color:#9d96a5}
+
+.chat-message-scope{font-size:11px;color:#cbbad9;margin-bottom:7px}:root[data-theme=light] .chat-message-scope{color:#62516d}
