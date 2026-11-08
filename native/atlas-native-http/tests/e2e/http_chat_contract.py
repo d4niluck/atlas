@@ -129,7 +129,7 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   copied=imported['workspaces'][0]['id'];code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth)
   assert code==200 and copy_history['messages']==messages,('chat history lost during copy',code,copy_history)
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
-  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages,(code,history)
+  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==[],(code,history)
   code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('clear affected copied workspace',code,copy_history)
   deadline=time.monotonic()+90
   while True:
@@ -147,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   captured=(root/'chat-calls.jsonl').read_text();assert new_query in captured,'new question missing from model calls'
   assert query not in captured,'cleared context still contains old question'
   code,_,all_history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200,(code,all_history)
-  expected=all_history['messages'];assert len(expected)==4,expected
+  expected=all_history['messages'];assert len(expected)==2,expected
   pages=[];cursor=None
   while True:
    url=prefix+'/chat/history?limit=1'+(('&before='+str(cursor)) if cursor is not None else '')

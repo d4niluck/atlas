@@ -17,8 +17,10 @@ fn legacy_history_migrates_paginates_and_appends_without_rewriting() {
  assert_eq!(chat_state::append(&mut db,1,&user,&assistant,"facts",85,0,&json!(null),||Ok(())).unwrap(),2);
  assert!(chat_state::append(&mut db,1,&user,&assistant,"facts",85,0,&json!(null),||Ok(())).is_err());
  let c=chat_state::context(&mut db,||Ok(())).unwrap();assert_eq!(c["last_message_seq"],87);assert_eq!(c["messages"].as_array().unwrap().len(),2);
- chat_state::clear_paged(&mut db,||Ok(())).unwrap();let c=chat_state::context(&mut db,||Ok(())).unwrap();assert_eq!(c["revision"],3);assert_eq!(c["context_start_seq"],87);assert!(c["messages"].as_array().unwrap().is_empty());
- assert_eq!(chat_state::page(&mut db,None,40,||Ok(())).unwrap()["messages"].as_array().unwrap().len(),40);
+ chat_state::clear_paged(&mut db,||Ok(())).unwrap();let c=chat_state::context(&mut db,||Ok(())).unwrap();assert_eq!(c["revision"],3);assert_eq!(c["context_start_seq"],0);assert_eq!(c["last_message_seq"],0);assert!(c["messages"].as_array().unwrap().is_empty());
+ assert!(chat_state::page(&mut db,None,40,||Ok(())).unwrap()["messages"].as_array().unwrap().is_empty());
+ assert!(chat_state::append(&mut db,2,&user,&assistant,"",0,0,&json!(null),||Ok(())).is_err());
+ chat_state::append(&mut db,3,&user,&assistant,"",0,0,&json!(null),||Ok(())).unwrap();let c=chat_state::context(&mut db,||Ok(())).unwrap();assert_eq!(c["messages"][0]["seq"],1);assert_eq!(c["last_message_seq"],2);
 }
 
 #[test]

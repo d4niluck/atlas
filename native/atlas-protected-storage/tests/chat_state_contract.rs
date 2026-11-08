@@ -52,8 +52,8 @@ fn paged_history_survives_protection_roundtrip_and_stays_encrypted() {
  let encrypted=root.join("encrypted");let mut vault=Vault::import_plain(&plain,&encrypted,"password").unwrap();vault.set_workspace_name("test").unwrap();
  assert_eq!(vault.chat_context_guarded(||Ok(())).unwrap()["messages"][0]["content"],"PAGED_PRIVATE_SECRET_48917");
  let page=vault.chat_page_guarded(None,40,||Ok(())).unwrap();assert_eq!(page["messages"].as_array().unwrap().len(),2);
- vault.chat_clear_paged_guarded(||Ok(())).unwrap();assert_eq!(vault.chat_context_guarded(||Ok(())).unwrap()["context_start_seq"],2);
+ vault.chat_clear_paged_guarded(||Ok(())).unwrap();assert_eq!(vault.chat_context_guarded(||Ok(())).unwrap()["context_start_seq"],0);
  let exported=root.join("exported");vault.export_plain(&exported).unwrap();drop(vault);
- let mut db=rusqlite::Connection::open(exported.join("atlas.sqlite3")).unwrap();let result=chat_state::page(&mut db,None,40,||Ok(())).unwrap();assert_eq!(result["messages"],page["messages"]);assert_eq!(chat_state::context(&mut db,||Ok(())).unwrap()["revision"],2);drop(db);
+ let mut db=rusqlite::Connection::open(exported.join("atlas.sqlite3")).unwrap();let result=chat_state::page(&mut db,None,40,||Ok(())).unwrap();assert!(result["messages"].as_array().unwrap().is_empty());assert_eq!(chat_state::context(&mut db,||Ok(())).unwrap()["revision"],2);drop(db);
  let bytes=fs::read(encrypted).unwrap();assert!(!bytes.windows(26).any(|w|w==b"PAGED_PRIVATE_SECRET_48917"));fs::remove_dir_all(root).unwrap();
 }

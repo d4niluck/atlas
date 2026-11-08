@@ -114,8 +114,10 @@ pub fn append(db:&mut Connection,expected_revision:i64,user:&Value,assistant:&Va
 }
 
 pub fn clear_paged(db:&mut Connection,guard:impl FnOnce()->Result<()>)->Result<i64>{
- let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e|e.to_string())?;init(&tx)?;let(_,_,_,_,revision,last)=meta(&tx)?;let next=revision.checked_add(1).ok_or("chat revision exhausted")?;
- tx.execute("UPDATE chat_meta SET summary='',summarized_seq=?1,context_start_seq=?1,revision=?2 WHERE singleton=1",params![last,next]).map_err(|e|e.to_string())?;
+ let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e|e.to_string())?;init(&tx)?;let(_,_,_,_,revision,_)=meta(&tx)?;let next=revision.checked_add(1).ok_or("chat revision exhausted")?;
+ tx.execute("DELETE FROM chat_messages",[]).map_err(|e|e.to_string())?;
+ tx.execute("DELETE FROM sqlite_sequence WHERE name='chat_messages'",[]).map_err(|e|e.to_string())?;
+ tx.execute("UPDATE chat_meta SET summary='',summarized_seq=0,context_start_seq=0,scope='null',revision=?1 WHERE singleton=1",params![next]).map_err(|e|e.to_string())?;
  guard()?;tx.commit().map_err(|e|e.to_string())?;Ok(next)
 }
 
