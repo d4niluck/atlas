@@ -86,6 +86,19 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   for candidate in root.rglob('*'):
    if candidate.is_file():assert query.encode() not in candidate.read_bytes(),('chat leaked to disk',str(candidate.relative_to(root)))
   code,_,_=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code in (403,404),code
+  encrypted_dest=root/'protected-exports';encrypted_dest.mkdir()
+  code,_,cap=request(backend,'POST','/api/workspaces/authorize',{'operation':'export','path':str(encrypted_dest)},{'X-Atlas-Token':token});assert code==200,(code,cap)
+  code,_,exported=request(proxy,'POST','/api/workspaces/export',{'capability':cap['capability'],'ids':[wid],'passwords':{wid:password}},auth);assert code==200,(code,exported)
+  encrypted_copy=pathlib.Path(exported.get('path') or encrypted_dest/exported['folder'])
+  code,_,cap=request(backend,'POST','/api/workspaces/authorize',{'operation':'import','path':str(encrypted_copy)},{'X-Atlas-Token':token});assert code==200,(code,cap)
+  code,_,imported=request(proxy,'POST','/api/workspaces/import',{'capability':cap['capability']},auth);assert code==201,(code,imported)
+  copied_protected=imported['workspaces'][0]['id'];copy_prefix='/api/w/'+copied_protected
+  code,_,_=request(proxy,'GET',copy_prefix+'/chat/history',headers=auth);assert code in (403,404),code
+  code,_,value=request(proxy,'POST','/api/workspaces/'+copied_protected+'/unlock',{'password':password},auth);assert code==200,(code,value)
+  code,_,copy_history=request(proxy,'GET',copy_prefix+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('protected copy lost chat',code,copy_history)
+  code,_,value=request(proxy,'POST','/api/workspaces/'+copied_protected+'/close',{},auth);assert code in (200,204),(code,value)
+  for candidate in root.rglob('*'):
+   if candidate.is_file():assert query.encode() not in candidate.read_bytes(),('protected export leaked chat',str(candidate.relative_to(root)))
   code,_,value=request(proxy,'POST','/api/workspaces/'+wid+'/unlock',{'password':password},auth);assert code==200,(code,value)
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages,(code,history)
   code,_,value=request(proxy,'POST','/api/workspaces/'+wid+'/close',{},auth);assert code in (200,204),(code,value)
@@ -100,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   copied=imported['workspaces'][0]['id'];code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth)
   assert code==200 and copy_history['messages']==messages,('chat history lost during copy',code,copy_history)
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
-  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==[] and history['summary']=='',(code,history)
+  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages and history['summary']=='',(code,history)
   code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('clear affected copied workspace',code,copy_history)
   print('PASS chat streaming, cancellation, encrypted conversion, copy and context clearing')
  finally:
