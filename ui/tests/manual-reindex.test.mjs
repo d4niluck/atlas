@@ -84,3 +84,14 @@ test('ошибка ручного запуска показывается пол
   assert.ok(f.nodes(tree,n=>n.props?.role==='alert'&&/Не удалось запустить переиндексацию/.test(f.label(n))).length);
  }finally{await f.dispose()}
 });
+
+test('порог можно стереть и ввести 30000 без мгновенного сброса',async()=>{
+ const f=await fixture();try{
+  let tree=f.render();let input=f.nodes(tree,n=>n.type==='input'&&Number(n.props.max)===31744)[0];
+  assert.ok(input,'поле допускает согласованный предел');
+  input.props.onChange({target:{value:''}});tree=f.render();input=f.nodes(tree,n=>n.type==='input'&&Number(n.props.max)===31744)[0];assert.equal(input.props.value,'');
+  input.props.onChange({target:{value:'30000'}});tree=f.render();input=f.nodes(tree,n=>n.type==='input'&&Number(n.props.max)===31744)[0];assert.equal(input.props.value,'30000');
+  let saved;const props={onApply:async value=>{saved=value}};tree=f.render(props);tree.props.onApply();await new Promise(resolve=>setImmediate(resolve));assert.equal(saved.chat_context_limit,30000);
+  tree=f.render(props);input=f.nodes(tree,n=>n.type==='input'&&Number(n.props.max)===31744)[0];input.props.onChange({target:{value:''}});tree=f.render(props);saved=undefined;tree.props.onApply();await new Promise(resolve=>setImmediate(resolve));assert.equal(saved,undefined,'пустой предел не сохраняется');tree=f.render(props);assert.ok(f.nodes(tree,n=>n.props?.role==='alert'&&f.label(n).includes('2048')).length,'ошибка ввода видна');
+ }finally{await f.dispose()}
+});

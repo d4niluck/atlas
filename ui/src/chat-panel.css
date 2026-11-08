@@ -11,3 +11,16 @@
 .chat-readiness{padding:10px 12px;border:1px solid #665974;border-radius:10px;background:#302a39;color:#f1eaf6;font-size:12px;line-height:1.4}.chat-readiness p{margin:0 0 8px}.chat-readiness button{padding:6px 9px;background:#4d3f5f;border:1px solid #8d79a0;border-radius:8px;color:#fff}:root[data-theme=light] .chat-readiness{background:#f5effa;color:#30283a;border-color:#cbb9d8}:root[data-theme=light] .chat-readiness button{background:#e7d9f3;color:#30243b;border-color:#ad91c1}
 
 .chat-found-sources{margin-top:10px;padding-top:9px;border-top:1px solid #5e526a}.chat-found-sources h4{font-size:12px;margin:0 0 4px;color:#eeeaf2}.chat-found-sources p{margin:0 0 7px;color:#c8c0d0;font-size:11px}.chat-found-sources ul{list-style:none;padding:0;margin:0;display:grid;gap:6px}.chat-found-sources button{display:flex;flex-direction:column;gap:4px;width:100%;padding:8px;border:1px solid #5e526a;border-radius:8px;background:#302c38;color:#eeeaf2;text-align:left;font-size:12px;overflow-wrap:anywhere}.chat-found-sources button strong{color:#e5cfff}.chat-found-sources button span{color:#d2cbd7;font-size:11px}.chat-found-sources button:hover:not(:disabled){background:#3b3345}:root[data-theme=light] .chat-found-sources{border-color:#d5c8e0}:root[data-theme=light] .chat-found-sources h4{color:#30283a}:root[data-theme=light] .chat-found-sources p{color:#5e5368}:root[data-theme=light] .chat-found-sources button{background:#fff;border-color:#d5c8e0;color:#30283a}:root[data-theme=light] .chat-found-sources button strong{color:#65408f}:root[data-theme=light] .chat-found-sources button span{color:#554b5c}:root[data-theme=light] .chat-found-sources button:hover:not(:disabled){background:#f1eaf8}
+/* Keep progress secondary to the answer, including when opened. */
+.chat-progress,.chat-message .chat-progress{align-self:flex-start;max-width:100%;padding:0;border:0;background:transparent;color:#bdb2ca;margin:0 0 6px}
+.chat-progress summary{display:flex;align-items:center;gap:5px;list-style:none;padding:3px 0;font-size:12px;font-weight:500;color:#b9a7d2}
+.chat-progress summary::-webkit-details-marker{display:none}
+.chat-progress summary::before{content:'›';display:inline-block;font-size:16px;line-height:1;transition:transform .15s ease}
+.chat-progress[open] summary::before{transform:rotate(90deg)}
+.chat-progress ol{margin:4px 0 6px;padding-left:19px;max-height:140px;overflow:auto;line-height:1.45;color:#bdb2ca}
+.chat-compose{align-items:flex-end}
+.chat-compose textarea{min-height:40px;max-height:144px;height:40px;overflow-y:auto;padding:9px 12px;line-height:20px}
+.chat-compose button{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;padding:0;line-height:1}
+:root[data-theme=light] .chat-progress,:root[data-theme=light] .chat-message .chat-progress{background:transparent;border:0;color:#62566c}
+:root[data-theme=light] .chat-progress summary{color:#665078}
+:root[data-theme=light] .chat-progress ol{color:#62566c}

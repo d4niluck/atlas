@@ -43,3 +43,8 @@ test('при подтверждённой ссылке не создаёт до�
  const source={id:'f1',title:'Документ A',text:'Фрагмент',start:0,end:8};const html=await renderWithState([{seq:1,role:'assistant',content:'Ответ [1].',sources:[source],found_sources:[source]}]);
  assert.match(html,/Документ A/);assert.doesNotMatch(html,/Связь с ответом не проверена/);assert.doesNotMatch(html,/Найденные фрагменты/);
 });
+
+test('история не показывает подпись о другой области поиска',async()=>{
+ const html=await renderWithState([{seq:1,role:'assistant',content:'Ответ',scope:['other']}]);
+ assert.match(html,/Ответ/);assert.doesNotMatch(html,/Ответ для другой области поиска/);
+});
