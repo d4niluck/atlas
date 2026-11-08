@@ -9,6 +9,13 @@ fn silence_markers_do_not_replace_the_search_query(){
  assert_eq!(clean_voice_output("[BLANK_AUDIO] Найди заметку"),"Найди заметку");
 }
 
+#[test]
+fn digital_silence_is_skipped_but_quiet_pcm_is_not(){
+ assert!(pcm_is_digital_silence(&[0,0,0,0]));
+ assert!(!pcm_is_digital_silence(&[0,0,1,0]));
+ assert!(!pcm_is_digital_silence(&[0,0,255,255]));
+}
+
 struct TestDir(PathBuf);
 impl std::ops::Deref for TestDir{type Target=Path;fn deref(&self)->&Path{&self.0}}
 impl Drop for TestDir{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}

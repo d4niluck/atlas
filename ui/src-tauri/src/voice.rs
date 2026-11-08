@@ -76,7 +76,9 @@ pub fn voice_cancel(id:String)->Result<(),String>{
 #[tauri::command]
 pub async fn voice_transcribe(app:tauri::AppHandle,quality:String,id:String,wav:Vec<u8>)->Result<String,String>{
  let(name,sha,size)=model(&quality)?;
- if id.len()>64||id.is_empty()||wav.len()>1_920_044||wav.len()<46||&wav[..4]!=b"RIFF"{return Err("Некорректная запись".into())}
+ if id.len()>64||id.is_empty()||wav.len()>1_920_044||wav.len()<46||(wav.len()-44)%2!=0||&wav[..4]!=b"RIFF"{return Err("Некорректная запись".into())}
+ // Only exact digital silence is skipped: low-volume speech must reach Whisper.
+ if pcm_is_digital_silence(&wav[44..]){return Ok(String::new())}
  let model_path=dir(&app)?.join(name);if !fs::metadata(&model_path).is_ok_and(|m|m.is_file()&&m.len()==size){return Err("Сначала загрузите модель распознавания".into())}
  let executable=app.path().resource_dir().map_err(|e|e.to_string())?.join("resources/whisper/whisper-cli");
  tauri::async_runtime::spawn_blocking(move||{if model_status(&model_path,sha,size)?!="installed"{return Err("Файл модели повреждён".into())}transcribe(&executable,&model_path,&id,&wav)}).await.map_err(|e|e.to_string())?
@@ -103,4 +105,5 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
  })();let _=fs::remove_file(path);result
 }
 fn clean_voice_output(text:&str)->String{text.replace("[BLANK_AUDIO]", "").trim().to_owned()}
+fn pcm_is_digital_silence(samples:&[u8])->bool{samples.iter().all(|x|*x==0)}
 pub fn shutdown(){SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}}
