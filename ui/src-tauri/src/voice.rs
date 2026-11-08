@@ -121,28 +121,56 @@ pub async fn voice_prepare(app:tauri::AppHandle,quality:String,id:String)->Resul
  let(name,sha,size)=model(&quality)?;let model_path=dir(&app)?.join(name);let executable=app.path().resource_dir().map_err(|e|e.to_string())?.join("resources/whisper/whisper-cli");
  tauri::async_runtime::spawn_blocking(move||{if model_status(&model_path,sha,size)?!="installed"{return Err("Сначала загрузите модель распознавания".into())}prepare_process(&executable,&model_path,&id)}).await.map_err(|e|e.to_string())?
 }
-fn finish_prepared(model:&Path,id:&str,wav:&[u8])->Result<Option<String>,String>{
- let result=finish_prepared_inner(model,id,wav);if result.is_err(){let _=voice_cancel(id.to_owned());}result
+const VOICE_TIMEOUT:&str="Превышено время распознавания";
+fn discard_prepared(id:&str){
+ let prepared=PREWARM.lock().ok().and_then(|mut warm|if warm.as_ref().is_some_and(|entry|entry.id==id){warm.take()}else{None});
+ if let Some(mut prepared)=prepared{let _=prepared.child.kill();let _=prepared.child.wait();let _=prepared.reader.join();}
 }
-fn finish_prepared_inner(model:&Path,id:&str,wav:&[u8])->Result<Option<String>,String>{
- let mut stdin={let mut warm=PREWARM.lock().map_err(|_|"Ошибка распознавания")?;let Some(entry)=warm.as_mut() else{return Ok(None)};if entry.id!=id{return Ok(None)}if entry.model!=model{return Err("Модель распознавания изменилась".into())}entry.child.stdin.take().ok_or("Запись уже отправлена")?};
- if let Err(e)=stdin.write_all(wav){drop(stdin);let _=voice_cancel(id.to_owned());return Err(format!("Не удалось передать запись: {e}"))}drop(stdin);
- loop{std::thread::sleep(Duration::from_millis(25));let mut warm=PREWARM.lock().map_err(|_|"Ошибка распознавания")?;
+fn finish_prepared(model:&Path,id:&str,wav:&[u8])->Result<Option<String>,String>{finish_prepared_until(model,id,wav,std::time::Instant::now()+Duration::from_secs(120))}
+fn finish_prepared_until(model:&Path,id:&str,wav:&[u8],deadline:std::time::Instant)->Result<Option<String>,String>{
+ let result=finish_prepared_inner(model,id,wav,deadline);if result.is_err(){discard_prepared(id)}result
+}
+fn finish_prepared_inner(model:&Path,id:&str,wav:&[u8],deadline:std::time::Instant)->Result<Option<String>,String>{
+ let stdin={let mut warm=PREWARM.lock().map_err(|_|"Ошибка распознавания")?;let Some(entry)=warm.as_mut() else{return Ok(None)};if entry.id!=id{return Ok(None)}if entry.model!=model{return Err("Модель распознавания изменилась".into())}entry.child.stdin.take().ok_or("Запись уже отправлена")?};
+ // Loading can block reads from stdin, so a writer thread is supervised by the same deadline.
+ let audio=wav.to_vec();let (tx,rx)=std::sync::mpsc::sync_channel(1);let writer=std::thread::spawn(move||{let mut stdin=stdin;let result=stdin.write_all(&audio);drop(stdin);let _=tx.send(result);});
+ loop{match rx.recv_timeout(Duration::from_millis(25)){
+  Ok(result)=>{let _=writer.join();result.map_err(|e|format!("Не удалось передать запись: {e}"))?;break},
+  Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{if std::time::Instant::now()>=deadline{discard_prepared(id);let _=writer.join();return Err(VOICE_TIMEOUT.into())}if !PREWARM.lock().map_err(|_|"Ошибка распознавания")?.as_ref().is_some_and(|v|v.id==id){let _=writer.join();return Err("Распознавание остановлено".into())}},
+  Err(_)=>{let _=writer.join();return Err("Не удалось передать запись".into())}
+ }}
+ loop{if std::time::Instant::now()>=deadline{return Err(VOICE_TIMEOUT.into())}std::thread::sleep(Duration::from_millis(25));let mut warm=PREWARM.lock().map_err(|_|"Ошибка распознавания")?;
   let entry=warm.as_mut().filter(|entry|entry.id==id).ok_or("Распознавание остановлено")?;
   if entry.child.try_wait().map_err(|e|e.to_string())?.is_some(){let mut prepared=warm.take().ok_or("Распознавание остановлено")?;drop(warm);let status=prepared.child.wait().map_err(|e|e.to_string())?;let(output,overflow)=prepared.reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(Some(clean_voice_output(&String::from_utf8_lossy(&output))))}
  }
 }
+fn validate_request(quality:&str,id:&str,wav:&[u8])->Result<(&'static str,&'static str,u64),String>{
+ if id.len()>64||id.is_empty()||!id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'){return Err("Некорректный идентификатор".into())}
+ let result=if wav.len()>1_920_044||wav.len()<46||(wav.len()-44)%2!=0||&wav[..4]!=b"RIFF"{Err("Некорректная запись".into())}else{model(quality)};
+ if result.is_err(){let _=voice_cancel(id.to_owned());}result
+}
+fn transcribe_with_prepared(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,String>{
+ transcribe_with_prepared_until(executable,model,id,wav,std::time::Instant::now()+Duration::from_secs(120))
+}
+fn transcribe_with_prepared_until(executable:&Path,model:&Path,id:&str,wav:&[u8],deadline:std::time::Instant)->Result<String,String>{
+ match finish_prepared_until(model,id,wav,deadline){Ok(Some(text))=>return Ok(text),Ok(None)=>{},Err(error)=>{
+  if error==VOICE_TIMEOUT||CANCELLED.lock().map_err(|_|"Ошибка остановки")?.iter().any(|item|item==id){return Err(error)}
+ }}
+ if std::time::Instant::now()>=deadline{return Err(VOICE_TIMEOUT.into())}transcribe_until(executable,model,id,wav,deadline)
+}
 #[tauri::command]
 pub async fn voice_transcribe(app:tauri::AppHandle,quality:String,id:String,wav:Vec<u8>)->Result<String,String>{
- let(name,sha,size)=model(&quality)?;
- if id.len()>64||id.is_empty()||wav.len()>1_920_044||wav.len()<46||(wav.len()-44)%2!=0||&wav[..4]!=b"RIFF"{return Err("Некорректная запись".into())}
+ let(name,sha,size)=validate_request(&quality,&id,&wav)?;
  // Only exact digital silence is skipped: low-volume speech must reach Whisper.
  if pcm_is_digital_silence(&wav[44..]){let _=voice_cancel(id);return Ok(String::new())}
- let model_path=dir(&app)?.join(name);if !fs::metadata(&model_path).is_ok_and(|m|m.is_file()&&m.len()==size){return Err("Сначала загрузите модель распознавания".into())}
- let executable=app.path().resource_dir().map_err(|e|e.to_string())?.join("resources/whisper/whisper-cli");
- tauri::async_runtime::spawn_blocking(move||{if model_status(&model_path,sha,size)?!="installed"{let _=voice_cancel(id);return Err("Файл модели повреждён".into())}if let Some(text)=finish_prepared(&model_path,&id,&wav)?{return Ok(text)}transcribe(&executable,&model_path,&id,&wav)}).await.map_err(|e|e.to_string())?
+ let model_path=dir(&app).map_err(|e|{let _=voice_cancel(id.clone());e})?.join(name);if !fs::metadata(&model_path).is_ok_and(|m|m.is_file()&&m.len()==size){let _=voice_cancel(id);return Err("Сначала загрузите модель распознавания".into())}
+ let executable=app.path().resource_dir().map_err(|e|{let _=voice_cancel(id.clone());e.to_string()})?.join("resources/whisper/whisper-cli");
+ let cleanup_id=id.clone();match tauri::async_runtime::spawn_blocking(move||{if !matches!(model_status(&model_path,sha,size),Ok(status) if status=="installed"){let _=voice_cancel(id);return Err("Файл модели повреждён".into())}transcribe_with_prepared(&executable,&model_path,&id,&wav)}).await{Ok(result)=>result,Err(e)=>{let _=voice_cancel(cleanup_id);Err(e.to_string())}}
 }
 fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,String>{
+ transcribe_until(executable,model,id,wav,std::time::Instant::now()+Duration::from_secs(120))
+}
+fn transcribe_until(executable:&Path,model:&Path,id:&str,wav:&[u8],deadline:std::time::Instant)->Result<String,String>{
  if !id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'){return Err("Некорректный идентификатор".into())}
  let _worker=VoiceWorker::start()?;
  let (record,mut file)=super::voice_temp::create(&std::env::temp_dir(),std::process::id(),id).map_err(|e|e.to_string())?;
@@ -163,7 +191,7 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
   // Drain the pipe even after the limit, otherwise a verbose child can block forever.
   let reader=std::thread::spawn(move||{let mut result=Vec::new();let mut chunk=[0u8;4096];let mut overflow=false;loop{let n=stdout.read(&mut chunk)?;if n==0{break}let keep=n.min(65536usize.saturating_sub(result.len()));result.extend_from_slice(&chunk[..keep]);overflow|=keep<n}Ok::<_,std::io::Error>((result,overflow))});
   *active=Some((id.to_string(),child,path.clone()));drop(active);
-  loop{std::thread::sleep(Duration::from_millis(50));let mut active=ACTIVE.lock().map_err(|_|"Ошибка распознавания")?;
+  loop{if std::time::Instant::now()>=deadline{let child=ACTIVE.lock().ok().and_then(|mut active|if active.as_ref().is_some_and(|entry|entry.0==id){active.take()}else{None});if let Some((_,mut child,_))=child{let _=child.kill();let _=child.wait();}let _=reader.join();return Err(VOICE_TIMEOUT.into())}std::thread::sleep(Duration::from_millis(50));let mut active=ACTIVE.lock().map_err(|_|"Ошибка распознавания")?;
    let done=active.as_mut().ok_or("Распознавание остановлено")?.1.try_wait().map_err(|e|e.to_string())?.is_some();
    if done{let(_,mut child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let status=child.wait().map_err(|e|e.to_string())?;let(output,overflow)=reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(clean_voice_output(&String::from_utf8_lossy(&output)))}
   }

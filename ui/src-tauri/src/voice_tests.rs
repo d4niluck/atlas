@@ -55,6 +55,57 @@ fn shutdown_reaps_prepared_recognizer(){
  assert!(PREWARM.lock().unwrap().is_none());assert_eq!(unsafe{libc::kill(pid,0)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ESRCH));
 }
 
+#[test]
+fn invalid_request_reaps_prepared_recognizer(){
+ let dir=temporary("warm-invalid");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-invalid-{}",std::process::id());prepare_process(&exe,&dir.join("model"),&id).unwrap();
+ assert!(validate_request("unknown",&id,b"bad").is_err());assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn prepared_recognizer_has_deadline_even_when_pipe_is_blocked(){
+ let dir=temporary("warm-timeout");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-timeout-{}",std::process::id());let model=dir.join("model");prepare_process(&exe,&model,&id).unwrap();let start=Instant::now();
+ assert!(finish_prepared_until(&model,&id,&vec![1;1_900_000],start+Duration::from_millis(100)).is_err());assert!(start.elapsed()<Duration::from_secs(2));assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn prepared_recognizer_has_deadline_after_audio_is_sent(){
+ let dir=temporary("warm-wait-timeout");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-wait-timeout-{}",std::process::id());let model=dir.join("model");prepare_process(&exe,&model,&id).unwrap();let start=Instant::now();
+ assert_eq!(finish_prepared_until(&model,&id,b"RIFF sample",start+Duration::from_millis(100)).unwrap_err(),VOICE_TIMEOUT);assert!(start.elapsed()<Duration::from_secs(2));assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn fallback_timeout_reaps_process_and_removes_audio(){
+ let dir=temporary("fallback-timeout");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("fallback-timeout-{}",std::process::id());let start=Instant::now();assert_eq!(transcribe_until(&exe,&dir.join("model"),&id,b"RIFF fake",start+Duration::from_millis(100)).unwrap_err(),VOICE_TIMEOUT);
+ assert!(start.elapsed()<Duration::from_secs(2));assert!(ACTIVE.lock().unwrap().is_none());assert_no_recording_for(&id);
+}
+
+#[test]
+fn timed_out_preparation_does_not_restart_fallback(){
+ let dir=temporary("warm-no-fallback-after-timeout");let exe=dir.join("mock");let marker=dir.join("fallback");std::fs::write(&exe,format!("#!/bin/sh\ncase \" $* \" in *' -otxt '*) exec /bin/sleep 30;; *) printf launched > '{}';; esac\n",marker.display())).unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-no-fallback-{}",std::process::id());let model=dir.join("model");prepare_process(&exe,&model,&id).unwrap();
+ assert_eq!(transcribe_with_prepared_until(&exe,&model,&id,&vec![1;1_900_000],Instant::now()+Duration::from_millis(100)).unwrap_err(),VOICE_TIMEOUT);
+ assert!(!marker.exists());assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn invalid_request_does_not_stop_another_prepared_recording(){
+ let dir=temporary("warm-other-invalid");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-other-{}",std::process::id());prepare_process(&exe,&dir.join("model"),&id).unwrap();assert!(validate_request("unknown","different-id",b"bad").is_err());
+ assert!(PREWARM.lock().unwrap().as_ref().is_some_and(|entry|entry.id==id));voice_cancel(id).unwrap();
+}
+
+#[test]
+fn failed_prepared_process_falls_back_without_restarting_cancelled_request(){
+ let dir=temporary("warm-fallback");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\ncase \" $* \" in *' -otxt '*) exit 1;; *) printf fallback;; esac\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-fallback-{}",std::process::id());let model=dir.join("model");prepare_process(&exe,&model,&id).unwrap();
+ assert_eq!(transcribe_with_prepared(&exe,&model,&id,b"RIFF fake").unwrap(),"fallback");assert!(PREWARM.lock().unwrap().is_none());
+ let id=format!("warm-cancel-fallback-{}",std::process::id());prepare_process(&exe,&model,&id).unwrap();voice_cancel(id.clone()).unwrap();assert!(transcribe_with_prepared(&exe,&model,&id,b"RIFF fake").is_err());
+}
+
 struct TestDir(PathBuf);
 impl std::ops::Deref for TestDir{type Target=Path;fn deref(&self)->&Path{&self.0}}
 impl Drop for TestDir{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
