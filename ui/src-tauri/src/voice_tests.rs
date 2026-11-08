@@ -16,6 +16,45 @@ fn digital_silence_is_skipped_but_quiet_pcm_is_not(){
  assert!(!pcm_is_digital_silence(&[0,0,255,255]));
 }
 
+#[test]
+fn warm_recognizer_starts_before_audio_and_accepts_stdin(){
+ let dir=temporary("warm");let exe=dir.join("mock");let marker=dir.join("started");let model=dir.join("model");
+ std::fs::write(&exe,format!("#!/bin/sh\nprintf started > '{}'\n/bin/cat >/dev/null\nprintf recognized\n",marker.display())).unwrap();
+ std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();let id=format!("warm-{}",std::process::id());
+ prepare_process(&exe,&model,&id).unwrap();let end=Instant::now()+Duration::from_secs(2);while !marker.exists(){assert!(Instant::now()<end);thread::sleep(Duration::from_millis(5));}
+ assert_eq!(finish_prepared(&model,&id,b"RIFF sample").unwrap().unwrap(),"recognized");
+ assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn cancelled_preparation_cannot_start_a_recognizer(){
+ let dir=temporary("warm-precancel");let exe=dir.join("mock");let marker=dir.join("started");
+ std::fs::write(&exe,format!("#!/bin/sh\nprintf started > '{}'\n",marker.display())).unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-precancel-{}",std::process::id());voice_cancel(id.clone()).unwrap();assert!(prepare_process(&exe,&dir.join("model"),&id).is_err());assert!(!marker.exists());
+}
+
+#[test]
+fn cancelling_warmed_recognizer_reaps_it_before_any_audio(){
+ let dir=temporary("warm-cancel");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-cancel-{}",std::process::id());prepare_process(&exe,&dir.join("model"),&id).unwrap();let pid=PREWARM.lock().unwrap().as_ref().unwrap().child.id() as libc::pid_t;
+ voice_cancel(id).unwrap();assert!(PREWARM.lock().unwrap().is_none());assert_eq!(unsafe{libc::kill(pid,0)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ESRCH));
+}
+
+#[test]
+fn cancellation_unblocks_audio_write_when_model_is_still_loading(){
+ let dir=temporary("warm-pipe");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-pipe-{}",std::process::id());let model=dir.join("model");prepare_process(&exe,&model,&id).unwrap();let thread_id=id.clone();let (tx,rx)=std::sync::mpsc::channel();
+ let worker=thread::spawn(move||{tx.send(finish_prepared(&model,&thread_id,&vec![1;1_900_000])).ok();});thread::sleep(Duration::from_millis(30));voice_cancel(id).unwrap();
+ let result=rx.recv_timeout(Duration::from_secs(2));worker.join().unwrap();assert!(result.is_ok(),"write remained blocked after cancel");assert!(result.unwrap().is_err());assert!(PREWARM.lock().unwrap().is_none());
+}
+
+#[test]
+fn shutdown_reaps_prepared_recognizer(){
+ let _reset=ShutdownReset;SHUTTING_DOWN.store(false,std::sync::atomic::Ordering::SeqCst);let dir=temporary("warm-shutdown");let exe=dir.join("mock");std::fs::write(&exe,b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();std::fs::set_permissions(&exe,std::fs::Permissions::from_mode(0o700)).unwrap();
+ let id=format!("warm-shutdown-{}",std::process::id());prepare_process(&exe,&dir.join("model"),&id).unwrap();let pid=PREWARM.lock().unwrap().as_ref().unwrap().child.id() as libc::pid_t;shutdown();
+ assert!(PREWARM.lock().unwrap().is_none());assert_eq!(unsafe{libc::kill(pid,0)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ESRCH));
+}
+
 struct TestDir(PathBuf);
 impl std::ops::Deref for TestDir{type Target=Path;fn deref(&self)->&Path{&self.0}}
 impl Drop for TestDir{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}

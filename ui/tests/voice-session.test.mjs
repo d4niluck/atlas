@@ -34,6 +34,22 @@ test('микрофон не запрашивается до явного нач�
  await session.cancel();
 }));
 
+test('модель готовится во время записи и используется для той же записи',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let preparedId;
+ dependencies.prepare=async id=>{preparedId=id;calls.push('prepare')};
+ dependencies.transcribe=async(_wav,id)=>{assert.equal(id,preparedId);calls.push('transcribe');return 'текст'};
+ const session=create(dependencies);await session.start();assert.ok(calls.includes('prepare'));assert.ok(!calls.includes('transcribe'));
+ assert.equal(await session.stop(),'текст');assert.equal(calls.filter(x=>x==='prepare').length,1);
+}));
+
+test('отмена во время подготовки выгружает именно готовящийся процесс',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let preparedId,finish;
+ dependencies.prepare=id=>{preparedId=id;return new Promise(resolve=>{finish=resolve})};
+ dependencies.cancel=async id=>{assert.equal(id,preparedId);calls.push('cancel-preparing')};
+ const session=create(dependencies);await session.start();await session.cancel();assert.ok(calls.includes('cancel-preparing'));
+ finish();await Promise.resolve();assert.ok(!calls.includes('transcribe'));
+}));
+
 test('по окончании записи освобождаются дорожки, возвращается распознанный текст',async()=>withSession(async create=>{
  const {calls,dependencies}=fixture();const session=create(dependencies);
  await session.start();const text=await session.stop();

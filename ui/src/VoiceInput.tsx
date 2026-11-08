@@ -38,7 +38,7 @@ export function VoiceInput({onText,active=true}:{onText:(text:string)=>void;acti
  const [state,setState]=useState<'idle'|'starting'|'recording'|'thinking'|'missing'|'corrupt'|'downloading'>('idle'),[error,setError]=useState('');
  const [level,setLevel]=useState(0);
  const quality=useRef<Quality>('small'),session=useRef<ReturnType<typeof createVoiceSession>|null>(null),generation=useRef(0),permission=useRef<string|null>(null);
- if(!session.current)session.current=createVoiceSession({getUserMedia:()=>requestMicrophone(permission),cancelPermission:async()=>{const id=permission.current;permission.current=null;if(id)await invoke('voice_microphone_prompt',{active:false,id})},capture:stream=>capture(stream,setLevel),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
+ if(!session.current)session.current=createVoiceSession({getUserMedia:()=>requestMicrophone(permission),cancelPermission:async()=>{const id=permission.current;permission.current=null;if(id)await invoke('voice_microphone_prompt',{active:false,id})},capture:stream=>capture(stream,setLevel),prepare:id=>invoke('voice_prepare',{quality:quality.current,id}),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
  useEffect(()=>()=>{void session.current?.cancel()},[]);
  useEffect(()=>{if(!active){generation.current++;void session.current?.cancel();setState('idle')}},[active]);
  useEffect(()=>{if(state!=='recording')return;const timer=setTimeout(()=>void stop(),60000);return()=>clearTimeout(timer)},[state]);

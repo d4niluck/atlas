@@ -36,6 +36,7 @@
     "allow-restart-atlas",
     "allow-voice-model-status",
     "allow-voice-download-model",
+    "allow-voice-prepare",
     "allow-voice-transcribe",
     "allow-voice-cancel",
     "allow-voice-repair-model",
