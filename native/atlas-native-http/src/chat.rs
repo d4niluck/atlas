@@ -22,13 +22,24 @@ impl Model for atlas_llama_probe::Generator {
 fn message(role:&str,content:impl Into<String>)->Value{json!({"role":role,"content":content.into()})}
 pub fn pagination(url:&str)->Result<(Option<i64>,usize),String>{let mut before=None;let mut limit=None;for (key,value) in url::form_urlencoded::parse(url.split_once('?').map(|(_,s)|s.as_bytes()).unwrap_or_default()){match key.as_ref(){"before"=>{if before.is_some(){return Err("Некорректная страница".into())}before=Some(value.parse::<i64>().ok().filter(|v|*v>0).ok_or("Некорректная страница")?);},"limit"=>{if limit.is_some(){return Err("Некорректный размер страницы".into())}limit=Some(value.parse::<usize>().ok().filter(|v|(1..=100).contains(v)).ok_or("Некорректный размер страницы")?);},_=>return Err("Некорректная страница".into())}}Ok((before,limit.unwrap_or(40)))}
 fn content(v:&Value)->Result<&str,String>{v["content"].as_str().ok_or("Некорректная история чата".into())}
+fn citation_numbers(text:&str)->Result<Option<Vec<usize>>,String>{
+ let chars:Vec<char>=text.chars().collect();let mut i=0;let mut numbers=Vec::new();
+ loop {
+  while i<chars.len()&&chars[i].is_whitespace(){i+=1}let start=i;while i<chars.len()&&chars[i].is_ascii_digit(){i+=1}if i==start{return Ok(None)}
+  let first=chars[start..i].iter().collect::<String>().parse::<usize>().map_err(|_|"Некорректная ссылка")?;
+  while i<chars.len()&&chars[i].is_whitespace(){i+=1}
+  let last=if i<chars.len()&&matches!(chars[i],'-'|'–'|'—'){i+=1;while i<chars.len()&&chars[i].is_whitespace(){i+=1}let begin=i;while i<chars.len()&&chars[i].is_ascii_digit(){i+=1}if begin==i{return Ok(None)}chars[begin..i].iter().collect::<String>().parse::<usize>().map_err(|_|"Некорректная ссылка")?}else{first};
+  if last<first||last-first>=128||numbers.len().saturating_add(last-first+1)>128{return Err("Некорректная ссылка".into())}numbers.extend(first..=last);
+  while i<chars.len()&&chars[i].is_whitespace(){i+=1}if i==chars.len(){return Ok(Some(numbers))}if !matches!(chars[i],','|';'|'，'){return Ok(None)}i+=1;
+ }
+}
 // Bracketed numbers inside Markdown code or math are literal data, not citations.
 fn renumber_refs(text:&str,mut map:impl FnMut(usize)->Result<usize,String>)->Result<String,String>{
  let chars:Vec<char>=text.chars().collect();let mut out=String::with_capacity(text.len());let mut i=0;let mut code:Option<(char,usize)>=None;let mut math=0;
  while i<chars.len(){let c=chars[i];if c=='\\'&&i+1<chars.len(){let next=chars[i+1];if code.is_none(){match (math,next){(0,'(')=>math=3,(3,')')=>math=0,(0,'[')=>math=4,(4,']')=>math=0,_=>{}}}out.push(c);out.push(next);i+=2;continue}
   if c=='`'||(c=='~'&&(code.is_some_and(|(v,_)|v=='~')||(i+2<chars.len()&&chars[i+1]=='~'&&chars[i+2]=='~'))){let mut end=i+1;while end<chars.len()&&chars[end]==c{end+=1}let count=end-i;if math==0{if code==Some((c,count)){code=None}else if code.is_none(){code=Some((c,count));}}for _ in i..end{out.push(c)}i=end;continue}
   if c=='$'&&code.is_none(){let count=if i+1<chars.len()&&chars[i+1]=='$'{2}else{1};if math==0{math=count}else if math==count{math=0}for _ in 0..count{out.push('$')}i+=count;continue}
-  if c=='['&&code.is_none()&&math==0{let mut end=i+1;while end<chars.len()&&chars[end].is_ascii_digit(){end+=1}if end>i+1&&end<chars.len()&&chars[end]==']'{let number=chars[i+1..end].iter().collect::<String>().parse::<usize>().map_err(|_|"Некорректная ссылка")?;out.push_str(&format!("[{}]",map(number)?));i=end+1;continue}}
+  if c=='['&&code.is_none()&&math==0{let mut end=i+1;while end<chars.len()&&end-i<=256&&chars[end]!=']'&&chars[end]!='\n'{end+=1}if end<chars.len()&&chars[end]==']'{let raw=chars[i+1..end].iter().collect::<String>();if let Some(numbers)=citation_numbers(&raw)?{for number in numbers{out.push_str(&format!("[{}]",map(number)?));}i=end+1;continue}}}
   out.push(c);i+=1;
  }
  Ok(out)
@@ -128,4 +139,7 @@ pub fn run<M:Model>(model:&M,state:&State,query:&str,limit:usize,mut search:impl
  #[test] fn first_question_searches_even_when_planner_says_answer(){let m=Mock{responses:RefCell::new(vec![r#"{"action":"answer"}"#.into(),r#"{"action":"answer"}"#.into(),"answer".into()]),factor:10};let mut count=0;run(&m,&State::default(),"first question",4096,|q|{assert_eq!(q,"first question");count+=1;Ok(("not found".into(),vec![]))},&mut |_,_|{}).unwrap();assert_eq!(count,1);}
  #[test] fn greeting_needs_no_initial_search(){let m=Mock{responses:RefCell::new(vec![r#"{"action":"answer"}"#.into(),"Привет!".into()]),factor:10};run(&m,&State::default(),"Привет!",4096,|_|panic!("unexpected search"),&mut |_,_|{}).unwrap();}
  #[test] fn code_and_math_brackets_are_not_citations(){let input="Источник [2], `shape = [512]`\n```python\nshape = [512]\n```\n$X_{[512]}$";let out=renumber_refs(input,|n|if n==2{Ok(1)}else{Err("invalid citation".into())}).unwrap();assert_eq!(out,"Источник [1], `shape = [512]`\n```python\nshape = [512]\n```\n$X_{[512]}$");}
+ #[test] fn grouped_citations_are_renumbered_and_coded_brackets_preserved(){let input="Текст [1, 3]; [2; 3] и [1–3]. `[9, 10]`\n```py\nshape=[512, 768]\n```";let out=renumber_refs(input,|n|if n<=3{Ok(n+1)}else{Err("invalid citation".into())}).unwrap();assert_eq!(out,"Текст [2][4]; [3][4] и [2][3][4]. `[9, 10]`\n```py\nshape=[512, 768]\n```");}
+ #[test] fn grouped_final_answer_keeps_only_corresponding_sources(){let m=Mock{responses:RefCell::new(vec![r#"{"action":"answer"}"#.into(),"Факты [1, 3].".into()]),factor:10};let mut assistant=message("assistant","old");assistant["sources"]=json!([{"id":"one"},{"id":"unused"},{"id":"three"}]);let state=State{messages:vec![message("user","q"),assistant],..State::default()};let(next,answer,sources)=run(&m,&state,"q",4096,|_|panic!(),&mut |_,_|{}).unwrap();assert_eq!(answer,"Факты [1][2].");assert_eq!(sources.len(),2);assert_eq!(sources[1]["id"],"three");assert_eq!(next.messages.last().unwrap()["content"],answer);}
+ #[test] fn grouped_subagent_sources_are_remapped_and_range_is_bounded(){let out=renumber_refs("Данные [1, 3]",|n|if n<=3{Ok(n+2)}else{Err("invalid citation".into())}).unwrap();assert_eq!(out,"Данные [3][5]");assert!(renumber_refs("[1-500]",Ok).is_err());assert_eq!(renumber_refs("[1, факт]",Ok).unwrap(),"[1, факт]");}
 }
