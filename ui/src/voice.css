@@ -2,3 +2,10 @@
 .voice-control>button{display:grid;place-items:center;min-width:30px;height:32px;border:0;background:transparent;color:inherit;cursor:pointer}
 .voice-message{position:absolute;top:100%;right:0;z-index:20;min-width:200px;padding:10px;border-radius:10px;background:#292d35;color:#fff;box-shadow:0 8px 24px #0005;font-size:13px}
 .voice-message button{margin:4px;color:#fff;background:#455a85;border:0;border-radius:6px;padding:5px}
+.voice-feedback{position:absolute;top:calc(100% + 8px);left:0;z-index:30;display:flex;align-items:center;gap:10px;width:max-content;max-width:min(290px,75vw);padding:10px 12px;border:1px solid rgba(193,180,226,.24);border-radius:12px;background:#282631;color:#f6f2ff;box-shadow:0 8px 24px #0005;font-size:12px;line-height:1.35}
+.menu-search-form .voice-feedback{left:auto;right:0}
+.voice-wave{display:flex;align-items:center;justify-content:center;gap:3px;width:32px;height:25px;flex:none}
+.voice-wave i{width:3px;min-height:4px;border-radius:4px;background:#c9b6ff;transition:height .1s ease}
+.voice-spinner{width:15px;height:15px;flex:none;border:2px solid #766991;border-top-color:#d1c2fb;border-radius:50%;animation:voice-spin .8s linear infinite}
+@keyframes voice-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.voice-spinner{animation:none}.voice-wave i{transition:none}}
