@@ -1,3 +1,4 @@
+pub mod chat_state;
 pub mod pdf;
 pub mod search;
 mod snapshot;
