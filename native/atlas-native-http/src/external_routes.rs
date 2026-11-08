@@ -77,6 +77,21 @@ pub fn handle(root:&std::path::Path,default:&std::path::Path,serial:&Mutex<()>,w
  ("GET",["objects",oid,"search-text"])=>send_session(&workers,&id,&session,json!({"action":"search-text","id":oid}))?,
  ("POST",["trash",oid,"restore"])=>{changed=true;let board=send_session(&workers,&id,&session,json!({"action":"restore-objects","ids":[oid]}))?;board["objects"].as_array().and_then(|items|items.iter().find(|item|item["id"]==*oid)).cloned().ok_or("Объект недоступен")?},
  ("GET",["history"])=>send_session(&workers,&id,&session,json!({"action":"history"}))?,
+ ("GET",["chat","history"])=>send_session(&workers,&id,&session,json!({"action":"chat-get"}))?["state"].clone(),
+ ("POST",["chat","clear"])=>{send_session(&workers,&id,&session,json!({"action":"chat-clear"}))?;json!({"ok":true})},
+ ("POST",["chat","send"])=>{
+  let query=b["query"].as_str().ok_or("Некорректный запрос")?;
+  let snapshot=send_session(&workers,&id,&session,json!({"action":"chat-get"}))?;
+  let state=crate::chat::State::read(&snapshot["state"])?;let revision=snapshot["revision"].as_i64().ok_or("История недоступна")?;
+  let scope=send_session(&workers,&id,&session,json!({"action":"search-scope","ids":b["object_ids"]}))?["ids"].clone();
+  let ids:Option<Vec<String>>=match &scope{Value::Null=>None,Value::Array(a)=>Some(a.iter().map(|v|v.as_str().map(str::to_owned).ok_or("Некорректный фильтр")).collect::<Result<_,_>>()?),_=>return Err("Некорректный фильтр".into())};
+  atlas_llama_probe::set_search_deadline(std::time::Instant::now()+std::time::Duration::from_secs(300));
+  let model={let slot=rag.lock().map_err(|_|"Модель недоступна")?;match &*slot{crate::RagState::Ready(v)=>v.clone(),_=>return Err("Модель ответа не загружена".into())}};let generator=model.acquire()?;let mut search_revision=None;
+  let(state,answer,sources)=crate::chat::run(&*generator,&state,query,crate::chat_limit(&choice),|q|{let model=semantic.as_ref().ok_or("Модель поиска не загружена")?;let result=crate::worker_models::search_session(&workers,&id,&session,model,q,ids.as_deref()).map_err(|e|e.to_string())?;let revision=result["revision"].as_str().ok_or("Ревизия недоступна")?.to_owned();if search_revision.as_ref().is_some_and(|r|r!=&revision){return Err("Данные изменились во время поиска".into())}search_revision=Some(revision);let rows=crate::exclude_image_chunks(result["results"].as_array().ok_or("Результаты недоступны")?.clone());crate::chat::answer_search(&*generator,q,&rows)},&mut |stage,text|crate::rag_stream::progress(stage,text))?;drop(generator);
+  let actual=send_session(&workers,&id,&session,json!({"action":"search-scope","ids":b["object_ids"]}))?["ids"].clone();if actual!=scope{return Err("Область поиска изменилась".into())}
+  crate::rag_stream::commit(||send_session(&workers,&id,&session,json!({"action":"chat-set","expected_revision":revision,"state":state.value(),"source_revision":search_revision,"expected_scope":{"ids":scope},"scope_ids":b["object_ids"]}))).map_err(|_|"Поиск остановлен")??;
+  json!({"answer":answer,"sources":sources,"messages":state.messages})
+ },
  ("GET",["trash"])=>json!({"objects":send_session(&workers,&id,&session,json!({"action":"list-trash","args":[]}))?}),
  ("DELETE",["objects",oid])=>{changed=true;send_session(&workers,&id,&session,json!({"action":"delete-objects","ids":[oid]}))?;json!({"ok":true})},
  ("POST",["objects","delete-many"])=>{changed=true;send_session(&workers,&id,&session,json!({"action":"delete-objects","ids":b["ids"]}))?},

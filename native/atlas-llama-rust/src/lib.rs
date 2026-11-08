@@ -38,6 +38,25 @@ pub struct Encoder { child: Child, address: PathBuf, identity: String, alternate
 pub struct Generator { child: Child, address: PathBuf, key:KeyFile }
 impl Drop for Generator {fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
 impl Generator {
+ /// Count the actual chat template, including the system message and role markers.
+ pub fn chat_tokens(&self,messages:&[serde_json::Value])->Result<usize,String>{
+  let body=serde_json::to_vec(&serde_json::json!({"messages":messages,"chat_template_kwargs":{"enable_thinking":false}})).map_err(|e|e.to_string())?;
+  let formatted=request(&self.address,"/apply-template",Some(&body),Some(&self.key.token))?;
+  let value:serde_json::Value=serde_json::from_slice(&formatted).map_err(|_|"invalid chat template response")?;
+  let prompt=value["prompt"].as_str().ok_or("chat template unavailable")?;
+  let body=serde_json::to_vec(&serde_json::json!({"content":prompt,"add_special":true,"parse_special":true})).map_err(|e|e.to_string())?;
+  let response=request(&self.address,"/tokenize",Some(&body),Some(&self.key.token))?;
+  let value:serde_json::Value=serde_json::from_slice(&response).map_err(|_|"invalid tokenizer response")?;
+  Ok(value["tokens"].as_array().ok_or("invalid tokenizer response")?.len())
+ }
+ /// Intermediate decisions are never sent to the user-facing token stream.
+ pub fn chat_complete(&self,messages:&[serde_json::Value],max_tokens:usize,stream:bool,json_output:bool)->Result<String,String>{
+  let mut body=serde_json::json!({"messages":messages,"temperature":0.0,"max_tokens":max_tokens,"chat_template_kwargs":{"enable_thinking":false},"stream":stream});
+  if json_output{body["response_format"]=serde_json::json!({"type":"json_object","schema":{"type":"object","properties":{"action":{"type":"string","enum":["answer","search"]},"query":{"type":"string"}},"required":["action"]}});}
+  let payload=serde_json::to_vec(&body).map_err(|e|e.to_string())?;
+  let value=if stream {let streaming=STREAM.with(|s|s.borrow().clone()).ok_or("stream unavailable")?;let(sink,cancelled)=streaming;sink("");request_stream(&self.address,"/v1/chat/completions",&payload,&self.key.token,&cancelled,&mut |text|sink(text))?}else{let response=request(&self.address,"/v1/chat/completions",Some(&payload),Some(&self.key.token))?;let value:serde_json::Value=serde_json::from_slice(&response).map_err(|_|"invalid model response")?;value["choices"][0]["message"]["content"].as_str().ok_or("empty model response")?.to_owned()};
+  if value.trim().is_empty(){return Err("empty model response".into())}Ok(value)
+ }
  pub fn start(exe:&str,model:&str)->Result<Self,String>{Self::start_device(exe,model,"metal")}
  pub fn start_device(exe:&str,model:&str,device:&str)->Result<Self,String>{
   Self::start_device_with_ngram(exe,model,device,false)

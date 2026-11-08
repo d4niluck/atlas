@@ -1,4 +1,6 @@
 mod rag_stream;
+mod chat;
+mod local_chat;
 mod history;
 mod worker_overlay;
 mod stream_metadata;
@@ -73,7 +75,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
   if parts[4]=="cancel" && method=="POST" {return if rag_stream::cancel(wid,id,cookie){answer(req,200,json!({"ok":true}))}else{answer(req,400,json!({"error":"Invalid request"}))}}
   return answer(req,404,json!({"error":"Not found"}));
  }
- if method=="POST" && parts.len()==5 && parts[0..2]==["api","w"] && parts[3..5]==["rag","search"] {let wid=parts[2];rag_stream::prepare(wid,protected.session(wid).map(|v|format!("p:{v}")).or_else(||workers.session(wid).ok().map(|v|format!("w:{v}"))));}
+ if method=="POST" && parts.len()==5 && parts[0..2]==["api","w"] && (parts[3..5]==["rag","search"]||parts[3..5]==["chat","send"]) {let wid=parts[2];rag_stream::prepare(wid,protected.session(wid).map(|v|format!("p:{v}")).or_else(||workers.session(wid).ok().map(|v|format!("w:{v}"))));}
 
  // The test-only barrier reproduces a slow unrelated workspace operation.
  #[cfg(feature="test-hook")]
@@ -82,13 +84,13 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
  if path=="/api/settings/app"&&method=="GET" {return answer(req,200,app_settings(choice,device))}
  // Models downloaded after launch become available without starting their processes.
  {let _creation_guard=match serial.lock(){Ok(g)=>g,Err(_)=>return answer(req,500,json!({"error":"Server unavailable"}))};
- if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="semantic" || (method=="POST" && (parts[3]=="search" || parts[3]=="rag"))) {
+ if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="semantic" || (method=="POST" && (parts[3]=="search" || parts[3]=="rag" || (parts[3]=="chat"&&parts.get(4)==Some(&"send"))))) {
   let config=app_settings(choice,device);let path=choice.dir.join(if config["embedding_variant"]=="q8" {"embeddinggemma-2-q8.gguf"}else{"embeddinggemma-2.gguf"});
   if config["semantic_enabled"]==true && path.is_file() && !choice.exe.is_empty() {
    if let Ok(mut slot)=model.lock(){if matches!(*slot,ModelState::Disabled){let selected=device.selected_pair().0;match semantic::SemanticService::start_lazy(&choice.exe,&path.to_string_lossy(),&selected){Ok(service)=>{*slot=match service.set_images(config["image_enabled"]==true){Ok(())=>ModelState::Ready(service),Err(e)=>ModelState::Failed(e)}},Err(e)=>*slot=ModelState::Failed(e)}}}
   }
  }
- if parts.len()>=4 && parts[0..2]==["api","w"] && parts[3]=="rag" {
+ if parts.len()>=4 && parts[0..2]==["api","w"] && (parts[3]=="rag" || (parts[3]=="chat" && method=="POST" && parts.get(4)==Some(&"send"))) {
   let config=app_settings(choice,device);let selected=choice.selected.lock().map(|v|v.clone()).unwrap_or_else(|_|"e2b".into());let path=choice.dir.join(answer_model_filename(&selected).unwrap_or("gemma-4-e2b-it-q4.gguf"));
   if config["rag_enabled"]==true && path.is_file() && !choice.exe.is_empty() {if let Ok(mut slot)=rag.lock(){if matches!(*slot,RagState::Disabled){*slot=RagState::Ready(std::sync::Arc::new(rag_model::RagModel::lazy_with_ngram(choice.exe.clone(),path.to_string_lossy().into_owned(),device.selected_pair().1,config["ngram_enabled"]==true)));}}}
  }
@@ -120,6 +122,7 @@ fn handle(mut req: Request, root:&std::path::Path, default:&std::path::Path, tok
   }
   return external_routes::close(workers,external_states,req,parts[2])}if let Ok(mut states)=external_states.lock(){states.remove(parts[2]);}return answer(req,200,json!({"ok":true}))}
  if parts.len()>=4&&parts[0..2]==["api","w"]&&workers.contains(parts[2]){let semantic=model.lock().ok().and_then(|m|if let ModelState::Ready(s)=&*m{Some(s.clone())}else{None});return external_routes::handle(root,default,serial,workers.clone(),external_states.clone(),req,parts[2].to_owned(),parts[3..].iter().map(|s|s.to_string()).collect(),semantic,rag.clone(),choice.clone())}
+ if parts.len()==5&&parts[0..2]==["api","w"]&&parts[3]=="chat" {let wid=parts[2];if wid!="default"&&(wid.len()!=32||!wid.bytes().all(|b|b.is_ascii_hexdigit())){return answer(req,404,json!({"error":"Пространство недоступно"}))}let dir=workspace_paths::resolve(root,default,wid);let semantic=model.lock().ok().and_then(|m|if let ModelState::Ready(s)=&*m{Some(s.clone())}else{None});let limit=app_settings(choice,device)["chat_context_limit"].as_u64().unwrap_or(8192) as usize;return local_chat::handle(req,&dir,&parts[3..],&method,semantic.as_ref(),rag,limit)}
  if parts.len()==6 && parts[0..2]==["api","w"] && parts[3]=="files" && parts[5]=="content" && method=="GET" {
    let wid=parts[2];let id=parts[4];let valid_id=|s:&str|!s.is_empty()&&s.chars().all(|c|c.is_ascii_hexdigit()||c=='-');
    if (wid=="default" && root.join(".default-deleted").exists()) || (wid!="default" && (wid.len()!=32||!valid_id(wid)))||!valid_id(id){return answer(req,404,json!({"error":"Not found"}))}
@@ -337,18 +340,20 @@ fn rag_status(rag:&std::sync::Mutex<RagState>,choice:&ModelChoice)->Result<Value
  Ok(result)
 }
 fn answer_model_filename(name:&str)->Option<&'static str>{match name{"e2b"=>Some("gemma-4-e2b-it-q4.gguf"),"e4b"=>Some("gemma-4-e4b-it-q4.gguf"),"nemotron"=>Some("nemotron-3.5-bolt-e4b-q4.gguf"),_=>None}}
+fn chat_limit(choice:&ModelChoice)->usize{std::fs::read(choice.dir.join("settings.json")).ok().and_then(|raw|serde_json::from_slice::<Value>(&raw).ok()).and_then(|v|v["chat_context_limit"].as_u64()).filter(|v|(2048..=15360).contains(v)).unwrap_or(8192) as usize}
 fn app_settings(choice:&ModelChoice,device:&device::DeviceSettings)->Value {
  let selected=device.selected_pair();let model=choice.selected.lock().map(|s|s.clone()).unwrap_or_else(|_|"e2b".into());
  // Downloads must not silently change the running model before settings are applied.
  let default_variant=choice.default_embedding_variant.get_or_init(||if choice.dir.join("embeddinggemma-2.gguf").is_file() && !choice.dir.join("embeddinggemma-2-q8.gguf").is_file(){"bf16"}else{"q8"});
- let mut v=json!({"agentic":false,"model":model,"embedding_variant":*default_variant,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"ngram_enabled":false,"idle_enabled":true,"idle_minutes":15});
- if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled","ngram_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b"|"nemotron")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}if !cfg!(target_os="macos"){v["embedding"]=json!("cpu");v["llm"]=json!("cpu");}if v["llm"]!="metal" {v["ngram_enabled"]=json!(false);}v
+ let mut v=json!({"agentic":false,"model":model,"embedding_variant":*default_variant,"embedding":selected.0,"llm":selected.1,"lexical_enabled":true,"semantic_enabled":true,"rag_enabled":false,"image_enabled":false,"ngram_enabled":false,"idle_enabled":true,"idle_minutes":15,"chat_context_limit":8192});
+ if let Ok(raw)=std::fs::read(choice.dir.join("settings.json")){if let Ok(saved)=serde_json::from_slice::<Value>(&raw){for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","image_enabled","idle_enabled","ngram_enabled"] {if saved[key].is_boolean(){v[key]=saved[key].clone();}} if saved["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){v["idle_minutes"]=saved["idle_minutes"].clone();}if saved["chat_context_limit"].as_u64().is_some_and(|n|(2048..=15360).contains(&n)){v["chat_context_limit"]=saved["chat_context_limit"].clone();}if matches!(saved["embedding_variant"].as_str(),Some("bf16"|"q8")){v["embedding_variant"]=saved["embedding_variant"].clone();}if matches!(saved["model"].as_str(),Some("e2b"|"e4b"|"nemotron")){v["model"]=saved["model"].clone();}if matches!(saved["embedding"].as_str(),Some("cpu"|"metal")){v["embedding"]=saved["embedding"].clone();}if matches!(saved["llm"].as_str(),Some("cpu"|"metal")){v["llm"]=saved["llm"].clone();}}}v["lexical_enabled"]=json!(true);if v["semantic_enabled"]==false {v["rag_enabled"]=json!(false);}if !cfg!(target_os="macos"){v["embedding"]=json!("cpu");v["llm"]=json!("cpu");}if v["llm"]!="metal" {v["ngram_enabled"]=json!(false);}v
 }
 fn save_app_settings(choice:&ModelChoice,device:&device::DeviceSettings,b:&Value)->Result<(),String>{
+ if !b["chat_context_limit"].is_null()&&!b["chat_context_limit"].as_u64().is_some_and(|n|(2048..=15360).contains(&n)){return Err("Лимит контекста должен быть от 2048 до 15360".into())}
  if !matches!(b["embedding_variant"].as_str(),Some("bf16"|"q8")){return Err("Неизвестная модель поиска".into())}
  for key in ["agentic","lexical_enabled","semantic_enabled","rag_enabled","idle_enabled"] {if !b[key].is_boolean(){return Err("Неизвестный режим поиска".into())}} if !b["idle_minutes"].as_u64().is_some_and(|n|(1..=1440).contains(&n)){return Err("Время ожидания должно быть от 1 до 1440 минут".into())}let model=b["model"].as_str().filter(|s|answer_model_filename(s).is_some()).ok_or("Неизвестная модель")?;let embedding=b["embedding"].as_str().ok_or("Неизвестное устройство")?;let llm=b["llm"].as_str().ok_or("Неизвестное устройство")?;
  if !b["ngram_enabled"].is_null() && !b["ngram_enabled"].is_boolean(){return Err("Неизвестный режим ускорения".into())} if !b["image_enabled"].is_boolean(){return Err("Неизвестный режим поиска изображений".into())} if b["image_enabled"]==true && !choice.dir.join("embeddinggemma-2-mmproj-q8.gguf").is_file(){return Err("Загрузите модель для поиска изображений".into())}
- let old=app_settings(choice,device);let mut normalized=b.clone();normalized["lexical_enabled"]=json!(true);if normalized["semantic_enabled"]==false {normalized["rag_enabled"]=json!(false);}normalized["ngram_enabled"]=json!(b["ngram_enabled"].as_bool().unwrap_or(old["ngram_enabled"]==true)&&llm=="metal"&&cfg!(target_os="macos"));let b=&normalized;
+ let old=app_settings(choice,device);let mut normalized=b.clone();if normalized["chat_context_limit"].is_null(){normalized["chat_context_limit"]=old["chat_context_limit"].clone();}normalized["lexical_enabled"]=json!(true);if normalized["semantic_enabled"]==false {normalized["rag_enabled"]=json!(false);}normalized["ngram_enabled"]=json!(b["ngram_enabled"].as_bool().unwrap_or(old["ngram_enabled"]==true)&&llm=="metal"&&cfg!(target_os="macos"));let b=&normalized;
  let selected_search=choice.dir.join(if b["embedding_variant"]=="q8" {"embeddinggemma-2-q8.gguf"}else{"embeddinggemma-2.gguf"});let any_search=choice.dir.join("embeddinggemma-2.gguf").is_file()||choice.dir.join("embeddinggemma-2-q8.gguf").is_file();if old["embedding_variant"]!=b["embedding_variant"]&&any_search&&!selected_search.is_file(){return Err("Загрузите выбранную модель поиска".into())}if old["model"]!=model && !choice.dir.join(answer_model_filename(model).ok_or("Неизвестная модель")?).is_file(){return Err("Выбранная модель ответа не загружена".into())}
  if old["embedding"]!=embedding || old["llm"]!=llm {device.validate(embedding,llm)?;}
  std::fs::create_dir_all(&choice.dir).map_err(|e|e.to_string())?;let tmp=choice.dir.join(format!(".settings-{}",uuid::Uuid::new_v4()));let result=(|| -> Result<(),String>{let f=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e|e.to_string())?;serde_json::to_writer(&f,b).map_err(|e|e.to_string())?;f.sync_all().map_err(|e|e.to_string())?;std::fs::rename(&tmp,choice.dir.join("settings.json")).map_err(|e|e.to_string())?;Ok(())})();if result.is_err(){let _=std::fs::remove_file(tmp);}result
