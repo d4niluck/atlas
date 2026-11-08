@@ -30,7 +30,7 @@ export function VoiceInput({onText,active=true}:{onText:(text:string)=>void;acti
  useEffect(()=>()=>{void session.current?.cancel()},[]);
  useEffect(()=>{if(!active){generation.current++;void session.current?.cancel();setState('idle')}},[active]);
  useEffect(()=>{if(state!=='recording')return;const timer=setTimeout(()=>void stop(),60000);return()=>clearTimeout(timer)},[state]);
- useEffect(()=>{if(state!=='recording')return;const cancelOnBlur=()=>void cancel();window.addEventListener('blur',cancelOnBlur);return()=>window.removeEventListener('blur',cancelOnBlur)},[state]);
+ useEffect(()=>{if(state!=='recording'&&state!=='thinking')return;const cancelOnBlur=()=>void cancel();window.addEventListener('blur',cancelOnBlur);return()=>window.removeEventListener('blur',cancelOnBlur)},[state]);
  async function start(){const n=++generation.current;setError('');setState('starting');try{quality.current=selected();const status=await invoke('voice_model_status',{quality:quality.current});if(n!==generation.current)return;if(status!=='installed'){setState('missing');return}await session.current!.start();if(n===generation.current)setState('recording')}catch(e){if(n===generation.current){setState('idle');setError('Не удалось включить микрофон: '+String(e))}}}
  async function stop(){const n=generation.current;setState('thinking');try{const text=await session.current!.stop();if(n===generation.current&&text)onText(text)}catch(e){if(n===generation.current)setError('Не удалось распознать речь: '+String(e))}finally{if(n===generation.current)setState('idle')}}
  async function cancel(){generation.current++;await session.current!.cancel().catch(()=>{});setState('idle')}
