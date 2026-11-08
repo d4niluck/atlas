@@ -7,6 +7,11 @@ type Quality='base'|'small'|'medium';
 const choices:readonly [Quality,string,string][]=[['base','Низкое','60 МБ'],['small','Среднее','190 МБ'],['medium','Высокое','539 МБ']];
 const invoke=(name:string,args?:object):Promise<any> => (window as any).__TAURI__.core.invoke(name,args);
 async function selected():Promise<Quality>{const q=await invoke('voice_get_quality');if(q==='base'||q==='small'||q==='medium')return q;throw Error('Неизвестная модель распознавания')}
+export async function requestMicrophone(){
+ await invoke('voice_microphone_prompt',{active:true});
+ try{return await navigator.mediaDevices.getUserMedia({audio:true})}
+ finally{await invoke('voice_microphone_prompt',{active:false}).catch(()=>{})}
+}
 
 export function VoiceSettings(){
  const [quality,setQuality]=useState<Quality|null>(null),[status,setStatus]=useState(''),[error,setError]=useState(''),[saving,setSaving]=useState(false);const localDownload=useRef(false);
@@ -24,7 +29,8 @@ async function capture(stream:MediaStream,onLevel:(level:number)=>void){
  processor.onaudioprocess=e=>{if(length>=context.sampleRate*60)return;const data=e.inputBuffer.getChannelData(0);const remaining=Math.max(0,Math.min(data.length,context.sampleRate*60-length));chunks.push(data.slice(0,remaining));length+=remaining;const now=performance.now();if(now-lastLevel>=100){lastLevel=now;onLevel(signalLevel(data))}};
  const mute=context.createGain();mute.gain.value=0;input.connect(processor);processor.connect(mute);mute.connect(context.destination);
  const close=()=>{processor.disconnect();input.disconnect();mute.disconnect();processor.onaudioprocess=null;void context.close()};
- try{if(context.state==='suspended')await context.resume();if(context.state!=='running')throw Error('Не удалось начать запись звука');}catch(error){close();throw error}
+ let timer:ReturnType<typeof setTimeout>|undefined;
+ try{if(context.state==='suspended')await Promise.race([context.resume(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('Не удалось запустить запись звука')),5000)})]);if(context.state!=='running')throw Error('Не удалось начать запись звука');}catch(error){close();throw error}finally{if(timer)clearTimeout(timer)}
  return {cancel:close,async stop(){close();if(!length)throw Error('Микрофон не передал звук. Проверьте его в настройках macOS.');const source=new Float32Array(length);let offset=0;for(const chunk of chunks){source.set(chunk,offset);offset+=chunk.length}return encodeWav(source,context.sampleRate)}};
 }
 
@@ -32,7 +38,7 @@ export function VoiceInput({onText,active=true}:{onText:(text:string)=>void;acti
  const [state,setState]=useState<'idle'|'starting'|'recording'|'thinking'|'missing'|'corrupt'|'downloading'>('idle'),[error,setError]=useState('');
  const [level,setLevel]=useState(0);
  const quality=useRef<Quality>('small'),session=useRef<ReturnType<typeof createVoiceSession>|null>(null),generation=useRef(0);
- if(!session.current)session.current=createVoiceSession({getUserMedia:()=>navigator.mediaDevices.getUserMedia({audio:true}),capture:stream=>capture(stream,setLevel),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
+ if(!session.current)session.current=createVoiceSession({getUserMedia:requestMicrophone,capture:stream=>capture(stream,setLevel),transcribe:(wav,id)=>invoke('voice_transcribe',{quality:quality.current,id,wav:Array.from(wav)}),cancel:id=>invoke('voice_cancel',{id})});
  useEffect(()=>()=>{void session.current?.cancel()},[]);
  useEffect(()=>{if(!active){generation.current++;void session.current?.cancel();setState('idle')}},[active]);
  useEffect(()=>{if(state!=='recording')return;const timer=setTimeout(()=>void stop(),60000);return()=>clearTimeout(timer)},[state]);

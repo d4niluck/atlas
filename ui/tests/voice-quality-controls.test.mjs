@@ -34,6 +34,14 @@ function children(n){return n?.props?.children}
 function find(node,fn){if(Array.isArray(node)){for(const child of node){const found=find(child,fn);if(found)return found}return}if(!node||typeof node!=='object')return;if(fn(node))return node;return find(children(node),fn)}
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
+test('системный запрос микрофона удерживает окно меню открытым и освобождает его после ответа',async()=>withComponents(async({requestMicrophone})=>{
+ const calls=[];const stream={};Object.defineProperty(globalThis,'window',{configurable:true,value:{__TAURI__:{core:{invoke:async(name,args)=>{calls.push([name,args.active])}}}}});
+ Object.defineProperty(globalThis,'navigator',{configurable:true,value:{platform:'MacIntel',mediaDevices:{getUserMedia:async()=>stream}}});
+ assert.equal(await requestMicrophone(),stream);assert.deepEqual(calls,[['voice_microphone_prompt',true],['voice_microphone_prompt',false]]);
+ calls.length=0;Object.defineProperty(globalThis,'navigator',{configurable:true,value:{platform:'MacIntel',mediaDevices:{getUserMedia:async()=>{throw Error('denied')}}}});
+ await assert.rejects(requestMicrophone(),/denied/);assert.deepEqual(calls,[['voice_microphone_prompt',true],['voice_microphone_prompt',false]]);
+}));
+
 test('оба окна перед началом записи читают актуальный выбор и не загружают модель',async()=>withComponents(async({VoiceInput})=>{
  let current='small';const calls=[];
  Object.defineProperty(globalThis,'window',{configurable:true,value:{__TAURI__:{core:{invoke:async(name,args)=>{calls.push([name,args]);if(name==='voice_get_quality')return current;if(name==='voice_model_status')return 'missing';throw Error('unexpected call '+name)}}}}});

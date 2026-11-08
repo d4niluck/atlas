@@ -9,6 +9,19 @@ const WIDE_WIDTH: f64 = 760.;
 const HEIGHT: f64 = 680.;
 
 #[derive(Default)]
+struct MicrophonePrompt(AtomicBool);
+impl MicrophonePrompt {
+    fn set(&self, active:bool){self.0.store(active,Ordering::SeqCst)}
+    fn hide_on_blur(&self)->bool{!self.0.load(Ordering::SeqCst)}
+}
+static MICROPHONE_PROMPT:MicrophonePrompt=MicrophonePrompt(AtomicBool::new(false));
+
+#[tauri::command]
+pub fn voice_microphone_prompt(window:tauri::WebviewWindow,active:bool){
+    if window.label()==QUICK {MICROPHONE_PROMPT.set(active)}
+}
+
+#[derive(Default)]
 pub struct PendingResult(Mutex<Option<Value>>, AtomicBool, AtomicBool, Mutex<Option<(f64, f64)>>, AtomicBool);
 
 // Physical coordinates prevent scaling errors when the menu is on a secondary display.
@@ -40,6 +53,14 @@ pub fn set_quick_search_mode(app: AppHandle, wide: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn microphone_permission_keeps_menu_open_until_request_finishes() {
+        let state=MicrophonePrompt::default();
+        assert!(state.hide_on_blur());
+        state.set(true);
+        assert!(!state.hide_on_blur());
+        state.set(false);
+        assert!(state.hide_on_blur());
+    }
     #[test] fn keeps_popup_on_monitor_near_edges() {
         assert_eq!(popup_position(1980., 30., 1520., 1360., (0., 0., 2000., 1600.)), (480., 30.));
         assert_eq!(popup_position(10., 30., 1520., 1360., (0., 0., 2000., 1600.)), (0., 30.));
@@ -160,7 +181,7 @@ pub fn install(app: &mut tauri::App, origin: String) -> Result<(), Box<dyn std::
                 .on_navigation({let origin=origin.clone();move |url|url.scheme()=="http" && url.origin().ascii_serialization()==origin})
                 .build() else{return};
             let hiding=window.clone();
-            window.on_window_event(move |event| match event {WindowEvent::Focused(false)=>{let _=hiding.hide();},WindowEvent::CloseRequested{api,..}=>{api.prevent_close();let _=hiding.hide();},_=>{}});
+            window.on_window_event(move |event| match event {WindowEvent::Focused(false) if MICROPHONE_PROMPT.hide_on_blur()=>{let _=hiding.hide();},WindowEvent::CloseRequested{api,..}=>{api.prevent_close();let _=hiding.hide();},_=>{}});
             window
         };
         if window.is_visible().unwrap_or(false) {let _=window.hide();return}
