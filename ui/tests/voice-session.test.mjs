@@ -87,3 +87,13 @@ test('закрытие уже завершённой записи не отме�
  await session.start();await session.stop();await session.cancel();
  assert.ok(!calls.includes('cancel-transcription'));
 }));
+
+test('распознанный текст добавляется к текущему запросу и не удаляет ввод пользователя',async()=>{
+ const dir=await mkdtemp(join(process.cwd(),'.atlas-voice-text-test-'));
+ try {const out=join(dir,'text.mjs');await build({entryPoints:['src/voiceText.ts'],outfile:out,bundle:true,platform:'node',format:'esm',logLevel:'silent'});const {appendVoiceText}=await import(pathToFileURL(out).href);
+ assert.equal(appendVoiceText('','привет'),'привет');
+ assert.equal(appendVoiceText('машинное','обучение'),'машинное обучение');
+ assert.equal(appendVoiceText('машинное ','обучение'),'машинное обучение');
+ assert.equal(appendVoiceText('строка\n','продолжение'),'строка\nпродолжение');
+ }finally{await rm(dir,{recursive:true,force:true})}
+});
