@@ -23,7 +23,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not value.get('stream'):
             content = json.dumps({'action':'answer'})
             return self.reply({'choices':[{'message':{'content':content}}]})
-        counter += 1; n = str(counter)
+        counter += 1
+        while (root / ('started-'+str(counter))).exists(): counter += 1
+        n = str(counter)
         (root / ('started-'+n)).write_text('started')
         self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
         def wait(name):

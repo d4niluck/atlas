@@ -36,10 +36,17 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   code,_,made=request(proxy,'POST','/api/workspaces',{'name':'chat fixture'},auth);assert code==201,(code,made)
   wid=made['id'];prefix='/api/w/'+wid
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth)
-  assert code==200 and history['messages']==[] and isinstance(history['summary'],str),('new chat must start empty',code,history)
+  assert code==200 and history['messages']==[] and history['next_before'] is None,('new chat must start empty',code,history)
   code,_,_=request(proxy,'GET',prefix+'/chat/history');assert code in (401,403,404),('history exposed without session',code)
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
-  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==[] and history['summary']=='',(code,history)
+  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==[] and history['next_before'] is None,(code,history)
+  code,_,note=request(proxy,'POST',prefix+'/notes',{'title':'fixture','text':'Тестовая заметка для проверки видимости.'},auth);assert code==201,(code,note);note_id=note['id']
+  deadline=time.monotonic()+90
+  while True:
+   code,_,search=request(proxy,'POST',prefix+'/search',{'mode':'semantic','query':'test','object_ids':None},auth)
+   if code==200:break
+   assert code==503 and time.monotonic()<deadline,(code,search)
+   time.sleep(.1)
   reqid=str(uuid.uuid4());query='chat-synthetic-secret-84c719';output=[]
   def send():
    try:output.append(request(proxy,'POST',prefix+'/chat/send',{'query':query,'request_id':reqid},auth))
@@ -50,6 +57,8 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
    while time.monotonic()<deadline:
     value=predicate()
     if value:return value
+    if label=='LLM start' and not thread.is_alive():raise AssertionError(('chat ended before generation',output))
+    if label=='generation after context clearing' and not third.is_alive():raise AssertionError(('chat after clear ended before generation',third_output))
     time.sleep(.05)
    raise AssertionError('timeout waiting for '+label)
   def events():
@@ -113,8 +122,14 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   copied=imported['workspaces'][0]['id'];code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth)
   assert code==200 and copy_history['messages']==messages,('chat history lost during copy',code,copy_history)
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
-  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages and history['summary']=='',(code,history)
+  code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages,(code,history)
   code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('clear affected copied workspace',code,copy_history)
+  deadline=time.monotonic()+90
+  while True:
+   code,_,search=request(proxy,'POST',prefix+'/search',{'mode':'semantic','query':'test','object_ids':None},auth)
+   if code==200:break
+   assert code==503 and time.monotonic()<deadline,(code,search)
+   time.sleep(.1)
   (root/'capture-chat').write_text('go');reqid3=str(uuid.uuid4());new_query='new-context-only-b6ae5';third_output=[]
   def send_after_clear():
    try:third_output.append(request(proxy,'POST',prefix+'/chat/send',{'query':new_query,'request_id':reqid3},auth))
@@ -124,6 +139,30 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   third.join(30);assert not third.is_alive() and third_output and isinstance(third_output[0],tuple) and third_output[0][0]==200,third_output
   captured=(root/'chat-calls.jsonl').read_text();assert new_query in captured,'new question missing from model calls'
   assert query not in captured,'cleared context still contains old question'
+  code,_,all_history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200,(code,all_history)
+  expected=all_history['messages'];assert len(expected)==4,expected
+  pages=[];cursor=None
+  while True:
+   url=prefix+'/chat/history?limit=1'+(('&before='+str(cursor)) if cursor is not None else '')
+   code,_,page=request(proxy,'GET',url,headers=auth);assert code==200 and len(page['messages'])==1,(code,page)
+   pages[0:0]=page['messages'];cursor=page['next_before']
+   if cursor is None:break
+  assert pages==expected,('paginated history incomplete or unordered',pages,expected)
+  reqid4=str(uuid.uuid4());scope_output=[]
+  def send_scope():
+   try:scope_output.append(request(proxy,'POST',prefix+'/chat/send',{'query':'Продолжи предыдущий ответ','request_id':reqid4},auth))
+   except Exception as e:scope_output.append(e)
+  fourth=threading.Thread(target=send_scope,daemon=True);fourth.start()
+  deadline=time.monotonic()+30
+  while not (root/'started-4').exists():
+   if not fourth.is_alive():raise AssertionError(('scope test ended before generation',scope_output))
+   assert time.monotonic()<deadline,scope_output;time.sleep(.05)
+  (root/'start-4').write_text('go');wait(lambda:(root/'first-4').exists(),'scope test first token')
+  code,_,scope_events=request(proxy,'GET',prefix+'/rag/events/'+reqid4+'?after=0',headers=auth);assert code==200 and not any(e.get('stage')=='searching' for e in scope_events['events']),('scope test unexpectedly searched',scope_events)
+  code,_,value=request(proxy,'PUT',prefix+'/objects/'+note_id+'/search-visibility',{'excluded':True},auth);assert code==200,(code,value)
+  (root/'finish-4').write_text('go');fourth.join(30)
+  assert not fourth.is_alive() and scope_output and isinstance(scope_output[0],tuple) and scope_output[0][0]!=200,('stale scope accepted',scope_output)
+  code,_,after_scope=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and after_scope['messages']==expected,('stale scope saved',code,after_scope)
   print('PASS chat streaming, cancellation, encrypted conversion, copy and context clearing')
  finally:
   for process in processes:
