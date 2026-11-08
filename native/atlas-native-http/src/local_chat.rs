@@ -8,7 +8,7 @@ pub fn handle(mut req:Request,dir:&Path,resource:&[&str],method:&str,semantic:Op
  let result=(||->Result<Value,String>{
   let (snapshot,identity,scope)={let _lock=atlas_native_storage_contract::workspace_lock(dir).map_err(|e|e.to_string())?;if !crate::valid_workspace(dir){return Err("Пространство недоступно".into())}let metadata=std::fs::metadata(dir).map_err(|e|e.to_string())?;let identity=(metadata.dev(),metadata.ino());let mut db=rusqlite::Connection::open(dir.join("atlas.sqlite3")).map_err(|e|e.to_string())?;
    if resource==["chat","clear"]&&method=="POST"{atlas_native_storage_contract::chat_state::clear_paged(&mut db,||Ok(()))?;return Ok(json!({"ok":true}))}
-   if let Some((before,page_limit))=page{return atlas_native_storage_contract::chat_state::page(&mut db,before,page_limit,||Ok(()))}
+   if let Some((before,page_limit))=page{let page=atlas_native_storage_contract::chat_state::page(&mut db,before,page_limit,||Ok(()))?;return crate::history::enrich_chat_page(&db,page)}
    let snapshot=atlas_native_storage_contract::chat_state::context(&mut db,||Ok(()))?;
    if resource!=["chat","send"]||method!="POST"{return Err("Неизвестная операция".into())}
    let ids=match input.get("object_ids"){None|Some(Value::Null)=>None,Some(Value::Array(a))=>Some(a.iter().map(|v|v.as_str().map(str::to_owned).ok_or("Неверный фильтр")).collect::<Result<Vec<_>,_>>()?),_=>return Err("Неверный фильтр".into())};let scope=atlas_native_storage_contract::search_scope(dir,ids).map_err(|e|e.to_string())?;(snapshot,identity,scope)};
