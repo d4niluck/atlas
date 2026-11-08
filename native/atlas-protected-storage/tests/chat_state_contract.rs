@@ -28,3 +28,17 @@ fn chat_survives_protection_export_and_snapshot_without_plaintext() {
  for path in [&encrypted,&encrypted_copy] {let bytes=fs::read(path).unwrap();assert!(!bytes.windows(secret.len()).any(|w|w==secret.as_bytes()));}
  fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn existing_vault_without_chat_table_is_migrated_when_first_used() {
+ let root=std::env::temp_dir().join(format!("atlas-chat-old-{}",uuid::Uuid::new_v4()));
+ fs::create_dir(&root).unwrap();
+ let path=root.join("vault");let mut vault=Vault::create(&path,"password").unwrap();
+ assert_eq!(vault.chat_get().unwrap()["revision"],0);
+ let state=json!({"messages":[{"role":"user","content":"private test"}],"summary":"","summarized":0,"context_start":0});
+ assert!(vault.chat_set_guarded(0,&state,||Err("closed".into())).is_err());
+ assert_eq!(vault.chat_get().unwrap()["revision"],0);
+ vault.chat_set_guarded(0,&state,||Ok(())).unwrap();drop(vault);
+ assert_eq!(Vault::open(&path,"password").unwrap().chat_get().unwrap()["state"],state);
+ fs::remove_dir_all(root).unwrap();
+}
