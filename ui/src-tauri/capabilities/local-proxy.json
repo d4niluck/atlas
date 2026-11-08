@@ -33,6 +33,10 @@
     "allow-download-nemotron-model",
     "allow-nemotron-model-download-status",
     "allow-prepare-restart",
-    "allow-restart-atlas"
+    "allow-restart-atlas",
+    "allow-voice-model-status",
+    "allow-voice-download-model",
+    "allow-voice-transcribe",
+    "allow-voice-cancel"
   ]
 }

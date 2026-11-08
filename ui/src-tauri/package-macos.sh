@@ -4,8 +4,8 @@
 # Their exact versions and provenance are not verified: this is not a clean CI build.
 set -eu
 setopt pipefail
-if (( $# < 7 || $# > 9 )); then
-  print -u2 'Usage: package-macos.sh PROJECT_ROOT LLAMA_DIR PDFIUM_DIR NODE_MODULES_DIR OUTPUT_APP FAISS_SOURCE LLVM_SOURCE [NATIVE_TARGET_DIR [APP_TARGET_DIR]]'
+if (( $# < 7 || $# > 10 )); then
+  print -u2 'Usage: package-macos.sh PROJECT_ROOT LLAMA_DIR PDFIUM_DIR NODE_MODULES_DIR OUTPUT_APP FAISS_SOURCE LLVM_SOURCE [NATIVE_TARGET_DIR [APP_TARGET_DIR [WHISPER_DIR]]]'
   exit 2
 fi
 project=${1:A}; llama_dir=${2:A}; pdfium_dir=${3:A}; node_modules_dir=${4:A}; output=${5:A}; faiss_source=${6:A}; llvm_source=${7:A}
@@ -39,7 +39,10 @@ print 'Building FAISS and OpenMP from source…'
 ln -s "$node_modules_dir" "$src/ui/node_modules"
 native_target="$work/native-target"; app_target="$work/app-target"
 if (( $# >= 8 )); then native_target=${8:A}; [[ -d "$native_target" ]] || { print -u2 'Native target directory does not exist'; exit 2; }; fi
-if (( $# == 9 )); then app_target=${9:A}; [[ -d "$app_target" ]] || { print -u2 'App target directory does not exist'; exit 2; }; fi
+if (( $# >= 9 )); then app_target=${9:A}; [[ -d "$app_target" ]] || { print -u2 'App target directory does not exist'; exit 2; }; fi
+if (( $# < 10 )); then print -u2 'A compiled whisper.cpp bin directory is required'; exit 2; fi
+whisper_dir=${10:A}
+[[ -x $whisper_dir/whisper-cli ]] || { print -u2 'Missing whisper-cli'; exit 2; }
 print 'Building interface…'
 (cd "$src/ui" && npm run build -- --configLoader runner)
 print 'Building backend and proxy…'
@@ -57,6 +60,17 @@ cp "$src/native/atlas-faiss-rust/vendor/lib/libfaiss.dylib" "$res/libfaiss.dylib
 cp "$src/native/atlas-faiss-rust/vendor/lib/.dylibs/libomp.dylib" "$res/.dylibs/libomp.dylib"
 cp "$src/native/atlas-faiss-rust/vendor/LICENSE" "$src/native/atlas-faiss-rust/vendor/THIRD_PARTY_NOTICES" "$src/native/atlas-faiss-rust/vendor/lib/OPENMP-LICENSE.txt" "$res/licenses/faiss/"
 cp -R "$llama_dir/." "$res/llama/"
+mkdir -p "$res/whisper"
+cp -L "$whisper_dir/whisper-cli" "$res/whisper/"
+cp -L "$whisper_dir/"*.dylib "$res/whisper/"
+for binary in "$res/whisper/"*; do
+  if file "$binary" | grep -q Mach-O; then
+    if otool -l "$binary" | grep -Fq "$whisper_dir"; then install_name_tool -delete_rpath "$whisper_dir" "$binary"; fi
+    if ! otool -l "$binary" | grep -Fq '@loader_path'; then install_name_tool -add_rpath @loader_path "$binary"; fi
+  fi
+done
+mkdir -p "$res/licenses/whisper"
+cp "$src/scripts/macos/WHISPER-LICENSE.txt" "$res/licenses/whisper/LICENSE"
 cp -R "$src/ui/dist/." "$res/ui/"
 cp "$pdfium_dir/lib/libpdfium.dylib" "$res/libpdfium.dylib"
 cp "$pdfium_dir/LICENSE" "$res/licenses/pdfium/"
@@ -69,7 +83,7 @@ version=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(pr
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleExecutable</key><string>atlas</string><key>CFBundleIdentifier</key><string>local.atlas.desktop</string><key>CFBundleName</key><string>Atlas</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIconFile</key><string>icon.icns</string><key>CFBundleShortVersionString</key><string>$version</string><key>CFBundleVersion</key><string>$version</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>NSHighResolutionCapable</key><true/></dict></plist>
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>atlas</string><key>CFBundleIdentifier</key><string>local.atlas.desktop</string><key>CFBundleName</key><string>Atlas</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIconFile</key><string>icon.icns</string><key>CFBundleShortVersionString</key><string>$version</string><key>CFBundleVersion</key><string>$version</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>NSMicrophoneUsageDescription</key><string>Atlas использует микрофон для голосового ввода поиска.</string><key>NSHighResolutionCapable</key><true/></dict></plist>
 PLIST
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --deep --sign - "$app"

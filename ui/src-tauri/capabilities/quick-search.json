@@ -1,7 +1,23 @@
 {
   "identifier": "atlas-quick-search",
   "description": "Compact macOS search window",
-  "windows": ["quick-search"],
-  "remote": {"urls": ["http://127.0.0.1:*/*"]},
-  "permissions": ["core:default", "allow-set-quick-search-mode", "allow-hide-quick-search", "allow-open-quick-result", "allow-open-search-settings"]
+  "windows": [
+    "quick-search"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "allow-set-quick-search-mode",
+    "allow-hide-quick-search",
+    "allow-open-quick-result",
+    "allow-open-search-settings",
+    "allow-voice-model-status",
+    "allow-voice-download-model",
+    "allow-voice-transcribe",
+    "allow-voice-cancel"
+  ]
 }
