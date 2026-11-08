@@ -12,8 +12,10 @@ async function fixture(settingsOverrides={}) {
   b.onResolve({filter:/^react$/},()=>({path:'react',namespace:'fixture'}));
   b.onResolve({filter:/^react\/jsx-runtime$/},()=>({path:'jsx',namespace:'fixture'}));
   b.onResolve({filter:/^\.\/(SearchSettingsDialog|DeviceSettings|RagModelSettings|ModelDownload|AgenticToggle)$/},args=>({path:args.path,namespace:'fixture'}));
+  b.onResolve({filter:/^\.\/VoiceInput$/},()=>({path:'voice',namespace:'fixture'}));
   b.onLoad({filter:/.*/,namespace:'fixture'},args=>{
    if(args.path==='react')return {contents:`export function useState(initial){const h=globalThis.__atlasHooks;const i=h.cursor++;if(!(i in h.values))h.values[i]=(i<2&&initial===null)?h.settings:initial;return [h.values[i],value=>{h.values[i]=typeof value==='function'?value(h.values[i]):value}]} export function useEffect(){} export default {};`,loader:'js'};
+   if(args.path==='voice')return {contents:`export function VoiceSettings(){return null}`,loader:'js'};
    if(args.path==='jsx')return {contents:`export const Fragment=Symbol.for('fixture.fragment');export function jsx(type,props){return {type,props:props||{}}}export const jsxs=jsx;`,loader:'js'};
    const name=args.path.slice(2);return {contents:`export function ${name}() {return null}`,loader:'js'};
   });
@@ -22,7 +24,7 @@ async function fixture(settingsOverrides={}) {
   const out=join(dir,'settings.mjs');
   await build({entryPoints:['src/SearchSettings.tsx'],outfile:out,bundle:true,platform:'node',format:'esm',plugins:[plugin],loader:{'.css':'empty'},logLevel:'silent'});
   const {SearchSettings}=await import(pathToFileURL(out).href);
-  const settings={agentic:false,model:'e2b',embedding_variant:'q8',embedding:'cpu',llm:'cpu',lexical_enabled:true,semantic_enabled:true,rag_enabled:true,idle_enabled:false,idle_minutes:15,image_enabled:false,ngram_enabled:false,...settingsOverrides};
+  const settings={chat_context_limit:8192,agentic:false,model:'e2b',embedding_variant:'q8',embedding:'cpu',llm:'cpu',lexical_enabled:true,semantic_enabled:true,rag_enabled:true,idle_enabled:false,idle_minutes:15,image_enabled:false,ngram_enabled:false,...settingsOverrides};
   globalThis.__atlasHooks={values:[],cursor:0,settings};
   let calls=0;
   const props={onClose(){},onApply:async()=>{},installedE2b:true,installedE4b:false,installedNemotron:false,onRebuild:async()=>{calls++}};

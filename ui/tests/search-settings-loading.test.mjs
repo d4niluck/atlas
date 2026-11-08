@@ -12,9 +12,11 @@ test('пока настройки загружаются, окно не выгл
    b.onResolve({filter:/^react$/},()=>({path:'react',namespace:'fixture'}));
    b.onResolve({filter:/^react\/jsx-runtime$/},()=>({path:'jsx',namespace:'fixture'}));
    b.onResolve({filter:/^\.\/(SearchSettingsDialog|DeviceSettings|RagModelSettings|ModelDownload|AgenticToggle)$/},a=>({path:a.path,namespace:'fixture'}));
+   b.onResolve({filter:/^\.\/VoiceInput$/},()=>({path:'voice',namespace:'fixture'}));
    b.onLoad({filter:/.*/,namespace:'fixture'},a=>{
     if(a.path==='react')return {contents:`export function useState(v){return [v,()=>{}]} export function useEffect(){} export default {};`,loader:'js'};
-    if(a.path==='jsx')return {contents:`export const Fragment=Symbol.for('fixture.fragment');export function jsx(type,props){return {type,props:props||{}}}export const jsxs=jsx;`,loader:'js'};
+    if(a.path==='voice')return {contents:`export function VoiceSettings(){return null}`,loader:'js'};
+   if(a.path==='jsx')return {contents:`export const Fragment=Symbol.for('fixture.fragment');export function jsx(type,props){return {type,props:props||{}}}export const jsxs=jsx;`,loader:'js'};
     return {contents:`export function ${a.path.slice(2)}() {return null}`,loader:'js'};
    });
   }};
