@@ -71,11 +71,16 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   (root/'finish-1').write_text('go');thread.join(30)
   assert not thread.is_alive() and output and isinstance(output[0],tuple) and output[0][0]==200,output
   seen=events();answer=''.join(e['text'] for e in seen if e.get('type')=='token')
+  progress_text=[e.get('text','') for e in seen if e.get('type')=='progress']
+  assert any(x.startswith('План:') for x in progress_text),('agent plan missing',progress_text)
+  assert any(x.startswith('Поиск завершён:') for x in progress_text),('completed search missing from progress',progress_text)
   assert answer=='Первая часть.' and any(e.get('type')=='done' for e in seen),seen
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200,(code,history)
   messages=history['messages'];assert len(messages)==2,messages
   assert messages[0]['role']=='user' and messages[0]['content']==query,messages
   assert messages[1]['role']=='assistant' and messages[1]['content']==answer,messages
+  assert any(x.startswith('План:') for x in messages[1].get('steps',[])),('plan missing from persisted history',messages[1])
+  assert any(x.startswith('Поиск завершён:') for x in messages[1].get('steps',[])),('completion missing from persisted history',messages[1])
   reqid2=str(uuid.uuid4());cancelled_query='cancel-synthetic-secret-538cf';cancelled_output=[]
   def send_cancel():
    try:cancelled_output.append(request(proxy,'POST',prefix+'/chat/send',{'query':cancelled_query,'request_id':reqid2},auth))
