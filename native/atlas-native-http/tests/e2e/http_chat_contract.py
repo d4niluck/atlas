@@ -115,6 +115,15 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   code,_,value=request(proxy,'POST',prefix+'/chat/clear',{},auth);assert code==200 and value.get('ok') is True,(code,value)
   code,_,history=request(proxy,'GET',prefix+'/chat/history',headers=auth);assert code==200 and history['messages']==messages and history['summary']=='',(code,history)
   code,_,copy_history=request(proxy,'GET','/api/w/'+copied+'/chat/history',headers=auth);assert code==200 and copy_history['messages']==messages,('clear affected copied workspace',code,copy_history)
+  (root/'capture-chat').write_text('go');reqid3=str(uuid.uuid4());new_query='new-context-only-b6ae5';third_output=[]
+  def send_after_clear():
+   try:third_output.append(request(proxy,'POST',prefix+'/chat/send',{'query':new_query,'request_id':reqid3},auth))
+   except Exception as e:third_output.append(e)
+  third=threading.Thread(target=send_after_clear,daemon=True);third.start()
+  wait(lambda:(root/'started-3').exists(),'generation after context clearing');(root/'start-3').write_text('go');(root/'finish-3').write_text('go')
+  third.join(30);assert not third.is_alive() and third_output and isinstance(third_output[0],tuple) and third_output[0][0]==200,third_output
+  captured=(root/'chat-calls.jsonl').read_text();assert new_query in captured,'new question missing from model calls'
+  assert query not in captured,'cleared context still contains old question'
   print('PASS chat streaming, cancellation, encrypted conversion, copy and context clearing')
  finally:
   for process in processes:

@@ -18,6 +18,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/apply-template': return self.reply({'prompt':'mock prompt'})
         if self.path == '/tokenize': return self.reply({'tokens':[1,2]})
         if self.path != '/v1/chat/completions': return self.send_error(404)
+        if (root / 'capture-chat').exists():
+            with (root / 'chat-calls.jsonl').open('a') as f: f.write(json.dumps(value,ensure_ascii=False)+'\n')
         if not value.get('stream'):
             content = json.dumps({'action':'answer'})
             return self.reply({'choices':[{'message':{'content':content}}]})
