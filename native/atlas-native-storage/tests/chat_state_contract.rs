@@ -31,3 +31,17 @@ fn invalid_state_and_failed_clear_keep_previous_history() {
  assert_eq!(result["state"]["messages"].as_array().unwrap().len(),2);
  assert_eq!(result["state"]["context_start"],2);assert_eq!(result["state"]["summarized"],2);
 }
+
+#[test]
+fn copied_workspace_keeps_chat_and_revision() {
+ let root=std::env::temp_dir().join(format!("atlas-chat-copy-{}",uuid::Uuid::new_v4()));
+ let copy=root.with_extension("copy");
+ atlas_native_storage_contract::create_workspace(&root).unwrap();
+ let mut db=Connection::open(root.join("atlas.sqlite3")).unwrap();
+ let state=json!({"messages":[{"role":"user","content":"copy history"}],"summary":"","summarized":0,"context_start":0});
+ chat_state::set(&mut db,0,&state,||Ok(())).unwrap();drop(db);
+ atlas_native_storage_contract::snapshot_workspace(&root,&copy).unwrap();
+ let copy_db=Connection::open(copy.join("atlas.sqlite3")).unwrap();
+ assert_eq!(chat_state::get(&copy_db).unwrap(),json!({"state":state,"revision":1}));drop(copy_db);
+ std::fs::remove_dir_all(root).unwrap();std::fs::remove_dir_all(copy).unwrap();
+}
