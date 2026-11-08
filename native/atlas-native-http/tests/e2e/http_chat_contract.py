@@ -79,6 +79,8 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-contract-') as tmp:
   messages=history['messages'];assert len(messages)==2,messages
   assert messages[0]['role']=='user' and messages[0]['content']==query,messages
   assert messages[1]['role']=='assistant' and messages[1]['content']==answer,messages
+  assert messages[1].get('sources')==[],('uncited results mislabeled as citations',messages[1])
+  assert any(item.get('id')==note_id for item in messages[1].get('found_sources',[])),('uncited found source lost',messages[1])
   assert any(x.startswith('План:') for x in messages[1].get('steps',[])),('plan missing from persisted history',messages[1])
   assert any(x.startswith('Поиск завершён:') for x in messages[1].get('steps',[])),('completion missing from persisted history',messages[1])
   reqid2=str(uuid.uuid4());cancelled_query='cancel-synthetic-secret-538cf';cancelled_output=[]
