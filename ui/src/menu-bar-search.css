@@ -21,3 +21,5 @@ html.menu-search-root,html.menu-search-root body,html.menu-search-root #root{bac
 .menu-search-workspace{position:relative;height:34px}.menu-search-workspace::after{content:"⌄";position:absolute;right:10px;top:50%;transform:translateY(-55%);pointer-events:none;color:inherit;font-size:16px}.menu-search .menu-search-workspace select,:root[data-theme=light] .menu-search .menu-search-workspace select{appearance:none;-webkit-appearance:none;height:34px;border:0;box-shadow:none;background:transparent;padding:0 30px 0 8px;color:inherit;cursor:pointer}
 
 .menu-search-semantic-icon{display:block;width:16px;height:16px}
+
+.menu-chat-wrapper:not([hidden]){display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}.menu-chat-wrapper .chat-compose textarea{min-width:0;flex:1}.menu-chat-wrapper .chat-panel{min-height:0}.menu-chat-wrapper .chat-messages{overflow:auto}
