@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='atlas-chat-source-contract-') as tmp:
    status,_,value=request(proxy,method,path,body,auth);return status,value
   if args.workspace=='external':
    disk=root/'disk';disk.mkdir();code,_,cap=request(backend,'POST','/api/workspaces/authorize',{'operation':'export','path':str(disk)},{'X-Atlas-Token':token});assert code==200,(code,cap)
-   code,made=api('POST','/api/workspaces/create-external',{'capability':cap['capability'],'name':'External'});assert code==201,(code,made)
+   code,made=api('POST','/api/workspaces/create-external',{'capability':cap['capability'],'name':'External','protected':False});assert code==201,(code,made)
    code,item=api('POST','/api/workspaces/attach',{'capability':made['capability']});assert code==200,(code,item);wid=item['id']
   else:
    body={'name':'Source fixture'}
