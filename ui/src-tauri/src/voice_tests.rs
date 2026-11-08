@@ -31,6 +31,14 @@ fn model_sizes_and_unknown_quality(){
 }
 
 #[test]
+fn quality_persists_and_rejects_invalid_values(){
+ let dir=temporary("quality");assert_eq!(get_quality(&dir.0).unwrap(),"small");
+ set_quality(&dir.0,"medium").unwrap();assert_eq!(get_quality(&dir.0).unwrap(),"medium");
+ assert!(set_quality(&dir.0,"bad").is_err());assert_eq!(get_quality(&dir.0).unwrap(),"medium");
+ set_quality(&dir.0,"base").unwrap();assert_eq!(get_quality(&dir.0).unwrap(),"base");
+}
+
+#[test]
 fn existing_incomplete_model_is_not_accepted(){
  let dir=temporary("corrupt");let(name,sha,size)=model("base").unwrap();
  std::fs::write(dir.join(name),b"partial").unwrap();
@@ -169,4 +177,38 @@ fn shutdown_waits_for_recording_created_before_child_registration(){
  let audio=recv.recv_timeout(Duration::from_secs(2)).unwrap();assert!(audio.exists());
  shutdown();let removed_before_join=!audio.exists();worker.join().unwrap();
  assert!(removed_before_join,"shutdown returned before the pending recording was removed");
+}
+
+#[test]
+fn quality_reads_default_and_persists_for_a_new_process(){
+ let dir=temporary("quality-persist");
+ assert_eq!(get_quality(&dir.0).unwrap(),"small");
+ set_quality(&dir.0,"medium").unwrap();assert_eq!(get_quality(&dir.0).unwrap(),"medium");
+ let child=Command::new(std::env::current_exe().unwrap()).args(["--exact","voice::tests::quality_reader_process","--nocapture"])
+  .env("ATLAS_VOICE_QUALITY_TEST_DIR",&dir.0).output().unwrap();
+ assert!(child.status.success());assert!(String::from_utf8_lossy(&child.stdout).contains("VOICE_QUALITY=medium"));
+ let files:Vec<_>=std::fs::read_dir(&dir.0).unwrap().map(|r|r.unwrap().file_name()).collect();
+ assert_eq!(files,vec![std::ffi::OsString::from("voice-quality")],"selection must not download a model");
+}
+
+#[test]
+fn quality_reader_process(){
+ let Some(path)=std::env::var_os("ATLAS_VOICE_QUALITY_TEST_DIR")else{return};
+ println!("VOICE_QUALITY={}",get_quality(std::path::Path::new(&path)).unwrap());
+}
+
+#[test]
+fn invalid_quality_does_not_change_saved_choice(){
+ let dir=temporary("quality-invalid");set_quality(&dir.0,"base").unwrap();
+ assert!(set_quality(&dir.0,"unknown").is_err());assert_eq!(get_quality(&dir.0).unwrap(),"base");
+ assert!(set_quality(&dir.0,"../medium").is_err());assert_eq!(get_quality(&dir.0).unwrap(),"base");
+}
+
+#[test]
+fn failed_quality_write_preserves_existing_directory_and_no_temporary_file(){
+ let dir=temporary("quality-failure");let blocked=dir.join("voice-quality");std::fs::create_dir(&blocked).unwrap();
+ std::fs::write(blocked.join("keep"),b"keep").unwrap();assert!(set_quality(&dir.0,"medium").is_err());
+ assert_eq!(std::fs::read(blocked.join("keep")).unwrap(),b"keep");
+ let entries:Vec<_>=std::fs::read_dir(&dir.0).unwrap().map(|e|e.unwrap().file_name()).collect();
+ assert_eq!(entries,vec![std::ffi::OsString::from("voice-quality")]);
 }

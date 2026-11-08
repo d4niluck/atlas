@@ -19,6 +19,8 @@
     "allow-voice-download-model",
     "allow-voice-transcribe",
     "allow-voice-cancel",
-    "allow-voice-repair-model"
+    "allow-voice-repair-model",
+    "allow-voice-get-quality",
+    "allow-voice-set-quality"
   ]
 }

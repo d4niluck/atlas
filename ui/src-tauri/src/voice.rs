@@ -12,6 +12,8 @@ impl Drop for VoiceWorker{fn drop(&mut self){if let Ok(mut count)=VOICE_WORKERS.
 static ACTIVE: Mutex<Option<(String,Child,PathBuf)>> = Mutex::new(None);
 static CANCELLED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MODEL_CACHE: Mutex<Option<(PathBuf,u64,std::time::SystemTime,String,u64,u64,i64,i64)>> = Mutex::new(None);
+static QUALITY_GATE: Mutex<()> = Mutex::new(());
+static QUALITY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub fn downloading()->bool{DOWNLOAD.lock().map(|x|x.is_some()).unwrap_or(true)}
 
 fn model(q:&str)->Result<(&'static str,&'static str,u64),String>{match q{
@@ -20,6 +22,23 @@ fn model(q:&str)->Result<(&'static str,&'static str,u64),String>{match q{
  "medium"=>Ok(("ggml-medium-q5_0.bin","19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",539212467)),
  _=>Err("Неизвестная модель распознавания".into())}}
 fn dir(app:&tauri::AppHandle)->Result<PathBuf,String>{Ok(super::model_data_dir(app)?.join("models"))}
+fn get_quality(path:&Path)->Result<String,String>{
+ let path=path.join("voice-quality");if !path.exists(){return Ok("small".into())}
+ let metadata=fs::metadata(&path).map_err(|e|e.to_string())?;if !metadata.is_file()||metadata.len()>16{return Err("Не удалось прочитать настройки голосового ввода".into())}
+ let value=fs::read_to_string(path).map_err(|e|e.to_string())?;model(&value)?;Ok(value)
+}
+fn set_quality(path:&Path,quality:&str)->Result<(),String>{
+ model(quality)?;fs::create_dir_all(path).map_err(|e|e.to_string())?;
+ let mut candidate=None;
+ for _ in 0..1000{let number=QUALITY_SEQUENCE.fetch_add(1,std::sync::atomic::Ordering::Relaxed);let tmp=path.join(format!(".voice-quality-{}-{number}",std::process::id()));match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp){Ok(file)=>{candidate=Some((tmp,file));break},Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>{},Err(e)=>return Err(e.to_string())}}
+ let (tmp,mut file)=candidate.ok_or("Не удалось сохранить настройку")?;
+ let result=(||{file.write_all(quality.as_bytes()).map_err(|e|e.to_string())?;file.sync_all().map_err(|e|e.to_string())?;fs::rename(&tmp,path.join("voice-quality")).map_err(|e|e.to_string())})();
+ let _=fs::remove_file(tmp);result
+}
+#[tauri::command]
+pub fn voice_get_quality(app:tauri::AppHandle)->Result<String,String>{let _guard=QUALITY_GATE.lock().map_err(|_|"Не удалось прочитать настройки")?;get_quality(&super::model_data_dir(&app)?)}
+#[tauri::command]
+pub fn voice_set_quality(app:tauri::AppHandle,quality:String)->Result<(),String>{let _guard=QUALITY_GATE.lock().map_err(|_|"Не удалось сохранить настройки")?;set_quality(&super::model_data_dir(&app)?,&quality)}
 #[tauri::command]
 pub async fn voice_model_status(app:tauri::AppHandle,quality:String)->Result<String,String>{let(name,sha,size)=model(&quality)?;if DOWNLOAD.lock().map_err(|_|"Ошибка загрузки")?.as_deref()==Some(&quality){return Ok("downloading".into())}let path=dir(&app)?.join(name);tauri::async_runtime::spawn_blocking(move||model_status(&path,sha,size)).await.map_err(|e|e.to_string())?}
 fn model_status(path:&Path,sha:&str,size:u64)->Result<String,String>{
