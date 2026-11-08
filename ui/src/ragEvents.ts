@@ -1,6 +1,6 @@
 import type {SearchResult} from './SearchResults';
 
-type RagEvent = {seq:number;type:'results';results:SearchResult[]} | {seq:number;type:'token';text:string} | {seq:number;type:'reset'} | {seq:number;type:'done'} | {seq:number;type:'error';error:string};
+type RagEvent = {seq:number;type:'progress';stage:string;text:string} | {seq:number;type:'results';results:SearchResult[]} | {seq:number;type:'token';text:string} | {seq:number;type:'reset'} | {seq:number;type:'done'} | {seq:number;type:'error';error:string};
 
 /** Polling keeps streaming working through the native HTTP proxy on macOS and Linux. */
 export async function watchRagEvents(prefix:string,id:string,signal:AbortSignal,onEvent:(event:RagEvent)=>void,fetcher:typeof fetch=fetch,interval=200):Promise<void> {

@@ -40,3 +40,13 @@ test('повтор после незавершённого индекса пол
   assert.equal(result.status,200);assert.equal(waiting,1);assert.deepEqual(ids,['first','second']);
  } finally {globalThis.fetch=original;await rm(dir,{recursive:true,force:true})}
 });
+
+test('доставляет действия чата и завершающий ответ по порядку', async () => {
+ const dir=await mkdtemp(join(tmpdir(),'atlas-chat-events-'));
+ try {
+  const out=join(dir,'events.mjs');await build({entryPoints:['src/ragEvents.ts'],outfile:out,bundle:true,platform:'node',format:'esm'});
+  const {watchRagEvents}=await import(pathToFileURL(out).href);const seen=[];
+  await watchRagEvents('/api/w/example','chat-1',new AbortController().signal,event=>seen.push(event),async()=>new Response(JSON.stringify({events:[{seq:1,type:'progress',stage:'searching',text:'Ищу документы'},{seq:2,type:'token',text:'Ответ'},{seq:3,type:'done'}],done:true}),{status:200}),0);
+  assert.deepEqual(seen.map(e=>e.type),['progress','token','done']);assert.equal(seen[0].text,'Ищу документы');
+ } finally {await rm(dir,{recursive:true,force:true})}
+});
