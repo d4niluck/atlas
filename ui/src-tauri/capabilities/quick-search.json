@@ -18,6 +18,7 @@
     "allow-voice-model-status",
     "allow-voice-download-model",
     "allow-voice-transcribe",
-    "allow-voice-cancel"
+    "allow-voice-cancel",
+    "allow-voice-repair-model"
   ]
 }
