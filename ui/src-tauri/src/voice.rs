@@ -110,4 +110,4 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
 }
 fn clean_voice_output(text:&str)->String{text.replace("[BLANK_AUDIO]", "").trim().to_owned()}
 fn pcm_is_digital_silence(samples:&[u8])->bool{samples.iter().all(|x|*x==0)}
-pub fn shutdown(){SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}}
+pub fn shutdown(){SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,_))=active.take(){let _=child.kill();let _=child.wait();}}if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}}
