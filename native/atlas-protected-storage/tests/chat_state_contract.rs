@@ -42,3 +42,18 @@ fn existing_vault_without_chat_table_is_migrated_when_first_used() {
  assert_eq!(Vault::open(&path,"password").unwrap().chat_get().unwrap()["state"],state);
  fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn paged_history_survives_protection_roundtrip_and_stays_encrypted() {
+ let root=std::env::temp_dir().join(format!("atlas-chat-paged-{}",uuid::Uuid::new_v4()));fs::create_dir(&root).unwrap();
+ let plain=root.join("plain");create_workspace(&plain).unwrap();let mut db=rusqlite::Connection::open(plain.join("atlas.sqlite3")).unwrap();
+ let user=json!({"role":"user","content":"PAGED_PRIVATE_SECRET_48917"});let assistant=json!({"role":"assistant","content":"answer"});
+ chat_state::append(&mut db,0,&user,&assistant,"",0,0,&json!(null),||Ok(())).unwrap();drop(db);
+ let encrypted=root.join("encrypted");let mut vault=Vault::import_plain(&plain,&encrypted,"password").unwrap();vault.set_workspace_name("test").unwrap();
+ assert_eq!(vault.chat_context_guarded(||Ok(())).unwrap()["messages"][0]["content"],"PAGED_PRIVATE_SECRET_48917");
+ let page=vault.chat_page_guarded(None,40,||Ok(())).unwrap();assert_eq!(page["messages"].as_array().unwrap().len(),2);
+ vault.chat_clear_paged_guarded(||Ok(())).unwrap();assert_eq!(vault.chat_context_guarded(||Ok(())).unwrap()["context_start_seq"],2);
+ let exported=root.join("exported");vault.export_plain(&exported).unwrap();drop(vault);
+ let mut db=rusqlite::Connection::open(exported.join("atlas.sqlite3")).unwrap();let result=chat_state::page(&mut db,None,40,||Ok(())).unwrap();assert_eq!(result["messages"],page["messages"]);assert_eq!(chat_state::context(&mut db,||Ok(())).unwrap()["revision"],2);drop(db);
+ let bytes=fs::read(encrypted).unwrap();assert!(!bytes.windows(26).any(|w|w==b"PAGED_PRIVATE_SECRET_48917"));fs::remove_dir_all(root).unwrap();
+}
