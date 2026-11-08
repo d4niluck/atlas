@@ -33,3 +33,13 @@ test('при выключенном умном поиске чат предла�
  const html=await renderWithState([],'','Для чата включите умный поиск в настройках.');
  assert.match(html,/Для чата включите умный поиск/);assert.match(html,/>Открыть настройки поиска<\/button>/);
 });
+
+test('непроцитированные результаты показываются отдельно и с предупреждением',async()=>{
+ const html=await renderWithState([{seq:1,role:'assistant',content:'Текст ответа без ссылки.',found_sources:[{id:'f1',title:'Документ A',text:'Важный найденный фрагмент',start:0,end:26},{id:'f2',title:'Документ B',text:'Ещё один фрагмент',start:0,end:17}]}]);
+ assert.match(html,/Найденные фрагменты/);assert.match(html,/Связь с ответом не проверена/);assert.match(html,/Документ A/);assert.match(html,/Важный найденный фрагмент/);assert.match(html,/Документ B/);
+});
+
+test('при подтверждённой ссылке не создаёт дополнительный неподтверждённый список',async()=>{
+ const source={id:'f1',title:'Документ A',text:'Фрагмент',start:0,end:8};const html=await renderWithState([{seq:1,role:'assistant',content:'Ответ [1].',sources:[source],found_sources:[source]}]);
+ assert.match(html,/Документ A/);assert.doesNotMatch(html,/Связь с ответом не проверена/);assert.doesNotMatch(html,/Найденные фрагменты/);
+});
