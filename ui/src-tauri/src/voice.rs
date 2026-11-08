@@ -98,8 +98,9 @@ fn transcribe(executable:&Path,model:&Path,id:&str,wav:&[u8])->Result<String,Str
   *active=Some((id.to_string(),child,path.clone()));drop(active);
   loop{std::thread::sleep(Duration::from_millis(50));let mut active=ACTIVE.lock().map_err(|_|"Ошибка распознавания")?;
    let done=active.as_mut().ok_or("Распознавание остановлено")?.1.try_wait().map_err(|e|e.to_string())?.is_some();
-   if done{let(_,mut child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let status=child.wait().map_err(|e|e.to_string())?;let(output,overflow)=reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(String::from_utf8_lossy(&output).trim().to_owned())}
+   if done{let(_,mut child,_)=active.take().ok_or("Распознавание остановлено")?;drop(active);let status=child.wait().map_err(|e|e.to_string())?;let(output,overflow)=reader.join().map_err(|_|"Не удалось прочитать результат")?.map_err(|e|e.to_string())?;if !status.success(){return Err("Распознавание остановлено или не удалось".into())}if overflow{return Err("Результат распознавания слишком длинный".into())}return Ok(clean_voice_output(&String::from_utf8_lossy(&output)))}
   }
  })();let _=fs::remove_file(path);result
 }
+fn clean_voice_output(text:&str)->String{text.replace("[BLANK_AUDIO]", "").trim().to_owned()}
 pub fn shutdown(){SHUTTING_DOWN.store(true,std::sync::atomic::Ordering::SeqCst);if let Ok(mut active)=ACTIVE.lock(){if let Some((_,mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}if let Ok(mut active)=DOWNLOAD_CHILD.lock(){if let Some((mut child,path))=active.take(){let _=child.kill();let _=child.wait();let _=fs::remove_file(path);}}}

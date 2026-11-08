@@ -1,6 +1,14 @@
 use super::*;
 use std::{os::unix::fs::PermissionsExt, thread, time::{Duration,Instant}};
 
+#[test]
+fn silence_markers_do_not_replace_the_search_query(){
+ assert_eq!(clean_voice_output("  [BLANK_AUDIO]\n"),"");
+ assert_eq!(clean_voice_output("[BLANK_AUDIO] [BLANK_AUDIO]"),"");
+ assert_eq!(clean_voice_output("  Найди заметку про RAG.  "),"Найди заметку про RAG.");
+ assert_eq!(clean_voice_output("[BLANK_AUDIO] Найди заметку"),"Найди заметку");
+}
+
 struct TestDir(PathBuf);
 impl std::ops::Deref for TestDir{type Target=Path;fn deref(&self)->&Path{&self.0}}
 impl Drop for TestDir{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
