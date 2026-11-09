@@ -35,3 +35,10 @@ test('настройки показывают три уровня качеств
  const html=await render('src/VoiceInput.tsx','VoiceSettings');
  for(const text of ['Низкое','Среднее','Высокое','60 МБ','190 МБ','539 МБ'])assert.ok(html.includes(text),`не видно «${text}»`);
 });
+
+test('в чате голосовой ввод доступен рядом с полем сообщения',async()=>{
+ const html=await render('src/ChatPanel.tsx','ChatPanel',{prefix:'/api/w/test',objectIds:[],visible:true,onOpen(){},readiness:null,onOpenSettings(){}});
+ assert.match(html,/aria-label="Голосовой ввод"/);
+ assert.match(html,/aria-label="Сообщение"/);
+ assert.doesNotMatch(html,/Говорите · нажмите/);
+});

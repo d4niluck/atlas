@@ -9,3 +9,15 @@
 .voice-spinner{width:15px;height:15px;flex:none;border:2px solid #766991;border-top-color:#d1c2fb;border-radius:50%;animation:voice-spin .8s linear infinite}
 @keyframes voice-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.voice-spinner{animation:none}.voice-wave i{transition:none}}
+/* Position the live waveform over the editable field while retaining text space. */
+.voice-field{display:flex;align-items:center;gap:4px;position:relative;flex:1;min-width:0}
+.voice-field .voice-control{position:static;flex:none}
+.voice-field input,.voice-field textarea{flex:1;min-width:0}
+.voice-field .voice-wave{position:absolute;right:12px;top:50%;transform:translateY(-50%);pointer-events:none;z-index:1}
+.voice-field:has(.voice-wave) input,.voice-field:has(.voice-wave) textarea{padding-right:50px}
+.voice-field-reverse .voice-wave{left:12px;right:auto}
+.voice-field-reverse:has(.voice-wave) input{padding-left:50px;padding-right:10px}
+.chat-compose .voice-field{align-items:flex-end}
+.chat-compose .voice-field textarea{width:100%}
+.chat-compose .voice-control>button{width:32px;height:40px;background:transparent;color:#c4bdcf;border:0;font-size:15px}
+:root[data-theme=light] .chat-compose .voice-control>button{color:#51465a}
