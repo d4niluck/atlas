@@ -60,3 +60,22 @@ test('короткий щелчок внутри длинного блока н�
  assert.equal(d.feed(block),false);
  assert.equal(d.feed(audio(0,2000)),false,'короткий шум не должен включить отсчёт до речи');
 }));
+
+test('короткая фраза из 160 мс не теряется, если после неё 2 секунды тишины',async()=>withDetector(create=>{
+ const d=create(rate);assert.equal(d.feed(audio(0.02,160)),false);
+ assert.equal(d.feed(audio(0,2000)),true);
+}));
+
+test('постепенно затихающая речь не обрывается до двух секунд тишины',async()=>withDetector(create=>{
+ const d=create(rate);assert.equal(d.feed(audio(0.05,200)),false);
+ for(const level of [0.02,0.01,0.006,0.003])assert.equal(d.feed(audio(level,400)),false);
+ assert.equal(d.feed(audio(0.001,1900)),false);
+ assert.equal(d.feed(audio(0.001,100)),true);
+}));
+
+test('тихий фоновый шум не прерывает отсчёт после речи и не считается речью до начала',async()=>withDetector(create=>{
+ const d=create(rate);assert.equal(d.feed(audio(0.001,4000)),false);
+ assert.equal(d.feed(audio(0.02,200)),false);
+ assert.equal(d.feed(audio(0.001,1900)),false);
+ assert.equal(d.feed(audio(0.001,100)),true);
+}));
