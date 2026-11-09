@@ -4,20 +4,21 @@
 .voice-message button{margin:4px;color:#fff;background:#455a85;border:0;border-radius:6px;padding:5px}
 .voice-feedback{position:absolute;top:calc(100% + 8px);left:0;z-index:30;display:flex;align-items:center;gap:10px;width:max-content;max-width:min(290px,75vw);padding:10px 12px;border:1px solid rgba(193,180,226,.24);border-radius:12px;background:#282631;color:#f6f2ff;box-shadow:0 8px 24px #0005;font-size:12px;line-height:1.35}
 .menu-search-form .voice-feedback{left:auto;right:0}
-.voice-wave{display:flex;align-items:center;justify-content:center;gap:3px;width:32px;height:25px;flex:none}
-.voice-wave i{width:3px;min-height:4px;border-radius:4px;background:#c9b6ff;transition:height .1s ease}
+.voice-wave{display:flex;align-items:center;justify-content:space-between;gap:1px}
+.voice-wave i{flex:1 1 0;max-width:3px;min-height:4px;border-radius:4px;background:#c9b6ff;transition:height .1s ease}
 :root[data-theme=light] .voice-wave i{background:#594380}
 .voice-spinner{width:15px;height:15px;flex:none;border:2px solid #766991;border-top-color:#d1c2fb;border-radius:50%;animation:voice-spin .8s linear infinite}
 @keyframes voice-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.voice-spinner{animation:none}.voice-wave i{transition:none}}
-/* Position the live waveform over the editable field while retaining text space. */
+/* Keep the editable value intact underneath the recording indicator. */
 .voice-field{display:flex;align-items:center;gap:4px;position:relative;flex:1;min-width:0}
 .voice-field .voice-control{position:static;flex:none}
 .voice-field input,.voice-field textarea{flex:1;min-width:0}
-.voice-field .voice-wave{position:absolute;right:12px;top:50%;transform:translateY(-50%);pointer-events:none;z-index:1}
-.voice-field:has(.voice-wave) input,.voice-field:has(.voice-wave) textarea{padding-right:50px}
-.voice-field-reverse .voice-wave{left:12px;right:auto}
-.voice-field-reverse:has(.voice-wave) input{padding-left:50px;padding-right:10px}
+.voice-field .voice-wave{position:absolute;inset:0 12px 0 46px;pointer-events:none;z-index:1}
+.voice-field-reverse .voice-wave{left:12px;right:46px}
+.voice-field:has(.voice-wave) input,.voice-field:has(.voice-wave) textarea{color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent}
+.voice-field:has(.voice-wave) input::placeholder,.voice-field:has(.voice-wave) textarea::placeholder{opacity:0}
+.voice-field:has(.voice-wave) input::selection,.voice-field:has(.voice-wave) textarea::selection{background:transparent}
 .chat-compose .voice-field{align-items:flex-end}
 .chat-compose .voice-field textarea{width:100%}
 .chat-compose .voice-control>button{width:32px;height:40px;background:transparent;color:#c4bdcf;border:0;font-size:15px}
