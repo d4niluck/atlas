@@ -3,7 +3,6 @@
 .voice-message{position:absolute;top:100%;right:0;z-index:20;min-width:200px;padding:10px;border-radius:10px;background:#292d35;color:#fff;box-shadow:0 8px 24px #0005;font-size:13px}
 .voice-message button{margin:4px;color:#fff;background:#455a85;border:0;border-radius:6px;padding:5px}
 .voice-feedback{position:absolute;top:calc(100% + 8px);left:0;z-index:30;display:flex;align-items:center;gap:10px;width:max-content;max-width:min(290px,75vw);padding:10px 12px;border:1px solid rgba(193,180,226,.24);border-radius:12px;background:#282631;color:#f6f2ff;box-shadow:0 8px 24px #0005;font-size:12px;line-height:1.35}
-.menu-search-form .voice-feedback{left:auto;right:0}
 .voice-wave{display:flex;align-items:center;justify-content:space-between;gap:1px}
 .voice-wave i{flex:1 1 0;max-width:3px;min-height:4px;border-radius:4px;background:#c9b6ff;transition:height .1s ease}
 :root[data-theme=light] .voice-wave i{background:#594380}
@@ -22,5 +21,12 @@
 .chat-compose .voice-field{align-items:flex-end}
 .chat-compose .voice-field textarea{width:100%}
 .chat-compose .voice-control>button{width:32px;height:40px;background:transparent;color:#c4bdcf;border:0;font-size:15px}
-.chat-compose .voice-feedback,.chat-compose .voice-message{top:auto;bottom:calc(100% + 8px)}
+.chat-compose .voice-message{top:auto;bottom:calc(100% + 8px)}
 :root[data-theme=light] .chat-compose .voice-control>button{color:#51465a}
+/* Show preparation and recognition in the same field as the waveform. */
+.voice-field .voice-feedback{position:absolute;inset:0 12px 0 46px;z-index:1;width:auto;max-width:none;padding:0;border:0;background:transparent;box-shadow:none;pointer-events:none;color:#d5c9ee;overflow:hidden;white-space:nowrap}
+.voice-field-reverse .voice-feedback{left:12px;right:46px}
+:root[data-theme=light] .voice-field .voice-feedback{color:#51465a}
+.voice-field:has(.voice-feedback) input,.voice-field:has(.voice-feedback) textarea{color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent}
+.voice-field:has(.voice-feedback) input::placeholder,.voice-field:has(.voice-feedback) textarea::placeholder{opacity:0}
+.voice-field:has(.voice-feedback) input::selection,.voice-field:has(.voice-feedback) textarea::selection{background:transparent}
