@@ -8,7 +8,7 @@ export function signalLevel(samples:Float32Array):number {
 // A short noise spike must not arm silence detection; keep recording before speech.
 export function createSilenceDetector(sampleRate:number){
  const frameSamples=Math.max(1,Math.round(sampleRate/100));
- let speechSamples=0,silentSamples=0,started=false,stopped=false,power=0,count=0;
+ let speechSamples=0,initialGapSamples=0,silentSamples=0,started=false,stopped=false,power=0,count=0;
  return {feed(samples:Float32Array):boolean{
   if(stopped||!samples.length)return false;
   for(const value of samples){
@@ -16,7 +16,8 @@ export function createSilenceDetector(sampleRate:number){
    if(count<frameSamples)continue;
    const rms=Math.sqrt(power/count);power=0;count=0;
    if(!started){
-    speechSamples=rms>=0.004?speechSamples+frameSamples:0;
+    if(rms>=0.004){speechSamples+=frameSamples;initialGapSamples=0}
+    else if(speechSamples){initialGapSamples+=frameSamples;if(initialGapSamples>sampleRate*0.1){speechSamples=0;initialGapSamples=0}}
     if(speechSamples>=sampleRate*0.15){started=true;silentSamples=0}
    }else{
     if(rms>=0.0025)silentSamples=0;else silentSamples+=frameSamples;

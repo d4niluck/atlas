@@ -79,3 +79,17 @@ test('тихий фоновый шум не прерывает отсчёт по
  assert.equal(d.feed(audio(0.001,1900)),false);
  assert.equal(d.feed(audio(0.001,100)),true);
 }));
+
+test('короткая естественная пауза между слогами не мешает определить начало речи',async()=>withDetector(create=>{
+ const d=create(rate);assert.equal(d.feed(audio(0.02,100)),false);
+ assert.equal(d.feed(audio(0,40)),false);
+ assert.equal(d.feed(audio(0.02,100)),false);
+ assert.equal(d.feed(audio(0,2000)),true);
+}));
+
+test('разделённые паузой щелчки не составляют речь',async()=>withDetector(create=>{
+ const d=create(rate);assert.equal(d.feed(audio(0.1,100)),false);
+ assert.equal(d.feed(audio(0,120)),false);
+ assert.equal(d.feed(audio(0.1,100)),false);
+ assert.equal(d.feed(audio(0,2000)),false);
+}));
