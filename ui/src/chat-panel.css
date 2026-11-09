@@ -24,3 +24,8 @@
 :root[data-theme=light] .chat-progress,:root[data-theme=light] .chat-message .chat-progress{background:transparent;border:0;color:#62566c}
 :root[data-theme=light] .chat-progress summary{color:#665078}
 :root[data-theme=light] .chat-progress ol{color:#62566c}
+
+/* Scrolling belongs to the message list; keep the composer fixed. */
+.search-panel.search-panel-chat{overflow:clip;min-height:0}
+.chat-messages{overscroll-behavior:contain}
+.chat-compose{flex:none}
