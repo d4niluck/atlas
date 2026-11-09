@@ -6,6 +6,7 @@
 .menu-search-form .voice-feedback{left:auto;right:0}
 .voice-wave{display:flex;align-items:center;justify-content:center;gap:3px;width:32px;height:25px;flex:none}
 .voice-wave i{width:3px;min-height:4px;border-radius:4px;background:#c9b6ff;transition:height .1s ease}
+:root[data-theme=light] .voice-wave i{background:#594380}
 .voice-spinner{width:15px;height:15px;flex:none;border:2px solid #766991;border-top-color:#d1c2fb;border-radius:50%;animation:voice-spin .8s linear infinite}
 @keyframes voice-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.voice-spinner{animation:none}.voice-wave i{transition:none}}
@@ -20,4 +21,5 @@
 .chat-compose .voice-field{align-items:flex-end}
 .chat-compose .voice-field textarea{width:100%}
 .chat-compose .voice-control>button{width:32px;height:40px;background:transparent;color:#c4bdcf;border:0;font-size:15px}
+.chat-compose .voice-feedback,.chat-compose .voice-message{top:auto;bottom:calc(100% + 8px)}
 :root[data-theme=light] .chat-compose .voice-control>button{color:#51465a}
