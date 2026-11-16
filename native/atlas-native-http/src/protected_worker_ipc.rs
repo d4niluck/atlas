@@ -25,23 +25,25 @@ fn hidden_usage_map(base:&[Value],snapshot:Option<&atlas_faiss_probe::overlay::D
 #[cfg(test)] fn hidden_usage(base:&[Value],snapshot:Option<&atlas_faiss_probe::overlay::DeltaSnapshot>,delta:&[Value],trash:&[String])->Result<(usize,usize),String>{Ok(hidden_usage_map(base,snapshot,delta,trash)?.values().fold((0usize,0usize),|(c,b),(x,y)|(c.saturating_add(*x),b.saturating_add(*y))))}
 fn vector(v:&Value)->Result<[f32;512],String>{let rows=v.as_array().filter(|x|x.len()==512).ok_or("invalid vector")?;let mut result=[0f32;512];for(i,x)in rows.iter().enumerate(){let value=x.as_f64().filter(|v|v.is_finite()&&v.abs()<=f32::MAX as f64).ok_or("invalid vector")?;result[i]=value as f32}Ok(result)}
 fn write_marker(dir:&Path,guard:&crate::protected_external_guard::ProtectedExternalGuard,name:&str)->Result<(),String>{use std::io::Write;use std::os::unix::fs::OpenOptionsExt;let marker=dir.join(".workspace.json");if marker.symlink_metadata().is_ok_and(|m|m.file_type().is_symlink()){return Err("invalid workspace marker".into())}let tmp=dir.join(format!(".workspace-{}.tmp",uuid::Uuid::new_v4().simple()));let result=(||->Result<(),String>{let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp).map_err(|_|"workspace unavailable")?;file.write_all(json!({"name":name,"protected":true}).to_string().as_bytes()).map_err(|_|"workspace unavailable")?;file.sync_all().map_err(|_|"workspace unavailable")?;guard.verify()?;std::fs::rename(&tmp,&marker).map_err(|_|"workspace unavailable")?;std::fs::File::open(dir).and_then(|f|f.sync_all()).map_err(|_|"workspace unavailable")?;Ok(())})();if result.is_err(){let _=std::fs::remove_file(tmp);}result}
-struct Upload { sender:mpsc::SyncSender<Option<Vec<u8>>>, task:std::thread::JoinHandle<Result<(),String>>, expected:u64, written:u64, id:String, stream:String }
+#[cfg(any(feature="test-hook",feature="agent-upload"))]
+struct AgentSpool {spool:crate::agent_encrypted_spool::EncryptedSpool, actor:String, request:String, digest:String, title:String, stream:String}
+struct Upload { sender:mpsc::SyncSender<Option<Vec<u8>>>, task:std::thread::JoinHandle<Result<Value,String>>, expected:u64, written:u64, id:String, stream:String }
 struct ChannelReader { receiver:mpsc::Receiver<Option<Vec<u8>>>, current:std::io::Cursor<Vec<u8>> }
 impl Read for ChannelReader {fn read(&mut self, out:&mut [u8])->io::Result<usize>{loop {let n=self.current.read(out)?;if n>0||out.is_empty(){return Ok(n)}match self.receiver.recv(){Ok(Some(bytes))=>self.current=std::io::Cursor::new(bytes),Ok(None)=>return Ok(0),Err(_)=>return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"upload cancelled"))}}}}
 
 // The caller must hold the verified directory and session lock for this object's lifetime.
-pub struct ProtectedWorker { vault: Option<Arc<Mutex<Vault>>>, dir:PathBuf, upload:Option<Upload>, guard:Arc<crate::protected_external_guard::ProtectedExternalGuard>, downloads:HashMap<String,Download>, pending:Option<PendingIndex>, index_images:bool, exporting:bool, source_epoch:u64, snapshot_cache:Option<(u64,bool,String)> }
+pub struct ProtectedWorker { #[cfg(any(feature="test-hook",feature="agent-upload"))] agent_spool:Option<AgentSpool>, vault: Option<Arc<Mutex<Vault>>>, dir:PathBuf, upload:Option<Upload>, guard:Arc<crate::protected_external_guard::ProtectedExternalGuard>, downloads:HashMap<String,Download>, pending:Option<PendingIndex>, index_images:bool, exporting:bool, source_epoch:u64, snapshot_cache:Option<(u64,bool,String)> }
 impl ProtectedWorker {
- pub fn new(dir:&Path,guard:Arc<crate::protected_external_guard::ProtectedExternalGuard>)->Self { Self{vault:None,dir:dir.to_owned(),upload:None,guard,downloads:HashMap::new(),pending:None,index_images:false,exporting:false,source_epoch:0,snapshot_cache:None} }
+ pub fn new(dir:&Path,guard:Arc<crate::protected_external_guard::ProtectedExternalGuard>)->Self { Self{#[cfg(any(feature="test-hook",feature="agent-upload"))] agent_spool:None,vault:None,dir:dir.to_owned(),upload:None,guard,downloads:HashMap::new(),pending:None,index_images:false,exporting:false,source_epoch:0,snapshot_cache:None} }
  pub fn dispatch(&mut self, command:&Value)->Result<Value,String> {
   let action=command["action"].as_str().ok_or("invalid action")?;
   let result=self.dispatch_inner(command);
-  if result.is_ok()&&matches!(action,"unlock"|"close"|"export-resume"|"upload-finish"|"create-note"|"recover-note-drafts"|"update-note"|"put-note"|"rename-file"|"undo-created"|"delete-objects"|"restore-objects"|"set-description"){self.source_epoch=self.source_epoch.wrapping_add(1);}
+  if result.is_ok()&&matches!(action,"unlock"|"close"|"export-resume"|"upload-finish"|"agent-upload-finish"|"agent-create-note"|"create-note"|"recover-note-drafts"|"update-note"|"put-note"|"rename-file"|"undo-created"|"delete-objects"|"restore-objects"|"set-description"){self.source_epoch=self.source_epoch.wrapping_add(1);}
   result
  }
  fn dispatch_inner(&mut self, command:&Value)->Result<Value,String> {
   let action=command["action"].as_str().ok_or("invalid action")?;
-  if let Err(error)=self.guard.verify(){if let Some(upload)=self.upload.take(){drop(upload.sender);let _=upload.task.join();}self.vault.take();return Err(error)}
+  if let Err(error)=self.guard.verify(){#[cfg(any(feature="test-hook",feature="agent-upload"))] {self.agent_spool.take();}if let Some(upload)=self.upload.take(){drop(upload.sender);let _=upload.task.join();}self.vault.take();return Err(error)}
   if action=="export-prepare" {
    if self.exporting{return Err("Копирование уже выполняется".into())}
    if self.upload.is_some(){return Err("Дождитесь окончания загрузки".into())}
@@ -62,19 +64,74 @@ impl ProtectedWorker {
   if action=="export-check" {if !self.exporting{return Err("Копирование не выполняется".into())}self.guard.verify()?;return Ok(json!({"ok":true}))}
   if self.exporting{return Err("Дождитесь окончания копирования".into())}
   if action=="unlock" { if self.vault.is_some(){return Err("Пространство уже открыто".into())} let password=command["password"].as_str().ok_or("Укажите пароль")?;let vault=Vault::open(&self.dir.join("workspace.atlas"),password)?;let marker=self.dir.join(".workspace.json");if marker.symlink_metadata().is_ok_and(|m|m.file_type().is_symlink()){return Err("invalid workspace marker".into())}let metadata={use std::os::unix::fs::OpenOptionsExt;let mut bytes=Vec::new();std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&marker).ok().and_then(|f|f.take(16385).read_to_end(&mut bytes).ok()).filter(|_|bytes.len()<=16384).and_then(|_|serde_json::from_slice::<Value>(&bytes).ok())};let name=if metadata.as_ref().is_some_and(|v|v["pending_copy_name"]==true){let name=metadata.as_ref().and_then(|v|v["name"].as_str()).map(str::trim).filter(|v|!v.is_empty()&&v.chars().count()<=100).ok_or("invalid workspace name")?;vault.set_workspace_name_guarded(name,||self.guard.verify())?;name.to_owned()}else{vault.workspace_name()?};write_marker(&self.dir,&self.guard,&name)?;self.vault=Some(Arc::new(Mutex::new(vault)));return Ok(json!({"name":name})); }
-  if action=="upload-begin" {if self.upload.is_some(){return Err("Загрузка уже идёт".into())}let vault=self.vault.as_ref().ok_or("Пространство заблокировано")?.clone();let title=command["name"].as_str().filter(|v|!v.is_empty()&&!v.contains(['/', '\\', '\0'])).ok_or("invalid name")?.to_owned();let expected=command["size"].as_u64().filter(|v|*v<=10*1024*1024*1024).ok_or("invalid size")?;let id=command["id"].as_str().map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());let file_id=id.clone();let guard=self.guard.clone();let (sender,receiver)=mpsc::sync_channel(2);let task=std::thread::spawn(move||{let mut vault=vault.lock().map_err(|_|"workspace unavailable")?;vault.put_file_atomic(&file_id,&title,ChannelReader{receiver,current:std::io::Cursor::new(Vec::new())},||guard.verify())?;Ok(())});let stream=uuid::Uuid::new_v4().simple().to_string();self.upload=Some(Upload{sender,task,expected,written:0,id,stream:stream.clone()});return Ok(json!({"stream":stream}))}
+  if action=="upload-begin" {if self.upload.is_some(){return Err("Загрузка уже идёт".into())}let vault=self.vault.as_ref().ok_or("Пространство заблокировано")?.clone();let title=command["name"].as_str().filter(|v|!v.is_empty()&&!v.contains(['/', '\\', '\0'])).ok_or("invalid name")?.to_owned();let expected=command["size"].as_u64().filter(|v|*v<=10*1024*1024*1024).ok_or("invalid size")?;let id=command["id"].as_str().map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());let file_id=id.clone();let guard=self.guard.clone();let (sender,receiver)=mpsc::sync_channel(2);let task=std::thread::spawn(move||{let mut vault=vault.lock().map_err(|_|"workspace unavailable")?;vault.put_file_atomic(&file_id,&title,ChannelReader{receiver,current:std::io::Cursor::new(Vec::new())},||guard.verify())?;Ok(json!({"id":file_id}))});let stream=uuid::Uuid::new_v4().simple().to_string();self.upload=Some(Upload{sender,task,expected,written:0,id,stream:stream.clone()});return Ok(json!({"stream":stream}))}
+  #[cfg(any(feature="test-hook",feature="agent-upload"))]
+  if action=="agent-upload-begin" {
+   if self.upload.is_some()||self.agent_spool.is_some(){return Err("Загрузка уже идёт".into())}
+   if self.vault.is_none(){return Err("Пространство заблокировано".into())}
+   let actor=command["actor"].as_str().filter(|v|!v.is_empty()).ok_or("invalid actor")?.to_owned();
+   let request=command["request_id"].as_str().filter(|v|!v.is_empty()&&v.len()<=128).ok_or("invalid request")?.to_owned();
+   let digest=command["digest"].as_str().filter(|v|v.len()==64&&v.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase())).ok_or("invalid digest")?.to_owned();
+   let title=command["name"].as_str().filter(|v|!v.is_empty()&&!v.contains(['/', '\\','\0'])).ok_or("invalid name")?.to_owned();
+   let expected=command["size"].as_u64().filter(|v|*v<=10*1024*1024*1024).ok_or("invalid size")?;
+   let spool=crate::agent_encrypted_spool::EncryptedSpool::new(expected)?;let stream=uuid::Uuid::new_v4().simple().to_string();
+   self.agent_spool=Some(AgentSpool{spool,actor,request,digest,title,stream:stream.clone()});return Ok(json!({"stream":stream}))
+  }
+  #[cfg(any(feature="test-hook",feature="agent-upload"))]
+  if action=="upload-chunk"&&self.agent_spool.is_some(){#[cfg(feature="test-hook")] if let Some(dir)=std::env::var_os("ATLAS_TEST_AGENT_UPLOAD_CHUNK_BARRIER"){let dir=std::path::Path::new(&dir);if dir.join("enabled").exists(){let _=std::fs::write(dir.join("ready"),b"ready");let deadline=std::time::Instant::now()+std::time::Duration::from_secs(15);while !dir.join("resume").exists()&&std::time::Instant::now()<deadline{std::thread::sleep(std::time::Duration::from_millis(10));}}}let a=self.agent_spool.as_mut().ok_or("no upload")?;if command["stream"].as_str()!=Some(a.stream.as_str()){return Err("invalid stream".into())}let values=command["bytes"].as_array().filter(|v|!v.is_empty()&&v.len()<=65536).ok_or("invalid chunk")?;let bytes=values.iter().map(|v|v.as_u64().filter(|n|*n<=255).map(|n|n as u8).ok_or("invalid byte")).collect::<Result<Vec<_>,_>>()?;let received=a.spool.push(&bytes)?;return Ok(json!({"received":received}))}
+  #[cfg(any(feature="test-hook",feature="agent-upload"))]
+  if action=="agent-upload-finish" {if self.agent_spool.as_ref().is_none_or(|a|command["stream"].as_str()!=Some(a.stream.as_str())){return Err("invalid stream".into())}let a=self.agent_spool.take().ok_or("no upload")?;let reader=a.spool.reader()?;let vault=self.vault.as_ref().ok_or("Пространство заблокировано")?;let mut vault=vault.lock().map_err(|_|"workspace unavailable")?;return vault.agent_put_file(&a.actor,&a.request,&a.title,&a.digest,reader,||self.guard.verify())}
+  #[cfg(any(feature="test-hook",feature="agent-upload"))]
+  if action=="upload-cancel"&&self.agent_spool.as_ref().is_some_and(|a|command["stream"].as_str()==Some(a.stream.as_str())){self.agent_spool.take();return Ok(json!({"ok":true}))}
+  #[cfg(any(feature="test-hook",feature="agent-upload"))]
+  if action=="close" {self.agent_spool.take();}
   if action=="upload-chunk" {let upload=self.upload.as_mut().ok_or("no upload")?;if command["stream"].as_str()!=Some(upload.stream.as_str()){return Err("invalid stream".into())}let values=command["bytes"].as_array().filter(|v|!v.is_empty()&&v.len()<=65536).ok_or("invalid chunk")?;let bytes=values.iter().map(|x|x.as_u64().filter(|v|*v<=255).map(|v|v as u8).ok_or("invalid byte")).collect::<Result<Vec<_>,_>>()?;if upload.written+bytes.len() as u64>upload.expected{return Err("upload too large".into())}upload.sender.send(Some(bytes)).map_err(|_|"upload failed")?;upload.written+=values.len() as u64;return Ok(json!({"received":upload.written}))}
-  if action=="upload-finish" {if self.upload.as_ref().is_none_or(|u|command["stream"].as_str()!=Some(u.stream.as_str())){return Err("invalid stream".into())}let upload=self.upload.take().ok_or("no upload")?;if upload.written!=upload.expected {drop(upload.sender);let _=upload.task.join();return Err("incomplete upload".into())}upload.sender.send(None).map_err(|_|"upload failed")?;drop(upload.sender);upload.task.join().map_err(|_|"upload failed")??;return Ok(json!({"id":upload.id}))}
+  if action=="upload-finish" || action=="agent-upload-finish" {if self.upload.as_ref().is_none_or(|u|command["stream"].as_str()!=Some(u.stream.as_str())){return Err("invalid stream".into())}let upload=self.upload.take().ok_or("no upload")?;if upload.written!=upload.expected {drop(upload.sender);let _=upload.task.join();return Err("incomplete upload".into())}upload.sender.send(None).map_err(|_|"upload failed")?;drop(upload.sender);let result=upload.task.join().map_err(|_|"upload failed")??;return Ok(result)}
   if action=="upload-cancel"||action=="close" {if action=="upload-cancel"&&self.upload.as_ref().is_none_or(|u|command["stream"].as_str()!=Some(u.stream.as_str())){return Err("invalid stream".into())}if let Some(upload)=self.upload.take(){drop(upload.sender);let _=upload.task.join();}if action=="close"{self.vault.take();}return Ok(json!({"ok":true}))}
   if self.upload.is_some(){return Err("Дождитесь окончания загрузки".into())}
   let mut vault=self.vault.as_ref().ok_or("Пространство заблокировано")?.lock().map_err(|_|"workspace unavailable")?;
   match action {
+   "agent-activity-sync"=>{let owner=command["owner"].as_str().ok_or("invalid owner")?;let epoch=command["epoch"].as_i64().ok_or("invalid epoch")?;vault.agent_activity_sync_epoch(owner,epoch)?;Ok(json!({"synced":true}))},
+   "agent-activity-save"=>{let id=command["event_uuid"].as_str().ok_or("invalid id")?;let kind=command["kind"].as_str().ok_or("invalid kind")?;let owner=command["owner"].as_str().ok_or("invalid owner")?;let epoch=command["epoch"].as_i64().ok_or("invalid epoch")?;vault.agent_activity_sync_epoch(owner,epoch)?;vault.agent_activity_save_summary(owner,epoch,id,kind,&command["request"],&command["response"])?;Ok(json!({"saved":true}))},
+   "agent-activity-get"=>{let id=command["event_uuid"].as_str().ok_or("invalid id")?;Ok({let owner=command["owner"].as_str().ok_or("invalid owner")?;let epoch=command["epoch"].as_i64().ok_or("invalid epoch")?;vault.agent_activity_sync_epoch(owner,epoch)?;vault.agent_activity_get(owner,epoch,id)?}.unwrap_or(Value::Null))},
    "purge-expired"=>{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|"invalid time")?.as_secs() as i64;let cutoff=now.saturating_sub(86400);let version=vault.semantic_snapshot_version()?;let expired=vault.semantic_expired_trash_ids(cutoff)?;let prepared=prepare_expired_index(&vault,&expired)?;let mut index_preserved=false;let purged=if let Some((bytes,mut metadata,hidden,images,revision,current_index))=prepared{metadata["revision"]=json!(revision);metadata["source_hash"]=json!(revision);metadata["images"]=json!(images);let keys=metadata["records"].as_array().ok_or("invalid metadata")?.iter().map(|r|r["id"].as_str().map(str::to_owned).ok_or("invalid id")).collect::<Result<Vec<_>,_>>()?;let mut overlay=atlas_faiss_probe::overlay::FlatOverlay::new(atlas_faiss_probe::Index::from_memory(&bytes).map_err(str::to_string)?,keys)?;for id in hidden{overlay.hide(&id)?}let snapshot=overlay.snapshot_delta()?;let model=metadata["key"].as_str().ok_or("invalid model")?;let manifest=overlay_manifest(model,&revision,images,&metadata["index_sha256"],&snapshot,&[],0);let count=vault.purge_trash_before_index_guarded(cutoff,Some((version,&expired,&bytes,&metadata,&snapshot.index,&manifest)),||self.guard.verify())?;index_preserved=current_index&&count>0;count>0}else{vault.purge_trash_before_guarded(cutoff,||self.guard.verify())?>0};if purged{self.source_epoch=self.source_epoch.wrapping_add(1)}Ok(json!({"purged":purged,"index_preserved":index_preserved}))},
    "workspace-info"=>Ok(json!({"name":vault.workspace_name()?,"identity":vault.workspace_identity_guarded(||self.guard.verify())?,"protected":true})),
    "workspace-rename"=>{let name=command["name"].as_str().map(str::trim).filter(|v|!v.is_empty()&&v.chars().count()<=100).ok_or("invalid name")?;vault.set_workspace_name_guarded(name,||self.guard.verify())?;write_marker(&self.dir,&self.guard,name).map_err(|_|"Название сохранено, но не обновлено в списке; откройте пространство заново")?;Ok(json!({"name":name}))},
    "get-board"=>Ok(serde_json::from_str(&vault.board()?).map_err(|_|"Неверная доска")?),
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "put-board-if-revision"=>{let next=command.get("board").ok_or("invalid board")?;let(clean,revision)=crate::board_without_revision(next).ok_or("invalid revision")?;let leased=command["leased"].as_array().ok_or("invalid leases")?.iter().map(|v|v.as_str().map(str::to_owned).ok_or("invalid id")).collect::<Result<Vec<_>,_>>()?;let old:Value=serde_json::from_str(&vault.board()?).map_err(|_|"Invalid board")?;if crate::board_revision(&old)!=revision||!crate::board_preserves_leased(&old,&clean,&leased){return Err("Board revision conflict".into())}vault.put_board_guarded(&clean.to_string(),||self.guard.verify())?;Ok(crate::board_tag(serde_json::from_str(&vault.board()?).map_err(|_|"Invalid board")?))},
    "put-board"=>{let board=if let Some(raw)=command["args"][0].as_str(){raw.to_owned()}else{command["board"].to_string()};vault.put_board_guarded(&board,||self.guard.verify())?;Ok(json!({"ok":true}))},
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-recovered"=>Ok(json!({"recovered":[]})),
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-recovered-restore"=>Err("Recovery unavailable".into()),
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-recovered-read"=>Err("Recovery unavailable".into()),
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-pending"=>Ok(json!({"pending":[]})),
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-cancel"=>Ok(json!({"cancelled":false})),
+   #[cfg(feature="test-hook")]
+   "agent-file-pending"=>Ok(json!({"pending":[]})),
+   #[cfg(feature="test-hook")]
+   "agent-file-cancel"=>Ok(json!({"cancelled":false})),
+   #[cfg(any(feature="test-hook",feature="agent-write"))]
+   "agent-create-note"=>{let get=|key:&str|command[key].as_str().ok_or("invalid agent create");vault.agent_create_note(get("actor")?,get("request_id")?,get("title")?,get("text")?,||self.guard.verify())},
    "create-note"=>{let title=command["args"][0].as_str().ok_or("invalid title")?;let text=command["args"][1].as_str().ok_or("invalid text")?;let id=uuid::Uuid::new_v4().simple().to_string();vault.put_note_guarded(&id,title,text,||self.guard.verify())?;Ok(json!({"id":id}))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "board-rescue"=>{let action=command["args"][0].as_str().ok_or("action")?;let hash=command["args"][1].as_str().ok_or("hash")?;let board=command["args"][2].as_str().ok_or("board")?;vault.board_rescue_guarded(action,hash,board,||self.guard.verify())},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "register-rescue-session"=>{let id=command["args"][0].as_str().ok_or("id")?;let hash=command["args"][1].as_str().ok_or("session")?;vault.register_rescue_session_guarded(id,hash,||self.guard.verify())?;Ok(json!({"ok":true}))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "save-rescue-draft"=>{let id=command["args"][0].as_str().ok_or("id")?;let hash=command["args"][1].as_str().ok_or("session")?;let title=command["args"][2].as_str().ok_or("title")?;let text=command["args"][3].as_str().ok_or("text")?;vault.save_rescue_draft_guarded(id,hash,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "delete-rescue-draft"=>{let id=command["args"][0].as_str().ok_or("id")?;let hash=command["args"][1].as_str().ok_or("hash")?;let title=command["args"][2].as_str().ok_or("title")?;let text=command["args"][3].as_str().ok_or("text")?;Ok(json!({"deleted":vault.delete_rescue_draft_guarded(id,hash,title,text,||self.guard.verify())?}))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "clear-empty-rescue-session"=>{let id=command["args"][0].as_str().ok_or("id")?;let hash=command["args"][1].as_str().ok_or("hash")?;Ok(json!({"cleared":vault.clear_empty_rescue_session_guarded(id,hash,||self.guard.verify())?}))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "list-rescue-drafts"=>{let id=command["args"][0].as_str().ok_or("id")?;let drafts=vault.list_rescue_drafts(id)?;Ok(json!({"drafts":drafts.into_iter().map(|(id,title,text)|json!({"id":id,"title":title,"text":text})).collect::<Vec<_>>() }))},
+   #[cfg(any(feature="test-hook",feature="owner-leases"))]
+   "get-rescue-draft"=>{let id=command["args"][0].as_str().ok_or("id")?;let hash=command["args"][1].as_str().ok_or("session")?;Ok(json!({"draft":vault.get_rescue_draft(id,hash)?.map(|(title,text)|json!({"title":title,"text":text}))}))},
    "recover-note-drafts"=>Ok(json!({"count":vault.recover_note_drafts_guarded(||self.guard.verify())?})),
    "save-note-draft"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;let text=command["args"][2].as_str().ok_or("invalid text")?;vault.save_note_draft_guarded(id,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
    "get-note-draft"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;Ok(json!({"draft":vault.get_note_draft(id)?.map(|(title,text)|json!({"title":title,"text":text}))}))},
@@ -82,6 +139,7 @@ impl ProtectedWorker {
    "update-note"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;let text=command["args"][2].as_str().ok_or("invalid text")?;vault.put_note_guarded(id,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
    "rename-file"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let title=command["args"][1].as_str().ok_or("invalid title")?;vault.rename_file_guarded(id,title,||self.guard.verify())?;Ok(json!({"id":id,"title":title}))},
    "get-note"=>{let id=command["id"].as_str().or_else(||command["args"][0].as_str()).ok_or("invalid id")?;Ok(json!({"id":id,"title":vault.note_title(id)?,"text":vault.get_note(id)?}))},
+   "agent-read-page"=>{let id=command["args"][0].as_str().ok_or("invalid id")?;let offset:usize=command["args"][1].as_str().ok_or("invalid offset")?.parse().map_err(|_|"invalid offset")?;let limit:usize=command["args"][2].as_str().ok_or("invalid limit")?.parse().map_err(|_|"invalid limit")?;vault.agent_read_page(id,offset,limit)},
    "put-note"=>{let id=command["id"].as_str().ok_or("invalid id")?;let title=command["title"].as_str().ok_or("invalid title")?;let text=command["text"].as_str().ok_or("invalid text")?;vault.put_note_guarded(id,title,text,||self.guard.verify())?;Ok(json!({"ok":true}))},
    "list-trash"=>Ok(json!(vault.list_trash()?)),
    "undo-created"=>{let id=command["id"].as_str().ok_or("invalid id")?;let expected=command["expected_revision"].as_str().ok_or("invalid revision")?;vault.undo_create_guarded(id,expected,||self.guard.verify())?;Ok(json!({"ok":true}))},
@@ -195,6 +253,7 @@ impl Drop for ProtectedWorker {fn drop(&mut self){if let Some(upload)=self.uploa
   assert!(worker.dispatch(&json!({"action":"get-board"})).is_ok());
   worker.dispatch(&json!({"action":"put-note","id":"note","title":"Title","text":"Body"})).unwrap();
   assert_eq!(worker.dispatch(&json!({"action":"get-note","id":"note"})).unwrap()["text"],"Body");
+  let page=worker.dispatch(&json!({"action":"agent-read-page","args":["note","1","2"]})).unwrap();assert_eq!(page["text"],"od");assert_eq!(page["next_offset"],3);
   assert!(worker.dispatch(&json!({"action":"object-revision","id":"note"})).unwrap()["revision"].is_string());
   let generated=worker.dispatch(&json!({"action":"create-note","args":["Other","Text"]})).unwrap()["id"].as_str().unwrap().to_owned();
   worker.dispatch(&json!({"action":"update-note","args":[generated,"Other","Changed"]})).unwrap();assert_eq!(worker.dispatch(&json!({"action":"get-note","args":[generated]})).unwrap()["text"],"Changed");
@@ -324,5 +383,29 @@ impl Drop for ProtectedWorker {fn drop(&mut self){if let Some(upload)=self.uploa
  use super::*;
  #[test] fn deleted_image_can_be_read_only_by_hidden_index_session(){
   let dir=std::env::temp_dir().join(format!("atlas-protected-hidden-image-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();let mut v=Vault::create(&dir.join("workspace.atlas"),"secret").unwrap();v.set_workspace_name("test").unwrap();v.put_file("image","example.png",&b"example-bytes"[..],None).unwrap();v.trash_many(&["image".into()],i64::MAX).unwrap();drop(v);std::fs::write(dir.join(".workspace.json"),r#"{"name":"test","protected":true}"#).unwrap();std::fs::write(dir.join(".atlas-protected"),b"atlas-protected-v1").unwrap();let guard=Arc::new(crate::protected_external_guard::ProtectedExternalGuard::acquire(std::fs::File::open(&dir).unwrap(),&dir).unwrap());let mut w=ProtectedWorker::new(&dir,guard);w.dispatch(&json!({"action":"unlock","password":"secret"})).unwrap();assert!(w.dispatch(&json!({"action":"download-begin","id":"image","hidden":true})).is_err());assert!(w.dispatch(&json!({"action":"download-begin","id":"image"})).is_err());let revision=w.dispatch(&json!({"action":"index-snapshot","images":true})).unwrap()["revision"].as_str().unwrap().to_owned();w.dispatch(&json!({"action":"index-begin","revision":revision,"model":"q8"})).unwrap();let hidden=w.dispatch(&json!({"action":"index-snapshot","images":true,"hidden":true})).unwrap();assert_eq!(hidden["documents"][0]["id"],"image");let stream=w.dispatch(&json!({"action":"download-begin","id":"image","hidden":true})).unwrap()["stream"].as_str().unwrap().to_owned();let data=w.dispatch(&json!({"action":"download-next","stream":stream})).unwrap();assert_eq!(data["bytes"],json!(b"example-bytes"));assert_eq!(data["done"],true);drop(w);std::fs::remove_dir_all(dir).unwrap();
+ }
+}
+
+#[cfg(all(test,feature="test-hook"))]
+mod agent_upload_contract_tests {
+ use super::*;
+ use sha2::{Digest,Sha256};
+ #[test]
+ fn encrypted_upload_finish_replay_and_cancel() {
+  let dir=std::env::temp_dir().join(format!("atlas-agent-upload-{}",uuid::Uuid::new_v4()));
+  std::fs::create_dir(&dir).unwrap();
+  let mut vault=Vault::create(&dir.join("workspace.atlas"),"secret").unwrap();vault.set_workspace_name("test").unwrap();drop(vault);
+  std::fs::write(dir.join(".workspace.json"),r#"{"name":"test","protected":true}"#).unwrap();std::fs::write(dir.join(".atlas-protected"),b"atlas-protected-v1").unwrap();
+  let guard=Arc::new(crate::protected_external_guard::ProtectedExternalGuard::acquire(std::fs::File::open(&dir).unwrap(),&dir).unwrap());let mut worker=ProtectedWorker::new(&dir,guard);worker.dispatch(&json!({"action":"unlock","password":"secret"})).unwrap();
+  let bytes=b"agent confidential upload";let digest=format!("{:x}",Sha256::digest(bytes));
+  let begin=|request:&str|json!({"action":"agent-upload-begin","actor":"agent-a","request_id":request,"digest":digest,"name":"test.txt","size":bytes.len()});
+  let stream=worker.dispatch(&begin("one")).unwrap()["stream"].as_str().unwrap().to_owned();
+  worker.dispatch(&json!({"action":"upload-chunk","stream":stream,"bytes":bytes})).unwrap();
+  let result=worker.dispatch(&json!({"action":"agent-upload-finish","stream":stream})).unwrap();let id=result["id"].as_str().unwrap().to_owned();
+  assert_eq!(worker.dispatch(&json!({"action":"read-range","id":id,"offset":0,"length":bytes.len()})).unwrap()["bytes"],json!(bytes));
+  let stream=worker.dispatch(&begin("one")).unwrap()["stream"].as_str().unwrap().to_owned();worker.dispatch(&json!({"action":"upload-chunk","stream":stream,"bytes":bytes})).unwrap();let replay=worker.dispatch(&json!({"action":"agent-upload-finish","stream":stream})).unwrap();assert_eq!(replay["id"],id);assert_eq!(replay["replayed"],true);
+  let stream=worker.dispatch(&begin("cancel")).unwrap()["stream"].as_str().unwrap().to_owned();worker.dispatch(&json!({"action":"upload-chunk","stream":stream,"bytes":[1,2]})).unwrap();worker.dispatch(&json!({"action":"upload-cancel","stream":stream})).unwrap();
+  let stream=worker.dispatch(&begin("after")).unwrap()["stream"].as_str().unwrap().to_owned();worker.dispatch(&json!({"action":"upload-cancel","stream":stream})).unwrap();drop(worker);
+  assert!(!std::fs::read(dir.join("workspace.atlas")).unwrap().windows(bytes.len()).any(|v|v==bytes));std::fs::remove_dir_all(dir).unwrap();
  }
 }

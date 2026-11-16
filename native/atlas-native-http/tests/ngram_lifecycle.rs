@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#[path="../src/model_queue.rs"] mod model_queue;
 #[path="../src/rag_model.rs"] mod rag_model;
 use rag_model::RagModel;
 use std::{fs,os::unix::fs::PermissionsExt,path::PathBuf};

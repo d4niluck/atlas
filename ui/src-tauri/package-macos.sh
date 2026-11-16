@@ -46,8 +46,9 @@ whisper_dir=${10:A}
 print 'Building interface…'
 (cd "$src/ui" && npm run build -- --configLoader runner)
 print 'Building backend and proxy…'
-cargo build --locked --release --offline --target-dir "$native_target" --manifest-path "$src/native/atlas-native-http/Cargo.toml"
+cargo build --locked --release --offline --features agent-write,agent-search --target-dir "$native_target" --manifest-path "$src/native/atlas-native-http/Cargo.toml"
 cargo build --locked --release --offline --target-dir "$native_target" --manifest-path "$src/native/atlas-native-proxy/Cargo.toml"
+cargo build --locked --release --offline --features agent-search,agent-upload,agent-write --target-dir "$native_target" --manifest-path "$src/native/atlas-agent-cli/Cargo.toml"
 mkdir -p "$src/ui/src-tauri/resources"
 print 'Building app executable…'
 cargo build --locked --release --offline --target-dir "$app_target" --manifest-path "$src/ui/src-tauri/Cargo.toml"
@@ -56,6 +57,7 @@ mkdir -p "$app/Contents/MacOS" "$res/.dylibs" "$res/licenses/faiss" "$res/licens
 cp "$app_target/release/atlas" "$app/Contents/MacOS/atlas"
 cp "$native_target/release/atlas-native-http" "$res/atlas-backend"
 cp "$native_target/release/atlas-native-proxy" "$res/atlas-proxy"
+cp "$native_target/release/atlas-agent" "$res/atlas-agent"
 cp "$src/native/atlas-faiss-rust/vendor/lib/libfaiss.dylib" "$res/libfaiss.dylib"
 cp "$src/native/atlas-faiss-rust/vendor/lib/.dylibs/libomp.dylib" "$res/.dylibs/libomp.dylib"
 cp "$src/native/atlas-faiss-rust/vendor/LICENSE" "$src/native/atlas-faiss-rust/vendor/THIRD_PARTY_NOTICES" "$src/native/atlas-faiss-rust/vendor/lib/OPENMP-LICENSE.txt" "$res/licenses/faiss/"
@@ -77,6 +79,7 @@ cp "$pdfium_dir/LICENSE" "$res/licenses/pdfium/"
 cp -R "$pdfium_dir/licenses/." "$res/licenses/pdfium/"
 clang -O2 -mmacosx-version-min=14.0 -pthread -I"$pdfium_dir/include" "$src/pdfium/extract.c" "$pdfium_dir/lib/libpdfium.dylib" -liconv -o "$res/atlas-pdfium-extract"
 install_name_tool -change ./libpdfium.dylib @loader_path/libpdfium.dylib "$res/atlas-pdfium-extract"
+python3 "$src/tests/macos/test_pdf_helper_fd.py" "$res/atlas-pdfium-extract"
 cp "$src/ui/src-tauri/icons/icon.icns" "$app/Contents/Resources/icon.icns"
 version=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)' "$src/ui/src-tauri/tauri.conf.json")
 [[ "$version" =~ '^[0-9]+(\.[0-9]+)*$' ]] || { print -u2 'Invalid app version'; exit 2; }

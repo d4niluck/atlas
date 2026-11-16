@@ -9,8 +9,12 @@ uuid = { version = "1", features = ["v4"] }
 pdf-extract = "0.12.1"
 lopdf = { version = "0.42", default-features = false, features = ["wasm_js"] }
 docx-lite = "0.2"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 libc = "0.2"
 
 [features]
+agent-write=["owner-leases","agent-upload"]
+agent-upload=[]
+owner-leases=[]
 test-hook=[]

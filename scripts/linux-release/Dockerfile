@@ -37,8 +37,9 @@ WORKDIR /src/ui
 RUN npm ci --no-audit --no-fund && npm run build
 WORKDIR /src
 RUN mkdir -p ui/src-tauri/resources \
- && LIBRARY_PATH=/build/faiss-build/faiss CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path native/atlas-native-http/Cargo.toml \
+ && LIBRARY_PATH=/build/faiss-build/faiss CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --features agent-write,agent-search --manifest-path native/atlas-native-http/Cargo.toml \
  && CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path native/atlas-native-proxy/Cargo.toml \
+ && CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --features agent-search,agent-upload,agent-write --manifest-path native/atlas-agent-cli/Cargo.toml \
  && CARGO_BUILD_JOBS="$BUILD_JOBS" cargo build --locked --release --manifest-path ui/src-tauri/Cargo.toml
 ARG SOURCE_COMMIT=unknown
 RUN set -eu; \
@@ -47,6 +48,7 @@ RUN set -eu; \
  cp ui/src-tauri/target/release/atlas "$out/bin/atlas"; \
  cp native/atlas-native-http/target/release/atlas-native-http "$res/atlas-backend"; \
  cp native/atlas-native-proxy/target/release/atlas-native-proxy "$res/atlas-proxy"; \
+ cp native/atlas-agent-cli/target/release/atlas-agent "$res/atlas-agent"; \
  cp /build/faiss-build/faiss/libfaiss.so "$res/"; \
  cp -a /build/llama-build/bin/. "$res/llama/"; \
  for f in "$res/llama/llama-server" "$res"/llama/*.so*; do \

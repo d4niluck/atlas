@@ -2,7 +2,7 @@
 
 ## macOS: локальная сборка на Apple Silicon
 
-Скрипт `ui/src-tauri/package-macos.sh` собирает приложение из текущего коммита Git (`HEAD`); незакоммиченные изменения не входят в сборку. Модели в приложение не включаются. Скрипту требуются macOS на Apple Silicon, Git, CMake, Xcode Command Line Tools, Node.js/npm, Rust/Cargo, локальный Cargo cache и заранее подготовленные зависимости:
+Скрипт `ui/src-tauri/package-macos.sh` собирает приложение из текущего коммита Git (`HEAD`); незакоммиченные изменения не входят в сборку. Модели в приложение не включаются. CLI `atlas-agent` собирается вместе с приложением и помещается в его ресурсы. При запуске Atlas создаёт копию в `~/.local/share/atlas-agent` и ссылку `~/.local/bin/atlas-agent`, не заменяя чужую команду. Если `~/.local/bin` отсутствует в PATH, запускайте CLI по полному пути или добавьте каталог в PATH терминала. Скрипту требуются macOS на Apple Silicon, Git, CMake, Xcode Command Line Tools, Node.js/npm, Rust/Cargo, локальный Cargo cache и заранее подготовленные зависимости:
 
 - каталог runtime llama с `llama-server`, его библиотеками и лицензией;
 - каталог PDFium с `lib/libpdfium.dylib`, `include/fpdfview.h`, лицензией и подкаталогом `licenses`;

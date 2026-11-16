@@ -11,6 +11,8 @@ fn valid_wid(wid:&str)->bool{wid=="default" || (wid.len()==32&&wid.bytes().all(|
 fn make(cookie:Option<String>,cancelled:bool)->Arc<Stream>{Arc::new(Stream{cancelled:Arc::new(AtomicBool::new(cancelled)),cookie,data:Mutex::new(Data{events:vec![],next:1,done:false,started:false,committed:false,bytes:0,updated:Instant::now()})})}
 fn cleanup(map:&mut HashMap<Key,Arc<Stream>>){map.retain(|_,s|{let keep=s.data.lock().map(|d|d.updated.elapsed()<Duration::from_secs(600)).unwrap_or(false);if !keep{s.cancelled.store(true,Ordering::Release)}keep});}
 fn room(map:&mut HashMap<Key,Arc<Stream>>,key:&Key)->bool{if map.len()<256||map.contains_key(key){return true}let oldest=map.iter().filter_map(|(k,s)|{let d=s.data.lock().ok()?;if d.done&&d.updated.elapsed()>Duration::from_secs(10){Some((k.clone(),d.updated))}else{None}}).min_by_key(|(_,time)|*time).map(|(key,_)|key);if let Some(key)=oldest{map.remove(&key);true}else{false}}
+#[cfg(any(feature="test-hook",feature="agent-search"))]
+pub fn drop_agent(profile:&str){let prefix=format!("agent:{profile}:");if let Ok(mut streams)=registry().lock(){streams.retain(|_,stream|{let remove=stream.cookie.as_deref().is_some_and(|v|v.starts_with(&prefix));if remove{stream.cancelled.store(true,Ordering::Release)}!remove});}}
 struct Running(Arc<Stream>);
 impl Drop for Running {fn drop(&mut self){if let Ok(mut d)=self.0.data.lock(){d.done=true;d.updated=Instant::now();}}}
 thread_local!{static PENDING:RefCell<Option<(String,Option<String>)>>=const{RefCell::new(None)};static CURRENT:RefCell<Option<Running>>=const{RefCell::new(None)};}

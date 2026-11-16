@@ -3,6 +3,8 @@ name = "atlas-native-http"
 version = "0.1.0"
 edition = "2021"
 [dependencies]
+chacha20poly1305 = "0.10"
+zeroize = "1"
 atlas-sqlcipher-proof = { path = "../atlas-protected-storage" }
 tiny_http = "0.12"
 libc = "0.2"
@@ -18,7 +20,12 @@ percent-encoding = "2"
 atlas-faiss-probe={path="../atlas-faiss-rust"}
 atlas-joined-probe={path="../atlas-joined-probe"}
 atlas-llama-probe={path="../atlas-llama-rust"}
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 [features]
+agent-write=["owner-leases","agent-upload","atlas-native-storage-contract/agent-write","atlas-sqlcipher-proof/agent-write"]
+agent-upload=["owner-leases","atlas-native-storage-contract/agent-upload","atlas-sqlcipher-proof/agent-upload"]
+owner-leases=["atlas-native-storage-contract/owner-leases","atlas-sqlcipher-proof/owner-leases","protected-external"]
+agent-search=[]
 default=["protected-external"]
 protected-external=[]
 test-hook=["atlas-native-storage-contract/test-hook","atlas-joined-probe/test-hook","atlas-sqlcipher-proof/test-hook"]

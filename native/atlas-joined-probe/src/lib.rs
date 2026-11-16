@@ -3,6 +3,20 @@ mod chunk;
 pub fn worker_chunks(text:&str)->Vec<serde_json::Value>{chunk::chunks(text,1000)}
 use atlas_faiss_probe::Index;
 use atlas_llama_probe::Encoder;
+pub const INDEX_ABORT_PREFIX:&str = "atlas-index-abort: ";
+pub fn index_abort_error(error:&str)->bool { error.starts_with(INDEX_ABORT_PREFIX) }
+pub trait IndexEncoder {
+ fn identity(&self)->&str; fn alternate_identity(&self)->&str; fn diagnostic(&self)->&str; fn matches_identity(&self,value:&str)->bool;
+ fn supports_images(&self)->bool; fn encode(&self,text:&str,query:bool)->Result<Vec<f32>,String>;
+ fn encode_image(&self,bytes:&[u8],mime:&str)->Result<Vec<f32>,String>;
+}
+impl IndexEncoder for Encoder {
+ fn identity(&self)->&str {Encoder::identity(self)} fn alternate_identity(&self)->&str {Encoder::alternate_identity(self)} fn diagnostic(&self)->&str {Encoder::diagnostic(self)}
+ fn matches_identity(&self,v:&str)->bool {Encoder::matches_identity(self,v)} fn supports_images(&self)->bool {Encoder::supports_images(self)}
+ fn encode(&self,t:&str,q:bool)->Result<Vec<f32>,String>{Encoder::encode(self,t,q)}
+ fn encode_image(&self,b:&[u8],m:&str)->Result<Vec<f32>,String>{Encoder::encode_image(self,b,m)}
+}
+
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::{io::Read,path::Path};
@@ -14,10 +28,10 @@ fn split(text:&str)->Result<Vec<Value>,String>{Ok(chunk::chunks(text,1000))}
 /// Only document text and descriptions are embedded; titles remain metadata.
 pub fn embedding_text<'a>(_field:&str,_title:&str,text:&'a str)->&'a str{text}
 fn input_hash(text:&str)->String{format!("{:x}",Sha256::digest(text.as_bytes()))}
-fn reusable(dir:&Path,model:&Encoder)->std::collections::HashMap<String,Box<[f32;512]>>{
+fn reusable(dir:&Path,model:&impl IndexEncoder)->std::collections::HashMap<String,Box<[f32;512]>>{
  let loaded=(||->Result<_,String>{let g=std::fs::read_to_string(dir.join("current")).map_err(|e|e.to_string())?;if !g.starts_with("gen-")||!g.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'){return Err("invalid generation".into())}let path=dir.join(g);let data:Value=serde_json::from_slice(&std::fs::read(path.join("metadata.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;if !data["key"].as_str().is_some_and(|x|model.matches_identity(x))||data["index_sha256"]!=digest(&path.join("index.faiss"))?{return Err("cache incompatible".into())}let records=data["records"].as_array().ok_or("invalid records")?;let index=Index::load(&path.join("index.faiss")).map_err(str::to_string)?;if index.count()!=records.len() as i64{return Err("count mismatch".into())}let mut map=std::collections::HashMap::new();for (i,r) in records.iter().enumerate(){if let Some(k)=r["input_hash"].as_str(){map.insert(k.to_owned(),Box::new(index.reconstruct(i as i64).map_err(str::to_string)?));}}Ok(map)})();loaded.unwrap_or_default()
 }
-fn encode_cached(model:&Encoder,text:&str,cache:&mut std::collections::HashMap<String,Box<[f32;512]>>,count:&mut usize,should_continue:&impl Fn()->bool)->Result<([f32;512],String),String>{let key=input_hash(text);if let Some(v)=cache.get(&key){return Ok((**v,key))}if !should_continue(){return Err("indexing cancelled".into())}let v:[f32;512]=model.encode(text,false)?.try_into().map_err(|_|"invalid dimensions")?;*count+=1;cache.insert(key.clone(),Box::new(v));Ok((v,key))}
+fn encode_cached(model:&impl IndexEncoder,text:&str,cache:&mut std::collections::HashMap<String,Box<[f32;512]>>,count:&mut usize,should_continue:&impl Fn()->bool)->Result<([f32;512],String),String>{let key=input_hash(text);if let Some(v)=cache.get(&key){return Ok((**v,key))}if !should_continue(){return Err("indexing cancelled".into())}let v:[f32;512]=model.encode(text,false)?.try_into().map_err(|_|"invalid dimensions")?;*count+=1;cache.insert(key.clone(),Box::new(v));Ok((v,key))}
 pub struct Source<'a> { pub id: &'a str, pub title: &'a str, pub body: &'a str, pub description: &'a str }
 fn memory_limits()->(usize,usize){
  #[cfg(feature="test-hook")]
@@ -28,11 +42,11 @@ fn memory_limits()->(usize,usize){
 /// Keep FAISS and result metadata bounded while processing one source at a time.
 pub struct MemoryBuilder {index:Index,records:Vec<Value>,cache:std::collections::HashMap<String,Box<[f32;512]>>,encoded_count:usize,metadata_bytes:usize}
 impl MemoryBuilder {
- pub fn new(model:&Encoder,previous:Option<(&Index,&Value)>)->Result<Self,String>{let mut cache=std::collections::HashMap::new();if let Some((old,meta))=previous {if meta["key"].as_str().is_some_and(|x|model.matches_identity(x)){if let Some(rows)=meta["records"].as_array(){if old.count()==rows.len() as i64&&rows.len()<=16000 {for (i,row) in rows.iter().enumerate(){if let Some(hash)=row["input_hash"].as_str(){cache.insert(hash.to_owned(),Box::new(old.reconstruct(i as i64).map_err(str::to_string)?));}}}}}}Ok(Self{index:Index::new().map_err(str::to_string)?,records:Vec::new(),cache,encoded_count:0,metadata_bytes:0})}
- fn add(&mut self,model:&Encoder,text:&str,row:Value,should_continue:&impl Fn()->bool)->Result<(),String>{let(vector_limit,metadata_limit)=memory_limits();if self.records.len()>=vector_limit{return Err("Смысловой поиск ограничен 16 000 фрагментов".into())}let n=serde_json::to_vec(&row).map_err(|_|"invalid record")?.len();if self.metadata_bytes.saturating_add(n).saturating_add(80)>metadata_limit{return Err("Метаданные смыслового поиска превышают 32 МиБ".into())}let(vector,key)=encode_cached(model,text,&mut self.cache,&mut self.encoded_count,should_continue)?;let mut row=row;row["input_hash"]=json!(key);self.index.add(&[vector]).map_err(str::to_string)?;self.metadata_bytes+=n+80;self.records.push(row);Ok(())}
- pub fn push(&mut self,model:&Encoder,doc:&Source<'_>,should_continue:&impl Fn()->bool)->Result<(),String>{self.push_progress(model,doc,should_continue,&|_,_,_|{})}
- pub fn push_progress(&mut self,model:&Encoder,doc:&Source<'_>,should_continue:&impl Fn()->bool,progress:&impl Fn(&str,usize,usize))->Result<(),String>{for(field,text)in [("body",doc.body),("description",doc.description)]{if text.trim().is_empty(){continue}let pieces=split(text)?;let total=pieces.len();progress(doc.title,0,total);for (completed,c) in pieces.into_iter().enumerate(){if !should_continue(){return Err("indexing cancelled".into())}let fragment=c["text"].as_str().ok_or("missing text")?;self.add(model,embedding_text(field,doc.title,fragment),json!({"id":doc.id,"title":doc.title,"field":field,"text":fragment,"start":c["start"],"end":c["end"],"start_utf16":c["start_utf16"],"end_utf16":c["end_utf16"]}),should_continue)?;progress(doc.title,completed+1,total);}}Ok(())}
- pub fn push_image(&mut self,model:&Encoder,id:&str,title:&str,bytes:&[u8],mime:&str)->Result<(),String>{
+ pub fn new(model:&impl IndexEncoder,previous:Option<(&Index,&Value)>)->Result<Self,String>{let mut cache=std::collections::HashMap::new();if let Some((old,meta))=previous {if meta["key"].as_str().is_some_and(|x|model.matches_identity(x)){if let Some(rows)=meta["records"].as_array(){if old.count()==rows.len() as i64&&rows.len()<=16000 {for (i,row) in rows.iter().enumerate(){if let Some(hash)=row["input_hash"].as_str(){cache.insert(hash.to_owned(),Box::new(old.reconstruct(i as i64).map_err(str::to_string)?));}}}}}}Ok(Self{index:Index::new().map_err(str::to_string)?,records:Vec::new(),cache,encoded_count:0,metadata_bytes:0})}
+ fn add(&mut self,model:&impl IndexEncoder,text:&str,row:Value,should_continue:&impl Fn()->bool)->Result<(),String>{let(vector_limit,metadata_limit)=memory_limits();if self.records.len()>=vector_limit{return Err("Смысловой поиск ограничен 16 000 фрагментов".into())}let n=serde_json::to_vec(&row).map_err(|_|"invalid record")?.len();if self.metadata_bytes.saturating_add(n).saturating_add(80)>metadata_limit{return Err("Метаданные смыслового поиска превышают 32 МиБ".into())}let(vector,key)=encode_cached(model,text,&mut self.cache,&mut self.encoded_count,should_continue)?;let mut row=row;row["input_hash"]=json!(key);self.index.add(&[vector]).map_err(str::to_string)?;self.metadata_bytes+=n+80;self.records.push(row);Ok(())}
+ pub fn push(&mut self,model:&impl IndexEncoder,doc:&Source<'_>,should_continue:&impl Fn()->bool)->Result<(),String>{self.push_progress(model,doc,should_continue,&|_,_,_|{})}
+ pub fn push_progress(&mut self,model:&impl IndexEncoder,doc:&Source<'_>,should_continue:&impl Fn()->bool,progress:&impl Fn(&str,usize,usize))->Result<(),String>{for(field,text)in [("body",doc.body),("description",doc.description)]{if text.trim().is_empty(){continue}let pieces=chunk::chunks_cancellable(text,1000,should_continue)?;let total=pieces.len();progress(doc.title,0,total);for (completed,c) in pieces.into_iter().enumerate(){if !should_continue(){return Err("indexing cancelled".into())}let fragment=c["text"].as_str().ok_or("missing text")?;self.add(model,embedding_text(field,doc.title,fragment),json!({"id":doc.id,"title":doc.title,"field":field,"text":fragment,"start":c["start"],"end":c["end"],"start_utf16":c["start_utf16"],"end_utf16":c["end_utf16"]}),should_continue)?;progress(doc.title,completed+1,total);}}Ok(())}
+ pub fn push_image(&mut self,model:&impl IndexEncoder,id:&str,title:&str,bytes:&[u8],mime:&str)->Result<(),String>{
   let(vector_limit,metadata_limit)=memory_limits();
   if self.records.len()>=vector_limit{return Err("Смысловой поиск ограничен 16 000 фрагментов".into())}
   let row=json!({"id":id,"title":title,"field":"image","text":"","start":null,"end":null});
@@ -41,7 +55,7 @@ impl MemoryBuilder {
   let key=format!("image:{:x}",Sha256::digest(bytes));let vector=if let Some(v)=self.cache.get(&key){**v}else{let v:[f32;512]=model.encode_image(bytes,mime)?.try_into().map_err(|_|"invalid dimensions")?;self.cache.insert(key.clone(),Box::new(v));self.encoded_count+=1;v};
   let mut row=row;row["input_hash"]=json!(key);self.index.add(&[vector]).map_err(str::to_string)?;self.metadata_bytes+=n+80;self.records.push(row);Ok(())
  }
- pub fn finish(self,model:&Encoder)->Result<(Vec<u8>,Value),String>{let bytes=self.index.to_memory().map_err(str::to_string)?;let hash=format!("{:x}",Sha256::digest(&bytes));Ok((bytes,json!({"key":model.identity(),"binary_diagnostic":model.diagnostic(),"index_sha256":hash,"encoded_count":self.encoded_count,"records":self.records})))}
+ pub fn finish(self,model:&impl IndexEncoder)->Result<(Vec<u8>,Value),String>{let bytes=self.index.to_memory().map_err(str::to_string)?;let hash=format!("{:x}",Sha256::digest(&bytes));Ok((bytes,json!({"key":model.identity(),"binary_diagnostic":model.diagnostic(),"index_sha256":hash,"encoded_count":self.encoded_count,"records":self.records})))}
 }
 pub fn search_memory(model:&Encoder,index:&Index,data:&Value,q:&str,filter:Option<&[String]>,k:usize)->Result<Vec<Value>,String>{if !data["key"].as_str().is_some_and(|x|model.matches_identity(x)){return Err("model key mismatch".into())}let records=data["records"].as_array().ok_or("invalid records")?;if index.count()!=records.len() as i64{return Err("index and records count mismatch".into())}let allowed=filter.map(|ids|ids.iter().map(String::as_str).collect::<std::collections::HashSet<_>>());let ids:Vec<i64>=records.iter().enumerate().filter(|(_,x)|allowed.as_ref().is_none_or(|ids|x["id"].as_str().is_some_and(|id|ids.contains(id)))).map(|(i,_)|i as i64).collect();let vector:[f32;512]=model.encode(q,true)?.try_into().map_err(|_|"invalid dimensions")?;index.search(&vector,&ids,k).map_err(str::to_string)?.into_iter().map(|(id,score)|{let mut row=records.get(id as usize).ok_or("index mismatch")?.clone();row["score"]=json!(score);Ok(row)}).collect()}
 pub fn build(model:&Encoder,docs:&[(&str,&str,&str)],dir:&Path)->Result<(),String>{
@@ -51,19 +65,19 @@ pub fn build(model:&Encoder,docs:&[(&str,&str,&str)],dir:&Path)->Result<(),Strin
 pub fn build_sources(model:&Encoder,docs:&[Source<'_>],dir:&Path)->Result<(),String>{
  let generation=prepare_sources(model,docs,dir)?;publish_sources(dir,&generation)
 }
-pub fn prepare_sources(model:&Encoder,docs:&[Source<'_>],dir:&Path)->Result<String,String>{prepare_sources_cancellable(model,docs,dir,||true)}
-pub fn prepare_sources_cancellable(model:&Encoder,docs:&[Source<'_>],dir:&Path,should_continue:impl Fn()->bool)->Result<String,String>{prepare_sources_with_images(model,docs,std::iter::empty(),dir,should_continue)}
-pub fn prepare_sources_with_images(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool)->Result<String,String>{prepare_sources_with_progress(model,docs,images,dir,should_continue,|_,_,_|{})}
-pub fn prepare_sources_with_progress(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<String,String>{prepare_sources_with_progress_mode(model,docs,images,dir,should_continue,progress,true)}
-fn prepare_sources_with_progress_mode(model:&Encoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize),reuse_existing:bool)->Result<String,String>{
+pub fn prepare_sources(model:&impl IndexEncoder,docs:&[Source<'_>],dir:&Path)->Result<String,String>{prepare_sources_cancellable(model,docs,dir,||true)}
+pub fn prepare_sources_cancellable(model:&impl IndexEncoder,docs:&[Source<'_>],dir:&Path,should_continue:impl Fn()->bool)->Result<String,String>{prepare_sources_with_images(model,docs,std::iter::empty(),dir,should_continue)}
+pub fn prepare_sources_with_images(model:&impl IndexEncoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool)->Result<String,String>{prepare_sources_with_progress(model,docs,images,dir,should_continue,|_,_,_|{})}
+pub fn prepare_sources_with_progress(model:&impl IndexEncoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize))->Result<String,String>{prepare_sources_with_progress_mode(model,docs,images,dir,should_continue,progress,true)}
+fn prepare_sources_with_progress_mode(model:&impl IndexEncoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize),reuse_existing:bool)->Result<String,String>{
  if !dir.is_dir(){std::fs::create_dir(dir).map_err(|e|e.to_string())?;}let mut index=Index::new().map_err(str::to_string)?;let mut meta=vec![];let mut cache=if reuse_existing{reusable(dir,model)}else{Default::default()};let mut encoded_count=0usize;
  for doc in docs {
   for (field,text) in [("body",doc.body),("description",doc.description)] {
    if text.trim().is_empty(){continue}
-   let pieces=split(text)?;let total=pieces.len();progress(doc.title,0,total);for (completed,c) in pieces.into_iter().enumerate() {if !should_continue(){return Err("indexing cancelled".into())}let fragment=c["text"].as_str().ok_or("missing text")?;let (vector,key)=encode_cached(model,embedding_text(field,doc.title,fragment),&mut cache,&mut encoded_count,&should_continue)?;index.add(&[vector]).map_err(str::to_string)?;meta.push(json!({"id":doc.id,"title":doc.title,"field":field,"input_hash":key,"text":fragment,"start":c["start"],"end":c["end"],"start_utf16":c["start_utf16"],"end_utf16":c["end_utf16"]}));progress(doc.title,completed+1,total);}
+   let pieces=chunk::chunks_cancellable(text,1000,&should_continue)?;let total=pieces.len();progress(doc.title,0,total);for (completed,c) in pieces.into_iter().enumerate() {if !should_continue(){return Err("indexing cancelled".into())}let fragment=c["text"].as_str().ok_or("missing text")?;let (vector,key)=encode_cached(model,embedding_text(field,doc.title,fragment),&mut cache,&mut encoded_count,&should_continue)?;index.add(&[vector]).map_err(str::to_string)?;meta.push(json!({"id":doc.id,"title":doc.title,"field":field,"input_hash":key,"text":fragment,"start":c["start"],"end":c["end"],"start_utf16":c["start_utf16"],"end_utf16":c["end_utf16"]}));progress(doc.title,completed+1,total);}
   }
  }
- for image in images {let (id,title,bytes,mime)=match image{Ok(v)=>v,Err(e)=>{if !reuse_existing{return Err(e)}eprintln!("Atlas: image indexing skipped: {e}");continue}};if !should_continue(){return Err("indexing cancelled".into())}let key=format!("image:{:x}",Sha256::digest(&bytes));let vector=if let Some(v)=cache.get(&key){**v}else{let v:[f32;512]=match model.encode_image(&bytes,&mime).and_then(|v|v.try_into().map_err(|_|"invalid dimensions".into())){Ok(v)=>v,Err(e)=>{if !reuse_existing{return Err(e)}eprintln!("Atlas: image indexing skipped: {e}");continue}};cache.insert(key.clone(),Box::new(v));encoded_count+=1;v};index.add(&[vector]).map_err(str::to_string)?;meta.push(json!({"id":id,"title":title,"field":"image","input_hash":key,"text":"","start":null,"end":null}));}
+ for image in images {let (id,title,bytes,mime)=match image{Ok(v)=>v,Err(e)=>{if !reuse_existing||index_abort_error(&e){return Err(e)}eprintln!("Atlas: image indexing skipped: {e}");continue}};if !should_continue(){return Err("indexing cancelled".into())}let key=format!("image:{:x}",Sha256::digest(&bytes));let vector=if let Some(v)=cache.get(&key){**v}else{let v:[f32;512]=match model.encode_image(&bytes,&mime).and_then(|v|v.try_into().map_err(|_|"invalid dimensions".into())){Ok(v)=>v,Err(e)=>{if index_abort_error(&e){return Err(format!("{e} ({title})"))} eprintln!("Atlas: image indexing skipped: {e}");continue}};cache.insert(key.clone(),Box::new(v));encoded_count+=1;v};index.add(&[vector]).map_err(str::to_string)?;meta.push(json!({"id":id,"title":title,"field":"image","input_hash":key,"text":"","start":null,"end":null}));}
  if !should_continue(){return Err("indexing cancelled".into())}
  let generation=format!("gen-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());let stage=dir.join(&generation);std::fs::create_dir(&stage).map_err(|e|e.to_string())?;
  index.save(&stage.join("index.faiss")).map_err(str::to_string)?;std::fs::File::open(stage.join("index.faiss")).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
@@ -97,3 +111,29 @@ pub fn search(model:&Encoder,dir:&Path,q:&str,filter:Option<&[&str]>,k:usize)->R
 }
 
 pub mod overlay_gen;
+
+#[cfg(test)] mod index_encoder_contract_tests {
+ use super::*;
+ use std::sync::atomic::{AtomicUsize,Ordering};
+ struct Fake(AtomicUsize);
+ impl IndexEncoder for Fake {
+  fn identity(&self)->&str{"fake"} fn alternate_identity(&self)->&str{"fake"} fn diagnostic(&self)->&str{"test"}
+  fn matches_identity(&self,v:&str)->bool{v=="fake"} fn supports_images(&self)->bool{false}
+  fn encode(&self,_:&str,_:bool)->Result<Vec<f32>,String>{self.0.fetch_add(1,Ordering::SeqCst);Ok(vec![0.5;512])}
+  fn encode_image(&self,_:&[u8],_:&str)->Result<Vec<f32>,String>{Err("queue full".into())}
+ }
+ struct FailingImage;
+ impl IndexEncoder for FailingImage {
+ fn identity(&self)->&str{"fake"} fn alternate_identity(&self)->&str{"fake"} fn diagnostic(&self)->&str{"test"} fn matches_identity(&self,v:&str)->bool{v=="fake"} fn supports_images(&self)->bool{true} fn encode(&self,_:&str,_:bool)->Result<Vec<f32>,String>{Ok(vec![0.5;512])} fn encode_image(&self,_:&[u8],_:&str)->Result<Vec<f32>,String>{Err(format!("{}queue full",INDEX_ABORT_PREFIX))}
+ }
+ struct BadImage;
+ impl IndexEncoder for BadImage {
+ fn identity(&self)->&str{"fake"} fn alternate_identity(&self)->&str{"fake"} fn diagnostic(&self)->&str{"test"} fn matches_identity(&self,v:&str)->bool{v=="fake"} fn supports_images(&self)->bool{true} fn encode(&self,_:&str,_:bool)->Result<Vec<f32>,String>{Ok(vec![0.5;512])} fn encode_image(&self,_:&[u8],_:&str)->Result<Vec<f32>,String>{Err("bad image".into())}
+ }
+ #[test] fn bad_image_is_skipped_in_protected_index(){let base=Index::new().unwrap();let meta=json!({"key":"fake","records":[],"index_sha256":"base"});let mut docs=vec![("id".to_string(),"photo.png".to_string(),String::new(),String::new())].into_iter();assert!(protected_overlay::prepare(&BadImage,base,&meta,None,||Ok(docs.next()),|_|Ok(Some(vec![1,2])),&[],||true,|_,_,_|{}).is_ok());}
+ #[test] fn image_queue_error_aborts_protected_index(){let base=Index::new().unwrap();let meta=json!({"key":"fake","records":[],"index_sha256":"base"});let mut docs=vec![("id".to_string(),"photo.png".to_string(),String::new(),String::new())].into_iter();let e=protected_overlay::prepare(&FailingImage,base,&meta,None,||Ok(docs.next()),|_|Ok(Some(vec![1,2])),&[],||true,|_,_,_|{}).err();assert_eq!(e.as_deref(),Some("atlas-index-abort: queue full (photo.png)"));}
+
+ #[test] fn marked_image_read_failure_stops_protected_index(){let base=Index::new().unwrap();let meta=json!({"key":"fake","records":[],"index_sha256":"base"});let mut docs=vec![("id".to_string(),"photo.png".to_string(),String::new(),String::new())].into_iter();let e=protected_overlay::prepare(&BadImage,base,&meta,None,||Ok(docs.next()),|_|Err(format!("{}too large",INDEX_ABORT_PREFIX)),&[],||true,|_,_,_|{}).err().unwrap();assert!(index_abort_error(&e));}
+ #[test] fn marked_image_read_failure_stops_local_index(){let dir=std::env::temp_dir().join(format!("atlas-limit-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);let e=overlay_gen::prepare(&BadImage,&[],std::iter::once(Err(format!("{}too large: photo.png",INDEX_ABORT_PREFIX))),&dir,||true,|_,_,_|{}).err().unwrap();assert!(index_abort_error(&e));assert!(e.contains("photo.png"));let _=std::fs::remove_dir_all(dir);}
+ #[test] fn encoder_is_called_per_distinct_chunk(){let f=Fake(AtomicUsize::new(0));let mut b=MemoryBuilder::new(&f,None).unwrap();let text=format!("{}\n\n{}","a".repeat(1100),"b".repeat(1100));b.push(&f,&Source{id:"1",title:"test",body:&text,description:""},&||true).unwrap();let (_,meta)=b.finish(&f).unwrap();assert!(f.0.load(Ordering::SeqCst)>1);assert_eq!(meta["key"],"fake");}
+}

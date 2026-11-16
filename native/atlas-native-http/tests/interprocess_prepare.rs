@@ -1,4 +1,5 @@
 #![cfg(feature="test-hook")]
+#[path="../src/model_queue.rs"] mod model_queue;
 #[path="../src/semantic.rs"] mod semantic;
 use semantic::SemanticService;
 use rusqlite::Connection;

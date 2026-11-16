@@ -39,3 +39,14 @@ pub fn extract_pdf_bytes(bytes:&[u8])->R<String>{extract_doc(lopdf::Document::lo
   let mut bytes=Vec::new();d.save_to(&mut bytes).unwrap();let before=pdf_extract::extract_text_from_mem_by_pages(&bytes).unwrap().join("\n");assert_eq!(extract_pdf_bytes(&bytes).unwrap(),before);
  }
 }
+
+#[cfg(any(feature="test-hook",feature="agent-upload"))]
+pub(crate) fn extract_pdf_file(file:&std::fs::File)->R<String>{
+ use std::io::Read;use std::os::fd::AsRawFd;use std::os::unix::process::CommandExt;use std::process::{Command,Stdio};use std::time::{Duration,Instant};
+ let helper=std::env::current_exe()?.with_file_name("atlas-pdfium-extract");let input=file.as_raw_fd();
+ let path="--input-fd";
+ let mut command=Command::new(helper);command.process_group(0).arg(path).arg("--parent-watch").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+ unsafe{command.pre_exec(move||{if libc::dup2(input,3)<0{return Err(std::io::Error::last_os_error())}let flags=libc::fcntl(3,libc::F_GETFD);if flags<0||libc::fcntl(3,libc::F_SETFD,flags & !libc::FD_CLOEXEC)<0{return Err(std::io::Error::last_os_error())}Ok(())});}
+ let mut child=command.spawn()?;let stdout=child.stdout.take().ok_or("missing PDF extractor output")?;let (tx,rx)=std::sync::mpsc::channel();let reader=std::thread::spawn(move||{let mut output=Vec::new();let result=stdout.take(300*1024*1024+1).read_to_end(&mut output).and_then(|_|if output.len()>300*1024*1024{Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"PDF text too large"))}else{Ok(output)});let _=tx.send(result);});let started=Instant::now();
+ loop{if let Some(status)=child.try_wait()?{reader.join().map_err(|_|"PDF reader failed")?;let bytes=rx.recv().map_err(|_|"PDF reader failed")??;if !status.success(){if matches!(status.code(),Some(3|15)){return Ok(String::new())}return Err("PDF extraction failed".into())}return Ok(String::from_utf8(bytes)?)}if started.elapsed()>Duration::from_secs(1200){unsafe{libc::kill(-(child.id() as i32),libc::SIGKILL)};let _=child.kill();let _=child.wait();let _=reader.join();return Err("PDF extraction timed out".into())}std::thread::sleep(Duration::from_millis(25));}
+}

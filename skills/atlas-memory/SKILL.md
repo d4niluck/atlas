@@ -1,0 +1,13 @@
+---
+name: atlas-memory
+description: Use Atlas workspaces as local memory to find, read, add, edit, or delete information when requested.
+---
+
+# Atlas memory
+
+Use the running Atlas and `atlas-agent --help` for commands and current capabilities; on macOS, use `~/.local/bin/atlas-agent` if it is not in PATH. Use your supplied agent key. If given the key directly, create a separate, uniquely named regular file under `~/.config/atlas/agent-keys/` using exclusive creation, with directory mode 0700 and file mode 0600, owned by the current user; do not follow symlinks. Use `--key-file` with that path on later calls. Never overwrite another key, put the key in command arguments or logs, expose its contents, use the owner key, bypass access controls, or read workspace files directly.
+
+- Select an allowed workspace and objects by ID. Search by words for exact terms, by meaning for concepts, or use smart search for an answer. Adjust or broaden your search scope as useful, unless the user explicitly requires a restriction. An explicit empty object selection means no objects.
+- Read the source before relying on a result; when saving evidence-backed information, include its source title and ID or a stable link. Follow pagination or the continuation command as needed; search totals cover retrieved candidates, not necessarily all matches. Use ordinary output for reading and `--json` for programmatic processing. Avoid streaming unless needed.
+- Create, edit, upload, or delete only as authorized and supported by the installed CLI. Make records clear and findable. Use source files directly when possible. Remove only temporary files you created after use, including on failure; never delete user source files. If a create or upload outcome is uncertain, retry the same operation with the same request ID and identical content to avoid duplicates; do not reuse that ID for different content. Saving can complete before semantic indexing; newly saved content may appear in semantic search later. CLI edits require explicit acquire, commit, and release commands; release the note lock even on failure and report conflicts. While held, the lock prevents others editing the note. Deletion moves the object to Atlas's recovery buffer.
+- If a workspace, file, search mode, or operation is unavailable, report the limitation rather than bypassing it.

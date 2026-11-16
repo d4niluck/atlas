@@ -50,6 +50,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -67,6 +68,7 @@ dependencies = [
  "tiny_http",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]

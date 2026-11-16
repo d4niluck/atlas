@@ -1,5 +1,13 @@
 pub fn chunks(text: &str, target: usize) -> Vec<serde_json::Value> {
-    let chars: Vec<char> = text.chars().collect();
+    chunks_cancellable(text, target, || true).expect("unconditional chunking")
+}
+
+pub fn chunks_cancellable(text: &str, target: usize, keep: impl Fn() -> bool) -> Result<Vec<serde_json::Value>, String> {
+    let mut chars = Vec::new();
+    for (i, c) in text.chars().enumerate() {
+        if i % 8192 == 0 && !keep() { return Err("indexing cancelled".into()); }
+        chars.push(c);
+    }
     // Detect Markdown boundaries on the original characters, preserving offsets.
     // Bits mark heading, code and paragraph boundaries without three full-size arrays.
     let mut flags = vec![0u8; chars.len() + 1];
@@ -7,8 +15,17 @@ pub fn chunks(text: &str, target: usize) -> Vec<serde_json::Value> {
     let mut previous_line = None;
     let mut line = 0;
     while line < chars.len() {
-        let end = (line..chars.len()).find(|&i| chars[i] == '\n').unwrap_or(chars.len());
-        let content: String = chars[line..end].iter().collect();
+        if !keep() { return Err("indexing cancelled".into()); }
+        let mut end = line;
+        while end < chars.len() && chars[end] != '\n' {
+            if end % 8192 == 0 && !keep() { return Err("indexing cancelled".into()); }
+            end += 1;
+        }
+        let mut content = String::new();
+        for (i, c) in chars[line..end].iter().enumerate() {
+            if i % 8192 == 0 && !keep() { return Err("indexing cancelled".into()); }
+            content.push(*c);
+        }
         let content = content.trim_end_matches('\r');
         let indent = content.chars().take_while(|&c| c == ' ').count();
         let trimmed = &content[indent..];
@@ -43,6 +60,7 @@ pub fn chunks(text: &str, target: usize) -> Vec<serde_json::Value> {
     let target = target.clamp(1, 1200);
     let mut utf16 = 0;
     while start < chars.len() {
+        if !keep() { return Err("indexing cancelled".into()); }
         let limit = (start + target).min(chars.len());
         let mut end = limit;
         // Prefer structural boundaries in the latter half of the candidate.
@@ -67,7 +85,7 @@ pub fn chunks(text: &str, target: usize) -> Vec<serde_json::Value> {
         utf16 = end_utf16;
         start = end;
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)] mod boundary_regression {
@@ -78,5 +96,20 @@ pub fn chunks(text: &str, target: usize) -> Vec<serde_json::Value> {
   assert_eq!(chunks("abc\n```rust\nfoo. bar\n```\n# итог\nтекст", 10), serde_json::from_str::<Vec<serde_json::Value>>(r###"[{"end":10,"end_utf16":10,"start":0,"start_utf16":0,"text":"abc\n```rus"},{"end":17,"end_utf16":17,"start":10,"start_utf16":10,"text":"t\nfoo. "},{"end":25,"end_utf16":25,"start":17,"start_utf16":17,"text":"bar\n```\n"},{"end":32,"end_utf16":32,"start":25,"start_utf16":25,"text":"# итог\n"},{"end":37,"end_utf16":37,"start":32,"start_utf16":32,"text":"текст"}]"###).unwrap());
   assert_eq!(chunks("a\r\nb\r\n🦊💻 конец", 3), serde_json::from_str::<Vec<serde_json::Value>>(r###"[{"end":3,"end_utf16":3,"start":0,"start_utf16":0,"text":"a\r\n"},{"end":6,"end_utf16":6,"start":3,"start_utf16":3,"text":"b\r\n"},{"end":9,"end_utf16":11,"start":6,"start_utf16":6,"text":"🦊💻 "},{"end":12,"end_utf16":14,"start":9,"start_utf16":11,"text":"кон"},{"end":14,"end_utf16":16,"start":12,"start_utf16":14,"text":"ец"}]"###).unwrap());
   assert_eq!(chunks("    код. пробел\n\tдругой? тест\nпосле", 10), serde_json::from_str::<Vec<serde_json::Value>>(r###"[{"end":9,"end_utf16":9,"start":0,"start_utf16":0,"text":"    код. "},{"end":17,"end_utf16":17,"start":9,"start_utf16":9,"text":"пробел\n\t"},{"end":25,"end_utf16":25,"start":17,"start_utf16":17,"text":"другой? "},{"end":35,"end_utf16":35,"start":25,"start_utf16":25,"text":"тест\nпосле"}]"###).unwrap());
+ }
+}
+
+#[cfg(test)] mod cancellation_tests {
+ use std::cell::Cell;
+ #[path = "chunk_reference.rs"] mod reference;
+ #[test] fn preserves_old_results_for_russian_and_structured_text() {
+  let input=format!("# Заголовок\n\n{}\n\n```python\nprint(123)\n```\n\nКонец.", "Длинное предложение для проверки. ".repeat(5000));
+  assert_eq!(super::chunks_cancellable(&input,1000,||true).unwrap(),reference::chunks(&input,1000));
+ }
+ #[test] fn stops_inside_large_single_line_after_scan() {
+  let input="ж".repeat(500_000); let calls=Cell::new(0);
+  let before_content=1+(input.chars().count()+8191)/8192+(input.chars().count()+8191)/8192;
+  let result=super::chunks_cancellable(&input,1000,||{calls.set(calls.get()+1);calls.get()<before_content+3});
+  assert_eq!(result.unwrap_err(),"indexing cancelled"); assert_eq!(calls.get(),before_content+3);
  }
 }

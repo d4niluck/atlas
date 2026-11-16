@@ -11,9 +11,13 @@ tiny_http="0.12"
 url="2"
 pdf-extract="0.12.1"
 docx-lite="0.2"
+zip={version="0.6",default-features=false,features=["deflate"]}
 uuid={version="1",features=["v4"]}
 libc="0.2"
 sha2="0.10"
 
 [features]
-test-hook=[]
+agent-write=["owner-leases","atlas-native-storage-contract/agent-write"]
+agent-upload=["atlas-native-storage-contract/agent-upload"]
+owner-leases=["atlas-native-storage-contract/owner-leases"]
+test-hook=["atlas-native-storage-contract/test-hook"]

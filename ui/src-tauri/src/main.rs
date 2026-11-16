@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod agent_cli_install;
 mod vision_model_download;
 mod voice_temp;
 mod voice;
@@ -277,6 +278,7 @@ fn main() {
         }
         unsafe {libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t); libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);}
         let resources=app.path().resource_dir()?.join("resources");
+        if let Ok(home)=app.path().home_dir(){if let Err(error)=agent_cli_install::install(&home,&resources.join("atlas-agent")){eprintln!("Atlas: {error}");}}
         let data=model_data_dir(app.handle()).map_err(std::io::Error::other)?;
         let mut workspace=data.join("workspaces");
         let mut legacy_default=None;
@@ -339,7 +341,7 @@ fn main() {
         }
         let model=data.join("models/embeddinggemma-2.gguf");
         let token=secret()?;let bootstrap=secret()?;
-        let mut backend_args=vec!["--root".into(),workspace.to_string_lossy().into_owned(),"--port".into(),"0".into(),"--token-stdin".into()];
+        let mut backend_args=vec!["--root".into(),workspace.to_string_lossy().into_owned(),"--port".into(),"0".into(),"--token-stdin".into(),"--enable-agent-socket".into()];
         if let Some(default)=legacy_default { backend_args.extend(["--default-workspace".into(),default.to_string_lossy().into_owned()]); }
         let rag_model=data.join("models/gemma-4-e2b-it-q4.gguf");
         if model.is_file() { backend_args.extend(["--model-path".into(),model.to_string_lossy().into_owned()]); }
