@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import {usePinchZoom} from './pinchZoom';
 import {useEffect, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,10 +10,10 @@ import {remarkSoftBreaks} from './remarkSoftBreaks';
 import {MarkdownCodePre as MarkdownPre} from './MarkdownCodePre';
 import {PythonCode} from './PythonCode';
 import {getDocument, GlobalWorkerOptions} from './pdfCompat';
-import {locatePdfFragment, type PdfMatch} from './pdfSearch';
+import {createPdfFragmentLocator, type PdfMatch} from './pdfSearch';
 import {pdfPageDirection} from './pdfKeys';
 import type {SearchChunk} from './SearchResults';
-import {Util} from 'pdfjs-dist/legacy/build/pdf.mjs';
+import {Util,TextLayer} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type {PDFDocumentProxy, RenderTask} from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import './file-preview-layout.css';
@@ -36,20 +37,25 @@ export function PlainFilePreview({url, markdown=false, filename=''}: {url:string
  return status?<p role="status">{status}</p>:<><div className="pdf-preview-controls"><button aria-label="Предыдущая часть" disabled={page===0} onClick={()=>setPage(page-1)}>←</button><label>Часть <input style={{width:72}} aria-label="Номер части" type="number" min="1" max={total!==null?Math.max(1,Math.ceil(total/65536)):undefined} defaultValue={page+1} key={page} onKeyDown={e=>{if(e.key==='Enter'){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>=1&&(total===null||n<=Math.ceil(total/65536)))setPage(n-1)}}}/>{total!==null?` / ${Math.max(1,Math.ceil(total/65536))}`:''}</label><button aria-label="Следующая часть" disabled={total!==null&&(page+1)*65536>=total} onClick={()=>setPage(page+1)}>→</button></div>{markdown?<div className="note-content markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]} components={{pre:MarkdownPre,a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{value}</ReactMarkdown></div>:<pre className="file-preview-text">{/\.py$/i.test(filename)?<PythonCode source={value}/>:value}</pre>}</>;
 }
 
-export function PdfPreview({url, title, search, active}: {url:string; title:string; search?:SearchChunk|null; active:boolean}) {
+const rememberedPdfPages = new Map<string,number>();
+export function PdfPreview({url, title, search, active, jumpRevision}: {url:string; title:string; search?:SearchChunk|null; active:boolean; jumpRevision?:number}) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const textLayerRef=useRef<HTMLDivElement>(null);
   const viewportRef=useRef<HTMLDivElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(() => rememberedPdfPages.get(url) || 1);
   const [error, setError] = useState('');
   const [searchStatus,setSearchStatus]=useState('');
   const [match,setMatch]=useState<PdfMatch|null>(null);
   const [rects,setRects]=useState<{x:number;y:number;w:number;h:number}[]>([]);
   const [zoom,setZoom]=useState(1);
+  usePinchZoom(viewportRef,active,zoom,setZoom,0.5,3);
   const [width,setWidth]=useState(0);
   const [pageSize,setPageSize]=useState({width:1,height:1});
+  const savedPageUrl=useRef(url);
   const navigateToMatch=useRef(false);
   const searchSequence=useRef(0);
+  const locator=useRef<{document:PDFDocumentProxy; find:ReturnType<typeof createPdfFragmentLocator>}|null>(null);
   useEffect(() => {
     if (!document || !active) return;
     const onKey = (event: KeyboardEvent) => {
@@ -68,26 +74,29 @@ export function PdfPreview({url, title, search, active}: {url:string; title:stri
     const observer=new ResizeObserver(update);observer.observe(box);return()=>observer.disconnect();
   },[]);
   useEffect(() => {
-    setDocument(null); setPage(1); setError(''); setZoom(1);
+    setDocument(null); setPage(rememberedPdfPages.get(url) || 1); setError(''); setZoom(1);
     const task = getDocument({url});
     let alive = true;
     task.promise.then(pdf => { if (alive) setDocument(pdf); }).catch(() => { if (alive) setError('Не удалось открыть PDF.'); });
     return () => { alive = false; void task.destroy(); };
   }, [url]);
+  useEffect(()=>{if(savedPageUrl.current!==url){savedPageUrl.current=url;return}rememberedPdfPages.set(url,page)},[url,page]);
   useEffect(()=>{
     const seq=++searchSequence.current;setMatch(null);setRects([]);
     if(!document||!search?.text||search.field==='description'){setSearchStatus('');return;}
     setSearchStatus('Ищем страницу в PDF…');
-    void locatePdfFragment(document,search.text,search.start,()=>searchSequence.current!==seq,
+    if(locator.current?.document!==document)locator.current={document,find:createPdfFragmentLocator(document)};
+    void locator.current.find(search.text,search.start,()=>searchSequence.current!==seq,
       (p,n)=>setSearchStatus(`Ищем страницу в PDF… ${p} / ${n}`))
       .then(found=>{if(searchSequence.current!==seq)return;if(!found){setSearchStatus('Не удалось найти страницу фрагмента.');return;}navigateToMatch.current=true;setMatch(found);setPage(found.page);setSearchStatus(found.ambiguous?(found.partial?'Найдено несколько частичных совпадений; проверьте страницу.':'Найдено несколько совпадений; показана ближайшая страница.'):found.partial?'Найдено частичное совпадение; проверьте страницу.':'');})
       .catch(()=>{if(searchSequence.current===seq)setSearchStatus('Не удалось прочитать PDF. Попробуйте открыть файл заново.');});
     return()=>{searchSequence.current++};
-  },[document,search]);
+  },[document,search,jumpRevision]);
   useEffect(() => {
     if (!document || !canvas.current) return;
     let alive = true;
     let renderTask: RenderTask | null = null;
+    let textLayer: TextLayer | null = null;
     document.getPage(page).then(pdfPage => {
       if (!alive || !canvas.current) return;
       const natural = pdfPage.getViewport({scale: 1});
@@ -102,16 +111,18 @@ export function PdfPreview({url, title, search, active}: {url:string; title:stri
       setPageSize({width:viewport.width,height:viewport.height});
       const highlights=match?.page===page?match.matches.map(index=>{const item=match.items[index];const t=Util.transform(viewport.transform,item.transform);const h=Math.hypot(t[2],t[3]);return {x:t[4],y:t[5]-h,w:Math.abs(item.width*viewport.scale),h};}):[];
       setRects([]);
+      const layer=textLayerRef.current;
+      if(layer){layer.replaceChildren();layer.style.setProperty('--total-scale-factor',String(viewport.scale));textLayer=new TextLayer({textContentSource:pdfPage.streamTextContent(),container:layer,viewport});void textLayer.render().catch(()=>{});}
       renderTask = pdfPage.render({canvas: target, viewport, transform:[outputScale,0,0,outputScale,0,0]});
       return renderTask.promise.then(()=>{const box=viewportRef.current;if(!alive||!box)return;setRects(highlights);if(highlights.length&&navigateToMatch.current){navigateToMatch.current=false;const y=target.getBoundingClientRect().top-box.getBoundingClientRect().top+box.scrollTop+highlights[0].y;box.scrollTop=Math.max(0,y-80)}else box.scrollTop=relativeY*target.clientHeight});
     }).catch(() => { if (alive) setError('Не удалось отобразить страницу PDF.'); });
-    return () => { alive = false; renderTask?.cancel(); };
+    return () => { alive = false; renderTask?.cancel(); textLayer?.cancel(); };
   }, [document, page, match, zoom, width]);
-  return <div className="pdf-preview" ref={viewportRef} aria-label={title}>
+  return <div className="pdf-preview" ref={viewportRef} aria-label={title} onWheel={event=>{if(event.ctrlKey||event.metaKey){event.preventDefault();setZoom(z=>Math.max(0.5,Math.min(3,z*Math.exp(-event.deltaY*0.005))))}}}>
     {error ? <p role="alert">{error}</p> : !document ? <p role="status">Открываем PDF…</p> : <>
       <div className="pdf-preview-controls"><button aria-label="Предыдущая страница" disabled={page <= 1} onClick={() => {searchSequence.current++;setMatch(null);setSearchStatus('');setPage(page - 1)}}>←</button><span>{page} / {document.numPages}</span><button aria-label="Следующая страница" disabled={page >= document.numPages} onClick={() => {searchSequence.current++;setMatch(null);setSearchStatus('');setPage(page + 1)}}>→</button><button aria-label="Уменьшить PDF" disabled={zoom<=0.5} onClick={()=>setZoom(z=>Math.max(0.5,Math.round((z-0.25)*100)/100))}>−</button><span>{Math.round(zoom*100)}%</span><button aria-label="Увеличить PDF" disabled={zoom>=3} onClick={()=>setZoom(z=>Math.min(3,Math.round((z+0.25)*100)/100))}>+</button></div>
       {searchStatus&&<p role="status">{searchStatus}</p>}
-      <div className="pdf-page"><canvas ref={canvas}/>{rects.map((rect,index)=><span className="search-highlight-mark pdf-search-highlight" aria-hidden="true" key={`${searchSequence.current}-${index}`} style={{left:`${rect.x/pageSize.width*100}%`,top:`${rect.y/pageSize.height*100}%`,width:`${rect.w/pageSize.width*100}%`,height:`${rect.h/pageSize.height*100}%`}} />)}</div>
+      <div className="pdf-page"><canvas ref={canvas}/><div className="pdf-text-layer" ref={textLayerRef}/>{rects.map((rect,index)=><span className="search-highlight-mark pdf-search-highlight" aria-hidden="true" key={`${searchSequence.current}-${index}`} style={{left:`${rect.x/pageSize.width*100}%`,top:`${rect.y/pageSize.height*100}%`,width:`${rect.w/pageSize.width*100}%`,height:`${rect.h/pageSize.height*100}%`}} />)}</div>
     </>}
   </div>;
 }

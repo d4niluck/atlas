@@ -20,3 +20,10 @@
 .editor.file-editor.fullscreen:has(> .pdf-preview) > .file-preview-title{margin:6px 0}
 .editor.file-editor.fullscreen:has(> .pdf-preview) > .file-preview-title h1{font-size:18px}
 .editor.file-editor.fullscreen:has(> .pdf-preview) .pdf-preview-controls{padding:4px}
+
+.pdf-text-layer{position:absolute;inset:0;overflow:clip;line-height:1;letter-spacing:normal;word-spacing:normal;--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor) * var(--min-font-size));--min-font-size-inv:calc(1 / var(--min-font-size));}
+.pdf-text-layer :is(span,br){position:absolute;color:transparent;white-space:pre;cursor:text;transform-origin:0 0;user-select:text;font-size:calc(var(--text-scale-factor) * var(--font-height));transform:rotate(var(--rotate,0deg)) scaleX(var(--scale-x,1)) scale(var(--min-font-size-inv))}
+.pdf-text-layer .markedContent{display:contents}
+.pdf-text-layer ::selection{background:#76a8ff80}
+.file-preview-overlay.file-preview-expanded{pointer-events:auto;background:rgba(0,0,0,.78)}
+.file-preview-overlay.file-preview-expanded .editor.file-editor.fullscreen{width:calc(100vw - 64px);height:calc(100vh - 64px);border-radius:12px}

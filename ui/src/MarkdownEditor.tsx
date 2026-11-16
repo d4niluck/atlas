@@ -10,6 +10,11 @@ const actions:{kind:Format;label:string;symbol:string}[]=[
  {kind:'quote',label:'Цитата',symbol:'❞'}, {kind:'code',label:'Код',symbol:'</>'},
  {kind:'link',label:'Ссылка',symbol:'↗'},
 ];
+export function insertTab(e:React.KeyboardEvent<HTMLTextAreaElement>,text:string,onChange:(text:string)=>void){
+ if(e.key!=='Tab'||e.shiftKey||e.ctrlKey||e.metaKey||e.altKey)return;
+ e.preventDefault();const element=e.currentTarget;const start=element.selectionStart;const end=element.selectionEnd;
+ if(!document.execCommand('insertText',false,'  ')){onChange(text.slice(0,start)+'  '+text.slice(end));requestAnimationFrame(()=>element.setSelectionRange(start+2,start+2))}
+}
 export function MarkdownEditor({text,onChange}:Props){
  const input=useRef<HTMLTextAreaElement>(null);
  function format(kind:Format){
@@ -25,5 +30,5 @@ export function MarkdownEditor({text,onChange}:Props){
  }
  return <div className="markdown-editor"><div className="markdown-toolbar" role="toolbar" aria-label="Форматирование текста">
   {actions.map(a=><button key={a.kind} type="button" title={a.label} aria-label={a.label} onMouseDown={e=>e.preventDefault()} onClick={()=>format(a.kind)}>{a.symbol}</button>)}
- </div><textarea ref={input} value={text} onChange={e=>onChange(e.target.value)} placeholder="Начните писать…" aria-label="Текст заметки"/></div>;
+ </div><textarea ref={input} onKeyDown={e=>insertTab(e,text,onChange)} value={text} onChange={e=>onChange(e.target.value)} placeholder="Начните писать…" aria-label="Текст заметки"/></div>;
 }

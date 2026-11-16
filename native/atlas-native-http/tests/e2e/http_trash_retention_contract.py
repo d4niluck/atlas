@@ -51,9 +51,8 @@ try:
  ok(200,request('/api/w/default/objects/delete-many',{'ids':[a['id']]}));assert search([a['id']])==[]
  db=root/'data/.default/atlas.sqlite3'
  with sqlite3.connect(db) as c:c.execute('UPDATE trash SET deleted_at=0 WHERE id=?',(a['id'],));c.commit()
- # Current storage purges expired objects in undo-create; remove a throwaway note to trigger it.
- throwaway=ok(201,request('/api/w/default/notes',{'title':'temporary','text':'temporary'}))
- ok(200,request('/api/w/default/objects/'+throwaway['id']+'/undo-create',{'expected_revision':throwaway['revision']}))
+ # An open workspace periodically checks its trash for expired objects.
+ ok(200,request('/api/w/default/trash'))
  with sqlite3.connect(db) as c:assert c.execute('SELECT count(*) FROM objects WHERE id=?',(a['id'],)).fetchone()[0]==0
  assert search([b['id']]), 'wait for index after purge'
  new=ok(201,request('/api/w/default/notes',{'title':'A','text':marker}));assert search([new['id']]);assert count()==2,('new object after expiry must be encoded again',count())

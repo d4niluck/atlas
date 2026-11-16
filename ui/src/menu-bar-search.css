@@ -23,3 +23,7 @@ html.menu-search-root,html.menu-search-root body,html.menu-search-root #root{bac
 .menu-search-semantic-icon{display:block;width:16px;height:16px}
 
 .menu-chat-wrapper:not([hidden]){display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}.menu-chat-wrapper .chat-compose textarea{min-width:0;flex:1}.menu-chat-wrapper .chat-panel{min-height:0}.menu-chat-wrapper .chat-messages{overflow:auto}
+
+.menu-search-copy{border:0;border-radius:6px;background:transparent;color:#e8e5ee;padding:2px 6px;cursor:pointer;font-size:15px}.menu-search-copy:hover{background:rgba(255,255,255,.12)}
+
+:root[data-theme=light] .menu-search-copy{color:#29232e}:root[data-theme=light] .menu-search-copy:hover{background:rgba(0,0,0,.08)}

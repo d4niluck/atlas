@@ -5,7 +5,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 
 const QUICK: &str = "quick-search";
 const NARROW_WIDTH: f64 = 440.;
-const WIDE_WIDTH: f64 = 760.;
+const WIDE_WIDTH: f64 = 960.;
 const HEIGHT: f64 = 680.;
 
 #[derive(Default)]

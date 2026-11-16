@@ -202,7 +202,6 @@ fn revision(conn:&Connection,root:&Path,id:&str,only_file:bool)->R<String>{
 pub fn object_revision(root:&Path,id:&str)->R<String>{let conn=file_db(root)?;revision(&conn,root,id,false)}
 pub fn file_revision(root:&Path,id:&str)->R<String>{let mut conn=file_db(root)?;let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;let result=revision(&tx,root,id,true)?;tx.commit()?;Ok(result)}
 pub fn undo_created(root:&Path,id:&str,expected:&str)->R<()> {
- purge_trash(root)?;
  let mut conn=file_db(root)?;
  let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
  let board=board_from_db(&tx)?;

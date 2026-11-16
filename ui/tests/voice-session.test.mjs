@@ -34,6 +34,16 @@ test('микрофон не запрашивается до явного нач�
  await session.cancel();
 }));
 
+test('модель начинает готовиться до завершения запроса микрофона',async()=>withSession(async create=>{
+ const {calls,dependencies}=fixture();let grant;
+ dependencies.getUserMedia=()=>new Promise(resolve=>{grant=resolve});
+ dependencies.prepare=async()=>{calls.push('prepare')};
+ const session=create(dependencies);const starting=session.start();assert.deepEqual(calls,['prepare']);
+ grant({getTracks:()=>[{stop:()=>calls.push('track-stop')}]});
+ dependencies.capture=async()=>({stop:async()=>new Uint8Array([1]),cancel:()=>{}});
+ await starting;await session.cancel();
+}));
+
 test('модель готовится во время записи и используется для той же записи',async()=>withSession(async create=>{
  const {calls,dependencies}=fixture();let preparedId;
  dependencies.prepare=async id=>{preparedId=id;calls.push('prepare')};
