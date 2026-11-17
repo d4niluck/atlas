@@ -45,9 +45,26 @@ fn metadata_cancellable(doc:&Source<'_>,keep:impl Fn()->bool)->Result<Vec<Value>
   for (a,b) in before.iter().zip(&after) {assert_eq!(a["input_hash"],b["input_hash"]);assert_eq!(b["title"],"Новое");}
  }
 }
+// Collect compatible base and delta vectors without recomputing deleted objects.
+pub(super) fn reusable_vectors(dir:&Path,model:&impl IndexEncoder)->Result<(std::collections::HashMap<String,Box<[f32;512]>>,HashSet<String>),String>{
+ let loaded=match load(dir,model.identity()){Err(e) if e=="model mismatch"=>load(dir,model.alternate_identity())?,other=>other?};
+ let mut cache=std::collections::HashMap::new();let mut ids:HashSet<String>=records(&loaded.base_data)?.iter().filter_map(|r|r["id"].as_str().map(str::to_owned)).collect();
+ if let Some(snapshot)=loaded.snapshot.as_ref(){for id in snapshot.changed_keys.iter().chain(snapshot.removed.iter()){ids.remove(id);}for row in &loaded.delta_rows{if let Some(id)=row["id"].as_str(){ids.insert(id.to_owned());}}}
+ for (i,row) in records(&loaded.base_data)?.iter().enumerate(){if let Some(key)=row["input_hash"].as_str(){cache.insert(key.to_owned(),Box::new(loaded.base_index.reconstruct(i as i64).map_err(str::to_string)?));}}
+ if let Some(snapshot)=loaded.snapshot{let index=Index::from_memory(&snapshot.index).map_err(str::to_string)?;if index.count()!=loaded.delta_rows.len() as i64{return Err("delta count mismatch".into())}for (i,row) in loaded.delta_rows.iter().enumerate(){if let Some(key)=row["input_hash"].as_str(){cache.insert(key.to_owned(),Box::new(index.reconstruct(i as i64).map_err(str::to_string)?));}}}
+ Ok((cache,ids))
+}
+
+/// Identify cached image objects without reading the original image files.
+pub fn reusable_image_ids(dir:&Path,model:&impl IndexEncoder)->Result<HashSet<String>,String>{
+ let loaded=load(dir,model.identity()).or_else(|_|load(dir,model.alternate_identity()))?;
+ let mut ids:HashSet<String>=records(&loaded.base_data)?.iter().filter(|r|r["field"]=="image").filter_map(|r|r["id"].as_str().map(str::to_owned)).collect();
+ if let Some(snapshot)=loaded.snapshot{for id in snapshot.changed_keys.iter().chain(snapshot.removed.iter()){ids.remove(id);}for row in &loaded.delta_rows{if row["field"]=="image"{if let Some(id)=row["id"].as_str(){ids.insert(id.to_owned());}}}}
+ Ok(ids)
+}
 // Reindex retained trash when the model changes, then hide it before publication.
 fn rebuild_with_trash(model:&impl IndexEncoder,docs:&[Source<'_>],images:impl Iterator<Item=Result<(String,String,Vec<u8>,String),String>>,trash:&[String],dir:&Path,should_continue:impl Fn()->bool,progress:impl Fn(&str,usize,usize),reuse_existing:bool)->Result<String,String>{
- let base_generation=prepare_sources_with_progress_mode(model,docs,images,dir,&should_continue,&progress,reuse_existing)?;let initial_base=dir.join(&base_generation);
+ let base_generation=prepare_sources_with_progress_mode(model,docs,images,dir,&should_continue,&progress,reuse_existing,trash)?;let initial_base=dir.join(&base_generation);
  if trash.is_empty(){return Ok(base_generation)}
  let result=(||->Result<Option<String>,String>{
   if !should_continue(){return Err("indexing cancelled".into())}let meta=read_json(&initial_base.join("metadata.json"))?;let rows=records(&meta)?;let index=Index::load(&initial_base.join("index.faiss")).map_err(str::to_string)?;let keys=rows.iter().map(|r|r["id"].as_str().map(str::to_owned).ok_or("invalid source id")).collect::<Result<Vec<_>,_>>()?;let mut overlay=FlatOverlay::new(index,keys)?;for id in trash{if overlay.has_key(id){overlay.hide(id)?;}}if !overlay.has_hidden(){return Ok(None)}
