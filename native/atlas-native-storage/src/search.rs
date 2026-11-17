@@ -2,7 +2,7 @@ use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashSet};
 
-fn one_edit(a: &[char], b: &[char]) -> bool {
+pub(crate) fn one_edit(a: &[char], b: &[char]) -> bool {
     if a.len().abs_diff(b.len()) > 1 { return false; }
     let (mut i, mut j, mut edits) = (0, 0, 0);
     while i < a.len() && j < b.len() {

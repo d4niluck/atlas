@@ -90,6 +90,7 @@ impl Protected {
  pub fn agent_read(&self,id:&str,object:Option<&str>,query:Option<&str>)->Result<(u64,Value),String>{
   self.agent_read_scoped(id,object,query,None)
  }
+ pub(crate) fn agent_catalog(&self,id:&str,query:Option<&str>,offset:usize,limit:usize)->Result<(u64,Value),String>{let entry=self.lookup(id).ok_or("Workspace unavailable")?;let vault=entry.vault.lock().map_err(|_|"Workspace unavailable")?;let _gate=entry.commit_gate.lock().map_err(|_|"Workspace unavailable")?;if !entry.active.load(Ordering::Acquire){return Err("Workspace unavailable".into())}Ok((entry.cookie,vault.agent_catalog(query,offset,limit)?))}
  pub(crate) fn agent_page(&self,id:&str,object:&str,offset:usize,limit:usize)->Result<(u64,Value),String>{let entry=self.lookup(id).ok_or("Workspace unavailable")?;let vault=entry.vault.lock().map_err(|_|"Workspace unavailable")?;let _gate=entry.commit_gate.lock().map_err(|_|"Workspace unavailable")?;if !entry.active.load(Ordering::Acquire){return Err("Workspace unavailable".into())}Ok((entry.cookie,vault.agent_read_page(object,offset,limit)?))}
  pub(crate) fn agent_read_scoped(&self,id:&str,object:Option<&str>,query:Option<&str>,selected:Option<Vec<String>>)->Result<(u64,Value),String>{
   let entry=self.lookup(id).ok_or("Workspace unavailable")?;let vault=entry.vault.lock().map_err(|_|"Workspace unavailable")?;let _gate=entry.commit_gate.lock().map_err(|_|"Workspace unavailable")?;if !entry.active.load(Ordering::Acquire){return Err("Workspace unavailable".into())}

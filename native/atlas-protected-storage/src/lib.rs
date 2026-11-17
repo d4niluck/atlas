@@ -37,6 +37,7 @@ fn is_in_purge_queue(db:&Connection,id:&str)->Result<bool,String>{let exists:boo
 fn ensure_not_in_purge_queue(db:&Connection,id:&str)->Result<(),String>{if is_in_purge_queue(db,id)?{return Err("Срок восстановления объекта истёк".into())}Ok(())}
 pub struct Vault { db:Connection, source_file:std::fs::File, secondary:Option<Connection>, secondary_pin:Option<(std::fs::File,std::path::PathBuf)> }
 impl Vault {
+ pub fn agent_catalog(&self,query:Option<&str>,offset:usize,limit:usize)->Result<serde_json::Value,String>{let allowed=if query.is_some(){self.search_scope(None)?.map(|ids|ids.into_iter().collect())}else{None};atlas_native_storage_contract::agent_catalog::catalog(&self.db,query,offset,limit,allowed.as_ref())}
  pub fn agent_read_page(&self,id:&str,offset:usize,limit:usize)->Result<serde_json::Value,String>{
   if limit==0||limit>10000||offset>100000000{return Err("Некорректный диапазон".into())}
   let (title,kind,status):(String,String,Option<String>)=self.db.query_row("SELECT title,kind,text_status FROM objects WHERE id=? AND id NOT IN (SELECT id FROM trash)",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|_|"Объект не найден".to_owned())?;

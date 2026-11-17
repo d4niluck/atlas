@@ -39,15 +39,28 @@ fn agent_error(status:u16,value:&Value)->String {
  let detail=value["error"].as_str().unwrap_or("неизвестная ошибка");
  let advice=match (status,detail) {
   (403,"Forbidden")=>" Проверьте ключ агента и разрешения на пространство в настройках Atlas; защищённое пространство может требовать открытия в приложении.",
-  (404,"Workspace unavailable")=>" Откройте пространство в Atlas и проверьте подключение внешнего носителя.",
+  (404|503,"Workspace unavailable")=>" Откройте пространство в Atlas и проверьте подключение внешнего носителя.",
   (503,"Search mode disabled")=>" Включите нужный режим в настройках поиска Atlas.",
   (503,"Model unavailable")=>" Проверьте загрузку модели в настройках поиска Atlas и повторите запрос после её подготовки.",
   _=>"",
  };format!("Atlas: {detail} ({status}).{advice}")
 }
+fn resolve_workspace(input:&str,key:&str)->Result<String,String>{
+ if input=="default"||(input.len()==32&&input.bytes().all(|b|b.is_ascii_hexdigit())){return Ok(input.to_owned())}
+ if input.is_empty(){return Err("Укажите название или идентификатор пространства; список: atlas-agent --key-file ФАЙЛ workspaces".into())}
+ let (status,value)=request("GET","/api/agent/workspaces",None,key,Duration::from_secs(60))?;
+ if status>=400{return Err(agent_error(status,&value))}
+ let entries=value["workspaces"].as_array().ok_or("Atlas вернул некорректный список пространств")?;
+ let mut matches=Vec::new();
+ for entry in entries {if entry["name"].as_str()!=Some(input){continue}let id=entry["id"].as_str().ok_or("Atlas вернул некорректный идентификатор пространства")?;if !(id=="default"||(id.len()==32&&id.bytes().all(|b|b.is_ascii_hexdigit()))){return Err("Atlas вернул некорректный идентификатор пространства".into())}if !matches.iter().any(|(existing,_)|*existing==id){matches.push((id,entry));}}
+ if matches.is_empty(){return Err(format!("Пространство {input:?} не найдено или недоступно этому ключу. Проверьте название и права агента; список: atlas-agent --key-file ФАЙЛ workspaces."))}
+ if matches.len()>1{return Err(format!("Несколько пространств называются {input:?}. Укажите идентификатор: {}",matches.iter().map(|(id,_)|*id).collect::<Vec<_>>().join(", ")))}
+ let (id,entry)=matches[0];if entry["available"]==false{return Err(format!("Пространство {input:?} [{id}] недоступно. Откройте его в Atlas, разблокируйте защищённое пространство или подключите внешний носитель."))}Ok(id.to_owned())
+}
 fn human_output(command:&str,value:&Value)->String {
  match command {
   "workspaces"=>if let Some(items)=value["workspaces"].as_array(){return if items.is_empty(){"Нет доступных пространств".into()}else{items.iter().map(|v|format!("{}  {}{}",v["id"].as_str().unwrap_or("?"),v["name"].as_str().unwrap_or("Без названия"),if v["available"]==false{" (недоступно)"}else{""})).collect::<Vec<_>>().join("\n")}},
+  "list"|"search-titles"=>if let Some(items)=value["items"].as_array(){return if items.is_empty(){"Карточки не найдены".into()}else{items.iter().map(|v|format!("{}  [{}]  {}",v["title"].as_str().unwrap_or("Без названия"),v["id"].as_str().unwrap_or("?"),match v["kind"].as_str(){Some("note")=>"Заметка",Some("file")=>"Файл",_=>"Карточка"})).collect::<Vec<_>>().join("\n")}},
   "read"=>if let Some(text)=value["text"].as_str(){return format!("{}\n\n{text}",value["title"].as_str().unwrap_or("Заметка"))},
   "search"=>if let Some(items)=value["results"].as_array(){return if items.is_empty(){"Ничего не найдено".into()}else{let mut number=value["offset"].as_u64().unwrap_or(0);items.iter().flat_map(|v|{let source=format!("{}  [{}]",v["title"].as_str().unwrap_or("Без названия"),v["id"].as_str().unwrap_or("?"));let chunks=v["chunks"].as_array().into_iter().flatten().filter_map(|c|c["text"].as_str()).collect::<Vec<_>>();if chunks.is_empty(){number+=1;vec![format!("# Chunk {number}\n{source}")]}else{chunks.into_iter().map(|text|{number+=1;format!("# Chunk {number}\n{source}\n{text}")}).collect()}}).collect::<Vec<_>>().join("\n\n")}},
   _=>{}
@@ -139,13 +152,17 @@ fn upload_file(workspace:&str,path:&str,request_id:&str,key:&str,json_output:boo
  if !json_output{eprintln!()}let finish=request_inner("POST",&endpoint,Some(json!({"action":"finish","upload":upload}).to_string()),key,Duration::from_secs(60),true);let (status,result)=match finish{Ok(v)=>v,Err(_) if INTERRUPTED.load(Ordering::Acquire)=>{let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; сохранение могло завершиться, проверьте результат"}else{"Состояние сохранения неизвестно; проверьте результат"}.into())},Err(e)=>return Err(e)};if INTERRUPTED.load(Ordering::Acquire){eprintln!("Сохранение завершилось до подтверждения отмены")}if status>=400{return Err(agent_error(status,&result))}if json_output{println!("{result}")}else{if let Some(notice)=upload_notice(&result){eprintln!("{notice}")}println!("{}",serde_json::to_string_pretty(&result).map_err(|e|e.to_string())?)}Ok(())
 }
 fn search_payload(query:&str,mode:Option<&str>,objects:Option<&[String]>,offset:usize,limit:usize)->String{let mut value=json!({"query":query,"offset":offset,"limit":limit});if let Some(m)=mode{value["mode"]=json!(m)}if let Some(ids)=objects{value["object_ids"]=json!(ids)}value.to_string()}
+#[cfg(any(feature="agent-write",feature="agent-upload"))]
+fn validate_request_id(id:&str)->Result<(),String>{
+ if id.is_empty()||id.len()>128||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err("Некорректный идентификатор запроса: используйте 1–128 латинских букв, цифр, дефисов или подчёркиваний".into())}Ok(())
+}
 #[cfg(feature="agent-write")]
 fn write_command(args:&[String])->Result<(&'static str,String,Option<String>),String>{
  let valid=|id:&str|id=="default"||(!id.is_empty()&&id.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'));
  match args.first().map(String::as_str){
   Some("create") if args.len()==5&&valid(&args[1])=>{
    let mut text=String::new();std::fs::File::open(&args[3]).map_err(|e|format!("Не удалось открыть файл: {e}"))?.take(64_001).read_to_string(&mut text).map_err(|e|e.to_string())?;if text.len()>64_000{return Err("Файл заметки слишком большой".into())}
-   let id=&args[4];if id.is_empty()||id.len()>128||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err("Некорректный идентификатор запроса".into())}
+   let id=&args[4];validate_request_id(id)?;
    Ok(("POST",format!("/api/agent/{}/notes",args[1]),Some(json!({"title":args[2],"text":text,"request_id":id}).to_string())))
   },
   Some("edit") if args.len()>=4&&valid(&args[1])&&valid(&args[2])=>{
@@ -155,28 +172,30 @@ fn write_command(args:&[String])->Result<(&'static str,String,Option<String>),St
     "commit" if args.len()==7=>{let mut text=String::new();std::fs::File::open(&args[6]).map_err(|e|format!("Не удалось открыть файл: {e}"))?.take(80_001).read_to_string(&mut text).map_err(|e|e.to_string())?;if text.len()>80_000{return Err("Файл заметки слишком большой".into())}json!({"action":"commit","lease":args[4],"title":args[5],"text":text})},
     _=>return Err("Использование: edit WORKSPACE NOTE acquire|renew LEASE|release LEASE|commit LEASE TITLE FILE".into())
    };Ok(("POST",format!("/api/agent/{}/notes/{}/edit",args[1],args[2]),Some(payload.to_string())))
-  },_=>Err("Некорректная команда или идентификатор".into())
+  },_=>Err("Некорректные аргументы создания или редактирования. Проверьте идентификатор заметки и порядок аргументов: atlas-agent --help".into())
  }
 }
 fn run()->Result<(),String>{
- let args:Vec<String>=env::args().skip(1).collect();
+ let mut args:Vec<String>=env::args().skip(1).collect();
  if args.len()==1 && matches!(args[0].as_str(),"--help"|"-h"){
-  println!("Atlas — доступ к открытым пространствам\n\nИспользование: atlas-agent --key-file ФАЙЛ [--json] [параметры] команда\n\nКоманды:\n  workspaces                         Доступные пространства\n  read ПРОСТРАНСТВО ID               Прочитать текст заметки или индексируемого файла\n  search ПРОСТРАНСТВО ЗАПРОС         Поиск по словам\n\nПараметры (перед командой):\n  --offset N --limit N              Диапазон: поиск 0/10, чтение 0/4000 символов\n  --json                            Данные в JSON для обработки программой");
+  println!("Atlas — доступ к открытым пространствам\n\nИспользование: atlas-agent --key-file ФАЙЛ [--json] [параметры] команда\n\nКоманды:\n  workspaces                         Доступные пространства\n  read ПРОСТРАНСТВО ID               Прочитать текст заметки или индексируемого файла\n  list ПРОСТРАНСТВО                  Список карточек\n  search-titles ПРОСТРАНСТВО ЗАПРОС  Поиск по названиям карточек\n  search ПРОСТРАНСТВО ЗАПРОС         Поиск по словам\n\nПараметры (перед командой):\n  --offset N --limit N              Диапазон: поиск и список 0/10, чтение 0/4000 символов\n  --json                            Данные в JSON для обработки программой");
   #[cfg(feature="agent-search")] println!("  --objects ID1,ID2                 Поиск только по указанным объектам\n\nРежимы поиска (после запроса):\n  semantic                          Поиск по смыслу\n  hybrid                            Поиск по словам и смыслу\n  rag ПРОСТРАНСТВО ВОПРОС [--stream] Умный поиск; --stream показывает ответ по мере генерации\n  cancel ПРОСТРАНСТВО ID            Остановить умный поиск");
   #[cfg(feature="agent-upload")] println!("\n  upload ПРОСТРАНСТВО ФАЙЛ ID       Добавить файл (ID — уникальный идентификатор запроса)");
   #[cfg(feature="agent-write")] println!("  create ПРОСТРАНСТВО НАЗВАНИЕ ФАЙЛ ID  Создать заметку из текста файла\n  delete ПРОСТРАНСТВО ID             Удалить карточку в буфер\n  edit ПРОСТРАНСТВО ID acquire       Занять заметку для редактирования\n  edit ПРОСТРАНСТВО ID renew|release БЛОКИРОВКА\n  edit ПРОСТРАНСТВО ID commit БЛОКИРОВКА НАЗВАНИЕ ФАЙЛ");
-  println!("\nПример: atlas-agent --key-file ~/.atlas-key --objects ID search ПРОСТРАНСТВО 'тема' semantic\nПуть к файлу ключа указывается без содержимого ключа.");return Ok(())
+  println!("\nПример: atlas-agent --key-file ~/.atlas-key --objects ID search ПРОСТРАНСТВО 'тема' semantic\nПРОСТРАНСТВО — точное название или идентификатор из workspaces. Если названия совпадают, укажите идентификатор; default и 32-значный ID имеют приоритет. Путь к файлу ключа указывается без содержимого ключа.");return Ok(())
  }
  if args.len()<3{return Err("Укажите --key-file и команду; справка: atlas-agent --help".into())}
  let mut key=None;let mut output_json=false;let mut i=0;let mut offset=0usize;let mut requested_limit:Option<usize>=None;let mut page_set=false;
  #[cfg(feature="agent-search")] let mut objects:Option<Vec<String>>=None;
  while i<args.len() {match args[i].as_str(){"--key-file"=>{i+=1;key=Some(args.get(i).ok_or("Нет файла ключа")?.clone());},"--json"=>output_json=true,"--offset"|"--limit"=>{let which=args[i].as_str();i+=1;let n=args.get(i).ok_or("Не указан диапазон поиска")?.parse::<usize>().map_err(|_|"Некорректный диапазон поиска")?;if which=="--offset"{offset=n}else{if n==0||n>10000{return Err("Некорректный диапазон".into())}requested_limit=Some(n)}page_set=true},#[cfg(feature="agent-search")] "--objects"=>{i+=1;let raw=args.get(i).ok_or("Нет списка объектов")?;if objects.is_some(){return Err("Область задана несколько раз".into())}let ids:Vec<String>=if raw.is_empty(){vec![]}else{raw.split(',').map(str::to_owned).collect()};if ids.len()>1000||ids.iter().any(|id|id.is_empty()||!id.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-')){return Err("Некорректный список объектов".into())}objects=Some(ids)},_=>break}i+=1;}
  let key_path=key.ok_or("Укажите файл ключа")?;let key=secure_file(&key_path)?;
- let command=args.get(i).ok_or("Нет команды")?.as_str();let valid_id=|s:&String|s=="default"||(!s.is_empty()&&s.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'));
- if page_set&&!matches!(command,"search"|"read"){return Err("Диапазон поддерживается только для поиска и чтения".into())}
- let limit=requested_limit.unwrap_or(if command=="read"{4000}else{10});if command=="search"&&(offset>10000||limit>128){return Err("Некорректный диапазон поиска".into())}
+ let command_value=args.get(i).ok_or("Нет команды")?.clone();let command=command_value.as_str();
+ if matches!(command,"read"|"search"|"list"|"search-titles"|"rag"|"cancel"|"upload"|"create"|"edit"|"delete"){let workspace=args.get(i+1).ok_or("Укажите название или идентификатор пространства; справка: atlas-agent --help")?.clone();args[i+1]=resolve_workspace(&workspace,&key)?;}
+ let valid_id=|s:&String|s=="default"||(!s.is_empty()&&s.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'));
+ if page_set&&!matches!(command,"search"|"read"|"list"|"search-titles"){return Err("Диапазон поддерживается только для поиска, списка и чтения".into())}
+ let limit=requested_limit.unwrap_or(if command=="read"{4000}else{10});if (command=="search"&&offset>10000)||(matches!(command,"search"|"list"|"search-titles")&&limit>128){return Err("Некорректный диапазон поиска".into())}
  #[cfg(feature="agent-upload")]
- if command=="upload" {if args.len()!=i+4||!valid_id(&args[i+1])||args[i+3].is_empty()||args[i+3].len()>128||!args[i+3].bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err("Использование: upload WORKSPACE FILE REQUEST_ID".into())}return upload_file(&args[i+1],&args[i+2],&args[i+3],&key,output_json)}
+ if command=="upload" {if args.len()!=i+4||!valid_id(&args[i+1]){return Err("Использование: upload ПРОСТРАНСТВО ФАЙЛ ID_ЗАПРОСА; укажите путь к локальному файлу и уникальный идентификатор запроса".into())}validate_request_id(&args[i+3])?;return upload_file(&args[i+1],&args[i+2],&args[i+3],&key,output_json)}
  #[cfg(feature="agent-search")]
  if command=="rag" {let stream=args.len()==i+4&&args[i+3]=="--stream";if (!stream&&args.len()!=i+3)||!valid_id(&args[i+1]){return Err("Использование: rag WORKSPACE QUERY [--stream]".into())}return stream_rag(&args[i+1],&args[i+2],&key,output_json,&objects,stream)}
  #[cfg(feature="agent-search")]
@@ -186,6 +205,9 @@ fn run()->Result<(),String>{
   #[cfg(feature="agent-write")]
   "delete" if args.len()==i+3 && valid_id(&args[i+1]) && valid_id(&args[i+2]) => ("POST",format!("/api/agent/{}/objects/{}/delete",args[i+1],args[i+2]),Some("{}".into())),
   "workspaces" if args.len()==i+1=>("GET","/api/agent/workspaces".to_owned(),None),
+  "list" if args.len()==i+2 && valid_id(&args[i+1]) => ("POST",format!("/api/agent/{}/objects/list",args[i+1]),Some(json!({"offset":offset,"limit":limit,"query":null}).to_string())),
+  "search-titles" if args.len()==i+3 && valid_id(&args[i+1]) && !args[i+2].trim().is_empty() => ("POST",format!("/api/agent/{}/objects/list",args[i+1]),Some(json!({"offset":offset,"limit":limit,"query":args[i+2]}).to_string())),
+
   "read" if args.len()==i+3 && valid_id(&args[i+1]) && valid_id(&args[i+2]) => ("GET",format!("/api/agent/{}/notes/{}?offset={offset}&limit={limit}",args[i+1],args[i+2]),None),
   "search" if args.len()==i+3&&valid_id(&args[i+1]) => ("POST",format!("/api/agent/{}/search",args[i+1]),Some(query_body(&args[i+2],None))),
   #[cfg(feature="agent-search")]
@@ -194,10 +216,10 @@ fn run()->Result<(),String>{
   "cancel" if args.len()==i+3 && valid_id(&args[i+1]) && valid_id(&args[i+2]) => ("POST",format!("/api/agent/{}/rag/cancel/{}",args[i+1],args[i+2]),Some("{}".into())),
   #[cfg(feature="agent-write")]
   "create"|"edit"=>write_command(&args[i..])?,
-  _=>return Err("Некорректная команда или идентификатор".into())
+  _=>return Err("Некорректная команда или аргументы. Проверьте название команды, идентификатор объекта и порядок аргументов: atlas-agent --help".into())
  };
  let search_semantic=command=="search"&&args.len()==i+4&&matches!(args[i+3].as_str(),"semantic"|"hybrid");
- let (status,result)=if search_semantic{search_retry::search(||request(method,&path,body.clone(),&key,Duration::from_secs(60)))?}else{request(method,&path,body,&key,Duration::from_secs(60))?};if status>=400{return Err(agent_error(status,&result))}if output_json{println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?)}else{println!("{}",human_output(command,&result));if command=="read"{if let Some(next)=result["next_offset"].as_u64(){let quote=|s:&str|format!("'{}'",s.replace('\'',"'\\''"));println!("\nДальше есть текст. Продолжить:\n{} --key-file {} --offset {} --limit {} read {} {}",quote(&env::args().next().unwrap_or_else(||"atlas-agent".into())),quote(&key_path),next,limit,quote(&args[i+1]),quote(&args[i+2]));}}}Ok(())
+ let (status,result)=if search_semantic{search_retry::search(||request(method,&path,body.clone(),&key,Duration::from_secs(60)))?}else{request(method,&path,body,&key,Duration::from_secs(60))?};if status>=400{return Err(agent_error(status,&result))}if output_json{println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?)}else{println!("{}",human_output(command,&result));if matches!(command,"list"|"search-titles"){if let Some(total)=result["total"].as_u64(){println!("\nВсего: {total}")}if let Some(next)=result["next_offset"].as_u64(){let quote=|s:&str|format!("'{}'",s.replace('\'',"'\\''"));let suffix=if command=="search-titles"{format!(" {}",quote(&args[i+2]))}else{String::new()};println!("Следующая страница:\n{} --key-file {} --offset {} --limit {} {} {}{}",quote(&env::args().next().unwrap_or_else(||"atlas-agent".into())),quote(&key_path),next,limit,command,quote(&args[i+1]),suffix);}}if command=="read"{if let Some(next)=result["next_offset"].as_u64(){let quote=|s:&str|format!("'{}'",s.replace('\'',"'\\''"));println!("\nДальше есть текст. Продолжить:\n{} --key-file {} --offset {} --limit {} read {} {}",quote(&env::args().next().unwrap_or_else(||"atlas-agent".into())),quote(&key_path),next,limit,quote(&args[i+1]),quote(&args[i+2]));}}}Ok(())
 }
 fn main(){if let Err(e)=run(){eprintln!("{e}");std::process::exit(1)}}
 
@@ -222,6 +244,18 @@ mod tests {
   let worker=std::thread::spawn(move||{let(mut peer,_)=listener.accept().unwrap();let mut data=Vec::new();let mut buffer=[0u8;1024];loop{let n=peer.read(&mut buffer).unwrap();assert!(n>0);data.extend_from_slice(&buffer[..n]);if let Some(i)=data.windows(4).position(|w|w==b"\r\n\r\n"){let h=std::str::from_utf8(&data[..i]).unwrap();let n:usize=h.lines().find_map(|v|v.strip_prefix("Content-Length: ")).unwrap().parse().unwrap();if data.len()>=i+4+n{assert!(h.starts_with("POST /api/agent/default/notes HTTP/1.1"));assert_eq!(serde_json::from_slice::<Value>(&data[i+4..]).unwrap()["request_id"],"request-1");break}}}peer.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();});
   let file=dir.join("note.md");std::fs::write(&file,"text").unwrap();let args=vec!["create".into(),"default".into(),"title".into(),file.to_string_lossy().to_string(),"request-1".into()];let(method,route,body)=write_command(&args).unwrap();let stream=connect_agent_at(&dir).unwrap();let (status,result)=request_on_stream(method,&route,body,"key",Duration::from_secs(5),false,stream).unwrap();assert_eq!(status,201);assert_eq!(result["ok"],true);worker.join().unwrap();std::fs::remove_file(path).unwrap();std::fs::remove_file(file).unwrap();std::fs::remove_dir(dir).unwrap();
  }
+ #[cfg(any(feature="agent-write",feature="agent-upload"))]
+ #[test] fn request_id_errors_explain_allowed_characters(){
+  assert!(validate_request_id("request-1_ok").is_ok());
+  for id in ["", "with spaces", "не-латиница"] {let error=validate_request_id(id).unwrap_err();assert!(error.contains("1–128")&&error.contains("латинских"),"{error}");}
+  assert!(validate_request_id(&"a".repeat(129)).is_err());
+ }
+ #[cfg(feature="agent-write")]
+ #[test] fn write_commands_explain_invalid_arguments(){
+  for args in [vec!["create".into(),"default".into()],vec!["edit".into(),"default".into(),"wrong-id".into(),"acquire".into()]] {
+   let error=write_command(&args).unwrap_err();assert!(error.contains("аргумент")&&error.contains("--help"),"{error}");
+  }
+ }
  #[cfg(feature="agent-write")]
  #[test] fn write_commands_build_expected_payloads_without_test_hooks(){
   let file=std::env::temp_dir().join(format!("atlas-cli-write-{}",std::process::id()));std::fs::write(&file,"Текст\n").unwrap();
@@ -235,6 +269,7 @@ mod tests {
  }
  #[test] fn server_errors_explain_recovery(){
   assert!(agent_error(403,&json!({"error":"Forbidden"})).contains("ключ"));
+  assert!(agent_error(503,&json!({"error":"Workspace unavailable"})).contains("Откройте пространство"));
   assert!(agent_error(503,&json!({"error":"Search mode disabled"})).contains("настройках поиска"));
   assert!(agent_error(503,&json!({"error":"other"})).contains("other"));
  }

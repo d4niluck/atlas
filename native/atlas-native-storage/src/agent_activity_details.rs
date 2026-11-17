@@ -4,10 +4,10 @@ use serde_json::{json,Value};
 fn bounded(v:&Value,key:&str)->Option<String>{v.get(key)?.as_str().map(|s|{let lower=s.to_lowercase();let has_label=["password","passwd","парол","secret","секрет","token","токен","api_key","api-key","apikey","authorization","bearer ","private key","sk-"].iter().any(|x|lower.contains(x));let long_hex=lower.split(|c:char|!c.is_ascii_hexdigit()).any(|run|run.len()>=32);if has_label||long_hex{"[скрыто: возможны секретные данные]".to_owned()}else{s.chars().take(500).collect()}})}
 pub fn summarize(action:&str,request:&Value,response:&Value)->(Value,Value){
  let mut q=serde_json::Map::new();
- if matches!(action,"search"|"rag"){if let Some(s)=bounded(request,"query"){q.insert("query".into(),s.into());}if let Some(s)=bounded(request,"mode"){if matches!(s.as_str(),"lexical"|"semantic"|"hybrid"){q.insert("mode".into(),s.into());}}}
+ if matches!(action,"search"|"search_titles"|"rag"){if let Some(s)=bounded(request,"query"){q.insert("query".into(),s.into());}if let Some(s)=bounded(request,"mode"){if matches!(s.as_str(),"lexical"|"semantic"|"hybrid"){q.insert("mode".into(),s.into());}}}
  if matches!(action,"create"|"edit"){if let Some(title)=bounded(request,"title"){q.insert("title".into(),title.into());}}
  if action=="upload"{if let Some(name)=bounded(request,"name"){q.insert("name".into(),name.into());}if let Some(size)=request.get("size").and_then(Value::as_u64).filter(|n|*n<=10*1024*1024*1024){q.insert("size".into(),size.into());}}
- if matches!(action,"read"|"search"){for key in ["offset","limit"]{if let Some(n)=request.get(key).and_then(Value::as_u64).filter(|n|*n<=1_000_000_000){q.insert(key.into(),n.into());}}}
+ if matches!(action,"read"|"search"|"list"|"search_titles"){for key in ["offset","limit"]{if let Some(n)=request.get(key).and_then(Value::as_u64).filter(|n|*n<=1_000_000_000){q.insert(key.into(),n.into());}}}
  if matches!(action,"edit"|"upload"){if let Some(step)=request.get("action").and_then(Value::as_str).filter(|s|if action=="edit"{matches!(*s,"acquire"|"renew"|"release"|"commit")}else{matches!(*s,"begin"|"finish"|"cancel")}){q.insert("action".into(),step.into());}}
  if let Some(s)=request.get("object_id").and_then(Value::as_str).filter(|s|!s.is_empty()&&s.len()<=64&&s.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-')){q.insert("object_id".into(),s.into());}
  let mut r=serde_json::Map::new();if action=="rag"{if let Some(answer)=bounded(response,"answer"){r.insert("answer".into(),answer.into());}}if let Some(n)=response.get("total").and_then(Value::as_u64){r.insert("total".into(),n.into());}else if let Some(n)=response.get("count").and_then(Value::as_u64){r.insert("count".into(),n.into());}else if let Some(items)=response.get("results").and_then(Value::as_array){r.insert("count".into(),items.len().into());}
@@ -41,3 +41,5 @@ pub fn copy_to(src:&Connection,dst:&Connection)->Result<(),String>{
 }
 
 #[cfg(test)] mod object_id_tests {use super::*;#[test]fn keeps_valid_compact_id_but_rejects_arbitrary_input(){let id="0123456789abcdef0123456789abcdef";let(q,_)=summarize("read",&json!({"object_id":id}),&json!({}));assert_eq!(q["object_id"],id);let(q,_)=summarize("read",&json!({"object_id":"secret credential"}),&json!({}));assert!(q.get("object_id").is_none());}}
+
+#[cfg(test)] mod catalog_activity_tests {use super::*;#[test]fn catalog_summary_keeps_paging_and_redacts_sensitive_text(){let(q,r)=summarize("list",&json!({"offset":2,"limit":4}),&json!({"total":10,"items":[{"title":"private"}]}));assert_eq!(q,json!({"offset":2,"limit":4}));assert_eq!(r,json!({"total":10}));let(q,_)=summarize("search_titles",&json!({"query":"password 123","limit":4}),&json!({}));assert_eq!(q["query"],"[скрыто: возможны секретные данные]");}}

@@ -17,7 +17,7 @@ pub fn record(root: &Path, agent: &str, workspace: &str, action: &str, status: u
 pub fn record_with_id(root: &Path, agent: &str, workspace: &str, action: &str, status: u16) -> Result<Option<i64>, String> { record_event(root,agent,workspace,action,status).map(|v|v.map(|(id,_,_,_)|id)) }
 
 pub fn record_event(root: &Path, agent: &str, workspace: &str, action: &str, status: u16) -> Result<Option<(i64,String,String,i64)>, String> {
-    if !matches!(action, "read" | "search" | "create" | "edit" | "upload" | "rag" | "delete") { return Err("invalid action".into()); }
+    if !matches!(action, "read" | "search" | "list" | "search_titles" | "create" | "edit" | "upload" | "rag" | "delete") { return Err("invalid action".into()); }
     let path = root.join(".atlas-agent-profiles.sqlite3");
     let mut db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(|e| e.to_string())?;
     configure(&db)?;

@@ -5,7 +5,7 @@ type Rights={read:boolean;add:boolean;edit:boolean;lexical:boolean;semantic:bool
 type Agent={id:string;name:string;permissions:Record<string,Rights>};
 type Space={id:string;name:string};
 const fields:[keyof Rights,string][]=[['read','Чтение'],['add','Добавление'],['edit','Изменение'],['lexical','Поиск по словам'],['semantic','Поиск по смыслу'],['smart','Умный поиск']];
-const actionNames:Record<string,string>={read:'Чтение',search:'Поиск',rag:'Умный поиск',create:'Добавление',edit:'Изменение',upload:'Загрузка файла',delete:'Удаление'};
+const actionNames:Record<string,string>={read:'Чтение',search:'Поиск',list:'Список карточек',search_titles:'Поиск по названиям',rag:'Умный поиск',create:'Добавление',edit:'Изменение',upload:'Загрузка файла',delete:'Удаление'};
 const empty=():Rights=>({read:false,add:false,edit:false,lexical:false,semantic:false,smart:false});
 export function AgentSettings({spaces,onClose}:{spaces:Space[];onClose:()=>void}){
  const [draftRights,setDraftRights]=useState<Record<string,Rights>>({});

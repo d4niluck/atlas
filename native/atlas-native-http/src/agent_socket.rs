@@ -26,6 +26,7 @@ impl AgentRequest {
  pub fn method(&self)->&tiny_http::Method{&self.method}
  pub fn url(&self)->&str{&self.path}
  pub fn headers(&self)->&[tiny_http::Header]{&self.headers}
+ pub(crate) fn catalog_activity(&self)->Option<&'static str>{let value:serde_json::Value=serde_json::from_slice(&self.body).ok()?;match value.get("query")?{serde_json::Value::Null=>Some("list"),serde_json::Value::String(_)=>Some("search_titles"),_=>None}}
  pub(crate) fn activity_step(&self)->Option<String>{serde_json::from_slice::<serde_json::Value>(&self.body).ok()?.get("action")?.as_str().map(str::to_owned)}
 }
 pub fn body(req:&mut AgentRequest)->Result<serde_json::Value,()>{let content=req.headers.iter().find(|h|h.field.equiv("Content-Type")).map(|h|h.value.as_str());if !content.is_some_and(|s|s.split(';').next()==Some("application/json")){return Err(())}let v:serde_json::Value=serde_json::from_slice(&req.body).map_err(|_|())?;if !v.is_object(){return Err(())}Ok(v)}

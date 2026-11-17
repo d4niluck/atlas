@@ -1,3 +1,4 @@
+pub mod agent_catalog;
 pub mod agent_activity_details;
 pub mod chat_state;
 pub mod pdf;
