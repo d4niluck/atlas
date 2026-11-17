@@ -22,10 +22,13 @@ export function NoteEditor({searchJumpRevision,searchControl,title,text,highligh
  const resizeRef=useEditorResize(expanded);
  const editorScroll=useRef<HTMLTextAreaElement>(null),previewScroll=useRef<HTMLDivElement>(null);
  const expected=useRef(new WeakMap<HTMLElement,number>());
+ const backdropPressed=useRef(false);
+ const [titleFocused,setTitleFocused]=useState(false);
+ const [titleUntouched,setTitleUntouched]=useState(false);
  const onScroll=(source:HTMLElement,target:HTMLElement|null)=>{if(expanded&&editing&&target)syncScroll(source,target,expected.current)};
  // Keep unsaved text in the editor while revealing the selected passage.
  useEffect(()=>{setMode(current=>current.editing&&!current.expanded?{...current,expanded:true}:current)},[searchJumpRevision]);
- return <div className="overlay" onClick={onClose}>
+ return <div className="overlay" onPointerDownCapture={e=>{backdropPressed.current=e.target===e.currentTarget}} onClick={e=>{if(backdropPressed.current&&e.target===e.currentTarget)onClose();backdropPressed.current=false}}>
   <section ref={resizeRef} tabIndex={0} aria-label="Просмотр. Для изменения размера: Alt Shift и стрелки" className={'editor note-editor'+(expanded?' fullscreen':'')} onBlur={e=>{if(e.relatedTarget&&!e.currentTarget.contains(e.relatedTarget as Node))onBlurEditor()}} style={!expanded?{height:`min(${Number(localStorage.getItem('atlas-editor-height'))||640}px, 85vh)`,width:`min(${Number(localStorage.getItem('atlas-editor-width'))||900}px, 95vw)`}:undefined} onClick={e=>e.stopPropagation()}>
    <div className="editor-top"><div className="editor-meta"><span className="eyebrow">ЗАМЕТКА</span>{searchControl}</div><div>
     <button type="button" disabled={saving} onClick={async()=>{if(editing&&!await onFinishEditing())return;if(!editing&&onStartEditing&&!await onStartEditing())return;setMode(current=>nextNoteMode(current,'toggle-edit'))}}>{editing?'Читать':'Редактировать'}</button>
@@ -33,7 +36,7 @@ export function NoteEditor({searchJumpRevision,searchControl,title,text,highligh
     <button type="button" onClick={onClose} aria-label="Закрыть заметку">×</button>
    </div></div>
    {editing&&!!recovery?.length&&<section aria-label="Резервные черновики"><p>Найдены резервные черновики. Выберите для восстановления:</p>{recovery.map((draft,index)=><button key={draft.id} disabled={saving} type="button" onClick={()=>onRecover?.(draft)}>Черновик {index+1}: {draft.title}</button>)}</section>}
-   <input className="title-input" aria-label="Название заметки" value={title} readOnly={saving||!!onStartEditing&&!editing} onFocus={async()=>{if(!editing&&onStartEditing&&await onStartEditing())setMode(current=>({...current,editing:true}))}} onChange={e=>onTitle(e.target.value)}/>
+   <input className="title-input" aria-label="Название заметки" value={titleFocused&&titleUntouched&&title==='Новая заметка'?'':title} placeholder="Новая заметка" readOnly={saving||!!onStartEditing&&!editing} onFocus={async()=>{setTitleFocused(true);setTitleUntouched(true);if(!editing&&onStartEditing&&await onStartEditing())setMode(current=>({...current,editing:true}))}} onBlur={()=>setTitleFocused(false)} onChange={e=>{setTitleUntouched(false);onTitle(e.target.value)}}/>
    <div className={'note-split'+(expanded&&editing?' split-expanded':'')}>
     {editing&&<MarkdownEditor text={text} onChange={onText} inputRef={editorScroll} onScroll={e=>onScroll(e.currentTarget,previewScroll.current)}/>}
     {(expanded||!editing)&&<div className="note-preview">{expanded&&editing&&<span className="eyebrow">ПРЕДПРОСМОТР</span>}<div ref={previewScroll} onScroll={e=>onScroll(e.currentTarget,editorScroll.current)} className="note-content markdown-content">
