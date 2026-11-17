@@ -17,15 +17,33 @@ fn connect_agent()->Result<UnixStream,String>{
  let dir=std::path::PathBuf::from(format!("/tmp/atlas-agent-{uid}"));
  connect_agent_at(&dir)
 }
+fn connection_error(stage:&str,error:&std::io::Error)->String {
+ let reason=match (stage,error.kind()) {
+  ("directory"|"socket"|"connect",std::io::ErrorKind::NotFound)=>"Локальное соединение Atlas не найдено. Запустите Atlas в этой учётной записи и повторите запрос.",
+  (_,std::io::ErrorKind::PermissionDenied)=>"Доступ к локальному соединению Atlas запрещён. Проверьте ограничения среды агента (песочницы) и разрешите подключение к локальному сокету; запускайте CLI под той же учётной записью, что и Atlas.",
+  ("connect",std::io::ErrorKind::ConnectionRefused)=>"Atlas не принимает локальные подключения. Проверьте, что приложение запущено; если ошибка сохраняется, перезапустите Atlas и повторите запрос.",
+  _=>"Не удалось подключиться к Atlas. Проверьте, что приложение работает в той же учётной записи, и повторите запрос.",
+ };format!("{reason} Этап: {stage}; системная ошибка: {error}")
+}
 fn connect_agent_at(dir:&std::path::Path)->Result<UnixStream,String>{
- let uid=unsafe{libc::geteuid()};let m=std::fs::symlink_metadata(dir).map_err(|_|"Atlas недоступен")?;
+ let uid=unsafe{libc::geteuid()};let m=std::fs::symlink_metadata(dir).map_err(|e|connection_error("directory",&e))?;
  if !m.is_dir()||m.uid()!=uid||m.mode()&0o077!=0{return Err("Небезопасный каталог Atlas".into())}
- let path=dir.join("agent.sock");let m=std::fs::symlink_metadata(&path).map_err(|_|"Atlas недоступен")?;
+ let path=dir.join("agent.sock");let m=std::fs::symlink_metadata(&path).map_err(|e|connection_error("socket",&e))?;
  if !m.file_type().is_socket()||m.uid()!=uid||m.mode()&0o077!=0{return Err("Небезопасный сокет Atlas".into())}
- let socket=UnixStream::connect(path).map_err(|_|"Atlas недоступен")?;
+ let socket=UnixStream::connect(path).map_err(|e|connection_error("connect",&e))?;
  #[cfg(target_os="macos")] {let mut peer=0;let mut group=0;if unsafe{libc::getpeereid(socket.as_raw_fd(),&mut peer,&mut group)}!=0||peer!=uid{return Err("Недоверенный сервер Atlas".into())}}
  #[cfg(target_os="linux")] {let mut peer:libc::ucred=unsafe{std::mem::zeroed()};let mut size=std::mem::size_of::<libc::ucred>() as libc::socklen_t;if unsafe{libc::getsockopt(socket.as_raw_fd(),libc::SOL_SOCKET,libc::SO_PEERCRED,&mut peer as *mut _ as *mut _,&mut size)}!=0||peer.uid!=uid{return Err("Недоверенный сервер Atlas".into())}}
  Ok(socket)
+}
+fn agent_error(status:u16,value:&Value)->String {
+ let detail=value["error"].as_str().unwrap_or("неизвестная ошибка");
+ let advice=match (status,detail) {
+  (403,"Forbidden")=>" Проверьте ключ агента и разрешения на пространство в настройках Atlas; защищённое пространство может требовать открытия в приложении.",
+  (404,"Workspace unavailable")=>" Откройте пространство в Atlas и проверьте подключение внешнего носителя.",
+  (503,"Search mode disabled")=>" Включите нужный режим в настройках поиска Atlas.",
+  (503,"Model unavailable")=>" Проверьте загрузку модели в настройках поиска Atlas и повторите запрос после её подготовки.",
+  _=>"",
+ };format!("Atlas: {detail} ({status}).{advice}")
 }
 fn human_output(command:&str,value:&Value)->String {
  match command {
@@ -41,13 +59,13 @@ fn request_inner(method:&str,path:&str,body:Option<String>,key:&str,timeout:Dura
  let socket=connect_agent()?;request_on_stream(method,path,body,key,timeout,interruptible,socket)
 }
 fn request_on_stream(method:&str,path:&str,body:Option<String>,key:&str,timeout:Duration,interruptible:bool,mut socket:UnixStream)->Result<(u16,Value),String>{
- socket.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e|e.to_string())?;let payload=body.unwrap_or_default();write!(socket,"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Atlas-Agent-Token: {key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len()).map_err(|e|e.to_string())?;
+ socket.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e|e.to_string())?;let payload=body.unwrap_or_default();write!(socket,"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Atlas-Agent-Token: {key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len()).map_err(|e|format!("Не удалось отправить запрос в Atlas: {e}. Проверьте, что Atlas работает; перед повтором изменения проверьте, не сохранилось ли оно уже."))?;
  socket.set_read_timeout(Some(Duration::from_millis(200))).map_err(|e|format!("socket read timeout: {e}"))?;let mut raw=Vec::new();let deadline=std::time::Instant::now()+timeout;loop {
   #[cfg(any(feature="agent-search",feature="agent-upload"))] if interruptible&&INTERRUPTED.load(std::sync::atomic::Ordering::Acquire){return Err("interrupted".into())}
   #[cfg(not(any(feature="agent-search",feature="agent-upload")))] let _=interruptible;
-  let remain=deadline.saturating_duration_since(std::time::Instant::now());if remain.is_zero(){return Err("Превышено время ожидания Atlas".into())}
-  let mut buf=[0u8;8192];match socket.read(&mut buf){Ok(0)=>break,Ok(n)=>raw.extend_from_slice(&buf[..n]),Err(e) if matches!(e.kind(),std::io::ErrorKind::TimedOut|std::io::ErrorKind::WouldBlock|std::io::ErrorKind::Interrupted)=>continue,Err(e)=>return Err(e.to_string())}if raw.len()>8_388_608{return Err("Слишком большой ответ Atlas".into())}
- }if raw.len()>8_388_608{return Err("Слишком большой ответ Atlas".into())}let split=raw.windows(4).position(|w|w==b"\r\n\r\n").ok_or("Некорректный ответ Atlas")?;let head=std::str::from_utf8(&raw[..split]).map_err(|_|"Некорректный ответ")?;let status=head.lines().next().and_then(|l|l.split_whitespace().nth(1)).and_then(|s|s.parse::<u16>().ok()).ok_or("Некорректный статус")?;
+  let remain=deadline.saturating_duration_since(std::time::Instant::now());if remain.is_zero(){return Err("Atlas не ответил за отведённое время. Проверьте, что приложение работает и не занято длительной операцией, затем повторите запрос; перед повтором изменения проверьте, не сохранилось ли оно уже.".into())}
+  let mut buf=[0u8;8192];match socket.read(&mut buf){Ok(0)=>break,Ok(n)=>raw.extend_from_slice(&buf[..n]),Err(e) if matches!(e.kind(),std::io::ErrorKind::TimedOut|std::io::ErrorKind::WouldBlock|std::io::ErrorKind::Interrupted)=>continue,Err(e)=>return Err(format!("Соединение с Atlas прервалось при ожидании ответа: {e}. Проверьте работу Atlas; перед повтором изменения проверьте, не сохранилось ли оно уже."))}if raw.len()>8_388_608{return Err("Слишком большой ответ Atlas".into())}
+ }if raw.is_empty(){return Err("Atlas закрыл соединение без ответа. Проверьте работу приложения; перед повтором изменения проверьте, не сохранилось ли оно уже.".into())}if raw.len()>8_388_608{return Err("Слишком большой ответ Atlas".into())}let split=raw.windows(4).position(|w|w==b"\r\n\r\n").ok_or("Некорректный ответ Atlas")?;let head=std::str::from_utf8(&raw[..split]).map_err(|_|"Некорректный ответ")?;let status=head.lines().next().and_then(|l|l.split_whitespace().nth(1)).and_then(|s|s.parse::<u16>().ok()).ok_or("Некорректный статус")?;
  let result:Value=serde_json::from_slice(&raw[split+4..]).map_err(|_|"Некорректный JSON ответа")?;
  Ok((status,result))
 }
@@ -72,12 +90,12 @@ fn stream_rag(workspace:&str,query:&str,key:&str,json_output:bool,objects:&Optio
   if post_result.is_none(){if let Ok(v)=rx.try_recv(){post_result=Some(v);finished_at=Some(std::time::Instant::now())}}
   if !done&&!cancelled {let path=format!("{prefix}/events/{id}?after={after}");match request_inner("GET",&path,None,key,Duration::from_secs(5),true) {
    Ok((200,data))=>{if let Some(events)=data["events"].as_array(){for event in events {let Some(seq)=event["seq"].as_u64() else{continue};if seq<=after{continue}after=seq;if !stream||event["type"]=="results"{continue}if json_output{println!("{}",event)}else{match event["type"].as_str(){Some("token")=>{print!("{}",event["text"].as_str().unwrap_or(""));let _=std::io::stdout().flush();saw_token=true},Some("progress")=>eprintln!("{}",event["text"].as_str().unwrap_or("")),Some("reset")=>eprintln!("\nФормируем ответ заново…"),Some("error")=>eprintln!("{}",event["error"].as_str().unwrap_or("Ошибка")),_=>{}}}}}done=data["done"]==true;},
-   Ok((404,_))=>{},Ok((status,v))=>return Err(format!("Atlas: {} ({status})",v["error"].as_str().unwrap_or("ошибка"))),Err(e)=>{if post_result.is_some()&&!INTERRUPTED.load(Ordering::Acquire){return Err(e)}}
+   Ok((404,_))=>{},Ok((status,v))=>return Err(agent_error(status,&v)),Err(e)=>{if post_result.is_some()&&!INTERRUPTED.load(Ordering::Acquire){return Err(e)}}
   }}
   if cancelled&&(cancel_confirmed||cancel_started.is_some_and(|t|t.elapsed()>Duration::from_secs(3))){break}if done&&post_result.is_some(){break}if finished_at.is_some_and(|at|at.elapsed()>Duration::from_secs(3)){break}if let Some(Err(_))=post_result.as_ref(){break}if let Some(Ok((status,_)))=post_result.as_ref(){if *status>=400{break}}std::thread::sleep(Duration::from_millis(200));
  }
  if cancelled{return Err(if cancel_confirmed{"Ответ остановлен"}else{"Не удалось подтвердить остановку ответа в Atlas"}.into())}if !json_output&&saw_token{println!()}
- let result=post_result.ok_or("Ответ не завершился")??;if result.0>=400{return Err(format!("Atlas: {} ({})",result.1["error"].as_str().unwrap_or("ошибка"),result.0))}if let Some(error)=result.1["error"].as_str().filter(|s|!s.is_empty()){return Err(format!("Atlas: {error}"))}let data=rag_cited_result(result.1);if json_output{if stream{println!("{}",json!({"type":"final","data":data}))}else{println!("{}",data)}}else{if !saw_token {println!("{}",data["answer"].as_str().unwrap_or(""));}if let Some(sources)=data["sources"].as_array(){if !sources.is_empty(){println!("\nИсточники:");}for source in sources{let numbers=source["citations"].as_array().into_iter().flatten().filter_map(|n|n.as_u64()).map(|n|format!("[{n}]")).collect::<Vec<_>>().join(" ");println!("{} {} [{}]",numbers,source["source"]["title"].as_str().unwrap_or("Без названия"),source["source"]["id"].as_str().unwrap_or("?"));}}}Ok(())
+ let result=post_result.ok_or("Ответ не завершился")??;if result.0>=400{return Err(agent_error(result.0,&result.1))}if let Some(error)=result.1["error"].as_str().filter(|s|!s.is_empty()){return Err(format!("Atlas: {error}"))}let data=rag_cited_result(result.1);if json_output{if stream{println!("{}",json!({"type":"final","data":data}))}else{println!("{}",data)}}else{if !saw_token {println!("{}",data["answer"].as_str().unwrap_or(""));}if let Some(sources)=data["sources"].as_array(){if !sources.is_empty(){println!("\nИсточники:");}for source in sources{let numbers=source["citations"].as_array().into_iter().flatten().filter_map(|n|n.as_u64()).map(|n|format!("[{n}]")).collect::<Vec<_>>().join(" ");println!("{} {} [{}]",numbers,source["source"]["title"].as_str().unwrap_or("Без названия"),source["source"]["id"].as_str().unwrap_or("?"));}}}Ok(())
 }
 #[cfg(feature="agent-search")]
 fn rag_cited_result(mut value:Value)->Value{
@@ -102,23 +120,23 @@ fn upload_file(workspace:&str,path:&str,request_id:&str,key:&str,json_output:boo
  let mut hash=Sha256::new();let mut buf=[0u8;16000];loop {if INTERRUPTED.load(Ordering::Acquire){return Err("Загрузка остановлена".into())}let n=file.read(&mut buf).map_err(|e|e.to_string())?;if n==0{break}hash.update(&buf[..n]);}
  use std::io::Seek;file.rewind().map_err(|e|e.to_string())?;
  let endpoint=format!("/api/agent/{workspace}/uploads");let payload=json!({"action":"begin","name":name,"size":meta.len(),"request_id":request_id,"digest":format!("{:x}",hash.finalize())});
- let deadline=std::time::Instant::now()+Duration::from_secs(60);let start=loop {
+ let deadline=std::time::Instant::now()+Duration::from_secs(60);let mut last_error=None;let start=loop {
   if INTERRUPTED.load(Ordering::Acquire){let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","request_id":request_id}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена отправлена; завершение очистки выполняется в фоне"}else{"Не удалось подтвердить остановку загрузки"}.into())}
-  if std::time::Instant::now()>=deadline{return Err("Превышено время ожидания начала загрузки".into())}
+  if std::time::Instant::now()>=deadline{return Err(last_error.unwrap_or_else(||"Превышено время ожидания начала загрузки. Проверьте работу Atlas и повторите запрос.".into()))}
   match request_inner("POST",&endpoint,Some(payload.to_string()),key,Duration::from_secs(5),true){
-   Ok((status,value)) if status>=400=>return Err(format!("Atlas: {} ({status})",value["error"].as_str().unwrap_or("ошибка"))),
-   Ok((_,value)) if value["pending"]==true=>std::thread::sleep(Duration::from_millis(200)),
+   Ok((status,value)) if status>=400=>return Err(agent_error(status,&value)),
+   Ok((_,value)) if value["pending"]==true=>{last_error=None;std::thread::sleep(Duration::from_millis(200))},
    Ok((_,value))=>break value,
    Err(_) if INTERRUPTED.load(Ordering::Acquire)=>continue,
-   Err(_)=>std::thread::sleep(Duration::from_millis(200)),
+   Err(e)=>{last_error=Some(e);std::thread::sleep(Duration::from_millis(200))},
   }
  };
  if start["replayed"]==true {if json_output{println!("{start}")}else{if let Some(notice)=upload_notice(&start){eprintln!("{notice}")}println!("{}",serde_json::to_string_pretty(&start).map_err(|e|e.to_string())?)}return Ok(())}
  let upload=start["upload"].as_str().filter(|v|!v.is_empty()).ok_or("Atlas не вернул идентификатор загрузки")?.to_owned();let mut offset=start["offset"].as_u64().unwrap_or(0);if offset>meta.len(){return Err("Некорректная позиция загрузки".into())}file.seek(std::io::SeekFrom::Start(offset)).map_err(|e|e.to_string())?;
  while offset<meta.len(){if INTERRUPTED.load(Ordering::Acquire){let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; очистка выполняется в фоне"}else{"Не удалось подтвердить запрос на отмену"}.into())}
-  let n=file.read(&mut buf).map_err(|e|e.to_string())?;if n==0{return Err("Файл изменился во время загрузки".into())}let body=json!({"action":"chunk","upload":upload,"offset":offset,"bytes":&buf[..n]}).to_string();let reply=request_inner("POST",&endpoint,Some(body),key,Duration::from_secs(60),true);let (status,result)=match reply {Ok(v)=>v,Err(_e) if INTERRUPTED.load(Ordering::Acquire)=>{let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; очистка выполняется в фоне"}else{"Не удалось подтвердить запрос на отмену"}.into())},Err(e)=>return Err(e)};if status>=400{return Err(format!("Atlas: {} ({status})",result["error"].as_str().unwrap_or("ошибка")))}let next=result["offset"].as_u64().ok_or("Atlas не подтвердил позицию")?;if next!=offset+n as u64{return Err("Некорректное подтверждение загрузки".into())}offset=next;if !json_output{eprint!("\rЗагружено: {offset}/{} байт",meta.len());let _=std::io::stderr().flush();}}
+  let n=file.read(&mut buf).map_err(|e|e.to_string())?;if n==0{return Err("Файл изменился во время загрузки".into())}let body=json!({"action":"chunk","upload":upload,"offset":offset,"bytes":&buf[..n]}).to_string();let reply=request_inner("POST",&endpoint,Some(body),key,Duration::from_secs(60),true);let (status,result)=match reply {Ok(v)=>v,Err(_e) if INTERRUPTED.load(Ordering::Acquire)=>{let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; очистка выполняется в фоне"}else{"Не удалось подтвердить запрос на отмену"}.into())},Err(e)=>return Err(e)};if status>=400{return Err(agent_error(status,&result))}let next=result["offset"].as_u64().ok_or("Atlas не подтвердил позицию")?;if next!=offset+n as u64{return Err("Некорректное подтверждение загрузки".into())}offset=next;if !json_output{eprint!("\rЗагружено: {offset}/{} байт",meta.len());let _=std::io::stderr().flush();}}
  if INTERRUPTED.load(Ordering::Acquire){let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; очистка выполняется в фоне"}else{"Не удалось подтвердить запрос на отмену"}.into())}
- if !json_output{eprintln!()}let finish=request_inner("POST",&endpoint,Some(json!({"action":"finish","upload":upload}).to_string()),key,Duration::from_secs(60),true);let (status,result)=match finish{Ok(v)=>v,Err(_) if INTERRUPTED.load(Ordering::Acquire)=>{let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; сохранение могло завершиться, проверьте результат"}else{"Состояние сохранения неизвестно; проверьте результат"}.into())},Err(e)=>return Err(e)};if INTERRUPTED.load(Ordering::Acquire){eprintln!("Сохранение завершилось до подтверждения отмены")}if status>=400{return Err(format!("Atlas: {} ({status})",result["error"].as_str().unwrap_or("ошибка")))}if json_output{println!("{result}")}else{if let Some(notice)=upload_notice(&result){eprintln!("{notice}")}println!("{}",serde_json::to_string_pretty(&result).map_err(|e|e.to_string())?)}Ok(())
+ if !json_output{eprintln!()}let finish=request_inner("POST",&endpoint,Some(json!({"action":"finish","upload":upload}).to_string()),key,Duration::from_secs(60),true);let (status,result)=match finish{Ok(v)=>v,Err(_) if INTERRUPTED.load(Ordering::Acquire)=>{let cancelled=request("POST",&endpoint,Some(json!({"action":"cancel","upload":upload}).to_string()),key,Duration::from_secs(5));return Err(if matches!(cancelled,Ok((200|202,v)) if v["ok"]==true){"Отмена запрошена; сохранение могло завершиться, проверьте результат"}else{"Состояние сохранения неизвестно; проверьте результат"}.into())},Err(e)=>return Err(e)};if INTERRUPTED.load(Ordering::Acquire){eprintln!("Сохранение завершилось до подтверждения отмены")}if status>=400{return Err(agent_error(status,&result))}if json_output{println!("{result}")}else{if let Some(notice)=upload_notice(&result){eprintln!("{notice}")}println!("{}",serde_json::to_string_pretty(&result).map_err(|e|e.to_string())?)}Ok(())
 }
 fn search_payload(query:&str,mode:Option<&str>,objects:Option<&[String]>,offset:usize,limit:usize)->String{let mut value=json!({"query":query,"offset":offset,"limit":limit});if let Some(m)=mode{value["mode"]=json!(m)}if let Some(ids)=objects{value["object_ids"]=json!(ids)}value.to_string()}
 #[cfg(feature="agent-write")]
@@ -179,7 +197,7 @@ fn run()->Result<(),String>{
   _=>return Err("Некорректная команда или идентификатор".into())
  };
  let search_semantic=command=="search"&&args.len()==i+4&&matches!(args[i+3].as_str(),"semantic"|"hybrid");
- let (status,result)=if search_semantic{search_retry::search(||request(method,&path,body.clone(),&key,Duration::from_secs(60)))?}else{request(method,&path,body,&key,Duration::from_secs(60))?};if status>=400{return Err(format!("Atlas: {} ({status})",result.get("error").and_then(Value::as_str).unwrap_or("ошибка")))}if output_json{println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?)}else{println!("{}",human_output(command,&result));if command=="read"{if let Some(next)=result["next_offset"].as_u64(){let quote=|s:&str|format!("'{}'",s.replace('\'',"'\\''"));println!("\nДальше есть текст. Продолжить:\n{} --key-file {} --offset {} --limit {} read {} {}",quote(&env::args().next().unwrap_or_else(||"atlas-agent".into())),quote(&key_path),next,limit,quote(&args[i+1]),quote(&args[i+2]));}}}Ok(())
+ let (status,result)=if search_semantic{search_retry::search(||request(method,&path,body.clone(),&key,Duration::from_secs(60)))?}else{request(method,&path,body,&key,Duration::from_secs(60))?};if status>=400{return Err(agent_error(status,&result))}if output_json{println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?)}else{println!("{}",human_output(command,&result));if command=="read"{if let Some(next)=result["next_offset"].as_u64(){let quote=|s:&str|format!("'{}'",s.replace('\'',"'\\''"));println!("\nДальше есть текст. Продолжить:\n{} --key-file {} --offset {} --limit {} read {} {}",quote(&env::args().next().unwrap_or_else(||"atlas-agent".into())),quote(&key_path),next,limit,quote(&args[i+1]),quote(&args[i+2]));}}}Ok(())
 }
 fn main(){if let Err(e)=run(){eprintln!("{e}");std::process::exit(1)}}
 
@@ -214,6 +232,18 @@ mod tests {
  #[test] fn human_results_show_sources_and_text(){
   let value=json!({"results":[{"id":"abc","title":"Тема","chunks":[{"text":"Фрагмент"}]}]});let text=human_output("search",&value);assert!(text.contains("Тема  [abc]"));assert!(text.contains("Фрагмент"));
   assert_eq!(human_output("read",&json!({"title":"Заметка","text":"Содержимое"})),"Заметка\n\nСодержимое");
+ }
+ #[test] fn server_errors_explain_recovery(){
+  assert!(agent_error(403,&json!({"error":"Forbidden"})).contains("ключ"));
+  assert!(agent_error(503,&json!({"error":"Search mode disabled"})).contains("настройках поиска"));
+  assert!(agent_error(503,&json!({"error":"other"})).contains("other"));
+ }
+ #[test] fn connection_errors_explain_recovery(){
+  use std::io::{Error,ErrorKind};
+  let missing=connection_error("socket",&Error::from(ErrorKind::NotFound));assert!(missing.contains("Запустите Atlas"));assert!(connection_error("connect",&Error::from(ErrorKind::NotFound)).contains("Запустите Atlas"));
+  let denied=connection_error("connect",&Error::from_raw_os_error(libc::EPERM));assert!(denied.contains("огранич")&&denied.contains("агента"));
+  let refused=connection_error("connect",&Error::from(ErrorKind::ConnectionRefused));assert!(refused.contains("перезапуст"));
+  let other=connection_error("connect",&Error::from_raw_os_error(libc::EMFILE));assert!(other.contains("24"));
  }
  #[test] fn connect_checks_private_socket_and_directory(){
   use std::os::unix::net::UnixListener;
