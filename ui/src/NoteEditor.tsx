@@ -1,5 +1,5 @@
 import {useEditorResize} from './EditorResize';
-import React, {useEffect,useState} from 'react';
+import React, {useEffect,useRef,useState} from 'react';
 import './control-contrast.css';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,12 +13,16 @@ import {MarkdownSearchExcerpt} from './MarkdownSearchExcerpt';
 import {MarkdownCodePre as MarkdownPre} from './MarkdownCodePre';
 import type {SearchChunk} from './SearchResults';
 import {nextNoteMode} from './note-mode';
+import {syncScroll} from './note-scroll';
 
 type Props={searchJumpRevision:number;searchControl?:React.ReactNode;title:string;text:string;highlight:SearchChunk|null;onTitle:(value:string)=>void;onText:(value:string)=>void;onClose:()=>void;onFinishEditing:()=>Promise<boolean>;onStartEditing?:()=>Promise<boolean>;saving?:boolean;recovery?:{id:string;title:string;text:string}[];onRecover?:(draft:{id:string;title:string;text:string})=>void;onBlurEditor:()=>void};
 export function NoteEditor({searchJumpRevision,searchControl,title,text,highlight,onTitle,onText,onClose,onFinishEditing,onStartEditing,saving,recovery,onRecover,onBlurEditor}:Props){
  const [mode,setMode]=useState({expanded:false,editing:false});
  const {expanded,editing}=mode;
  const resizeRef=useEditorResize(expanded);
+ const editorScroll=useRef<HTMLTextAreaElement>(null),previewScroll=useRef<HTMLDivElement>(null);
+ const expected=useRef(new WeakMap<HTMLElement,number>());
+ const onScroll=(source:HTMLElement,target:HTMLElement|null)=>{if(expanded&&editing&&target)syncScroll(source,target,expected.current)};
  // Keep unsaved text in the editor while revealing the selected passage.
  useEffect(()=>{setMode(current=>current.editing&&!current.expanded?{...current,expanded:true}:current)},[searchJumpRevision]);
  return <div className="overlay" onClick={onClose}>
@@ -31,8 +35,8 @@ export function NoteEditor({searchJumpRevision,searchControl,title,text,highligh
    {editing&&!!recovery?.length&&<section aria-label="Резервные черновики"><p>Найдены резервные черновики. Выберите для восстановления:</p>{recovery.map((draft,index)=><button key={draft.id} disabled={saving} type="button" onClick={()=>onRecover?.(draft)}>Черновик {index+1}: {draft.title}</button>)}</section>}
    <input className="title-input" aria-label="Название заметки" value={title} readOnly={saving||!!onStartEditing&&!editing} onFocus={async()=>{if(!editing&&onStartEditing&&await onStartEditing())setMode(current=>({...current,editing:true}))}} onChange={e=>onTitle(e.target.value)}/>
    <div className={'note-split'+(expanded&&editing?' split-expanded':'')}>
-    {editing&&<MarkdownEditor text={text} onChange={onText}/>}
-    {(expanded||!editing)&&<div className="note-preview">{expanded&&editing&&<span className="eyebrow">ПРЕДПРОСМОТР</span>}<div className="note-content markdown-content">
+    {editing&&<MarkdownEditor text={text} onChange={onText} inputRef={editorScroll} onScroll={e=>onScroll(e.currentTarget,previewScroll.current)}/>}
+    {(expanded||!editing)&&<div className="note-preview">{expanded&&editing&&<span className="eyebrow">ПРЕДПРОСМОТР</span>}<div ref={previewScroll} onScroll={e=>onScroll(e.currentTarget,editorScroll.current)} className="note-content markdown-content">
      {highlight?.start!=null&&highlight.end!=null?<MarkdownSearchExcerpt key={searchJumpRevision} text={text} start={highlight.start} end={highlight.end} components={{a:MarkdownLink,pre:MarkdownPre}}/>:<ReactMarkdown components={{a:MarkdownLink,pre:MarkdownPre}} remarkPlugins={[remarkGfm,remarkMath,remarkCurrency,remarkSoftBreaks]} rehypePlugins={[[rehypeKatex,{trust:false,maxExpand:500,maxSize:20}]]}>{text||'Здесь пока пусто.'}</ReactMarkdown>}
     </div></div>}
    </div>

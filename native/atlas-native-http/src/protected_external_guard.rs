@@ -26,6 +26,7 @@ impl ProtectedExternalGuard {
   let database=open_regular_at(&directory,"workspace.atlas")?;
   let guard=Self{directory,lock,database,path:path.to_owned(),device:metadata.dev(),inode:metadata.ino()};guard.verify()?;Ok(guard)
  }
+ pub fn verify_parent(&self,parent:&File)->Result<(),String>{self.verify()?;let m=parent.metadata().map_err(|_|"Носитель отключён")?;if (m.dev(),m.ino())!=(self.device,self.inode){return Err("Папка пространства изменилась".into())}Ok(())}
  pub fn verify(&self)->Result<(),String>{
   let current=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&self.path).map_err(|_|"Носитель отключён")?;
   let meta=current.metadata().map_err(|_|"Носитель отключён")?;

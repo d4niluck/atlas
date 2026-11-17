@@ -37,7 +37,10 @@ impl WorkerOverlayPlan {
  pub(crate) fn prepare(mut self)->R<WorkerOverlayPrepared>{
   self.flush()?;for id in self.old.keys(){if !self.seen.contains(id){if self.trash.contains(id){self.overlay.hide(id)?;}else{self.delta.remove(id);self.updates.push((id.clone(),None));}}}
   self.overlay.apply_batch(self.updates)?;for id in self.hide_after{self.overlay.hide(&id)?;}let snapshot=self.overlay.snapshot_delta()?;let mut rows=Vec::with_capacity(snapshot.records.len());for (id,pos) in &snapshot.records{rows.push(self.delta.get(id).and_then(|v|v.get(*pos)).ok_or("missing delta metadata")?.clone())}
-  let cursor=if snapshot.records.len()>1024||!snapshot.removed.is_empty(){Some(self.overlay.start_materialize(true)?)}else{None};
+  #[cfg(feature="test-hook")] let force=std::env::var_os("ATLAS_TEST_FORCE_WORKER_COMPACT").is_some_and(|p|std::path::Path::new(&p).join("enabled").exists());
+  #[cfg(feature="test-hook")] if force {if let Some(path)=std::env::var_os("ATLAS_TEST_FORCE_WORKER_COMPACT"){let _=std::fs::write(std::path::Path::new(&path).join("compacted"),b"yes");}}
+  #[cfg(not(feature="test-hook"))] let force=false;
+  let cursor=if force||snapshot.records.len()>1024||!snapshot.removed.is_empty(){Some(self.overlay.start_materialize(true)?)}else{None};
   Ok(WorkerOverlayPrepared{overlay:self.overlay,snapshot,rows,base_rows:self.base_rows,delta:self.delta,cursor,compact:None})
  }
  pub(crate) fn finish(self)->R<(atlas_faiss_probe::overlay::DeltaSnapshot,Vec<Value>,Option<(atlas_faiss_probe::Index,Vec<Value>,Vec<String>)>)>{let mut prepared=self.prepare()?;while !prepared.step()?{}prepared.finish()}

@@ -2,7 +2,7 @@ import React, {useRef} from 'react';
 import {applyFormat, type Format} from './markdown-format';
 import './markdown-editor.css';
 
-type Props={text:string;onChange:(text:string)=>void};
+type Props={text:string;onChange:(text:string)=>void;inputRef?:React.RefObject<HTMLTextAreaElement|null>;onScroll?:React.UIEventHandler<HTMLTextAreaElement>};
 const actions:{kind:Format;label:string;symbol:string}[]=[
  {kind:'bold',label:'Жирный',symbol:'Ж'}, {kind:'italic',label:'Курсив',symbol:'К'},
  {kind:'strike',label:'Зачёркнутый',symbol:'S'}, {kind:'heading',label:'Заголовок',symbol:'H'},
@@ -15,8 +15,8 @@ export function insertTab(e:React.KeyboardEvent<HTMLTextAreaElement>,text:string
  e.preventDefault();const element=e.currentTarget;const start=element.selectionStart;const end=element.selectionEnd;
  if(!document.execCommand('insertText',false,'  ')){onChange(text.slice(0,start)+'  '+text.slice(end));requestAnimationFrame(()=>element.setSelectionRange(start+2,start+2))}
 }
-export function MarkdownEditor({text,onChange}:Props){
- const input=useRef<HTMLTextAreaElement>(null);
+export function MarkdownEditor({text,onChange,inputRef,onScroll}:Props){
+ const ownInput=useRef<HTMLTextAreaElement>(null);const input=inputRef||ownInput;
  function format(kind:Format){
   const element=input.current;if(!element)return;
   const result=applyFormat(text,element.selectionStart,element.selectionEnd,kind);
@@ -30,5 +30,5 @@ export function MarkdownEditor({text,onChange}:Props){
  }
  return <div className="markdown-editor"><div className="markdown-toolbar" role="toolbar" aria-label="Форматирование текста">
   {actions.map(a=><button key={a.kind} type="button" title={a.label} aria-label={a.label} onMouseDown={e=>e.preventDefault()} onClick={()=>format(a.kind)}>{a.symbol}</button>)}
- </div><textarea ref={input} onKeyDown={e=>insertTab(e,text,onChange)} value={text} onChange={e=>onChange(e.target.value)} placeholder="Начните писать…" aria-label="Текст заметки"/></div>;
+ </div><textarea ref={input} onScroll={onScroll} onKeyDown={e=>insertTab(e,text,onChange)} value={text} onChange={e=>onChange(e.target.value)} placeholder="Начните писать…" aria-label="Текст заметки"/></div>;
 }

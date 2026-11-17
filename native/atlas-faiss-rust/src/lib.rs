@@ -1,6 +1,9 @@
 use std::{ffi::{c_void,CString},path::Path};
 unsafe extern "C" {fn af_memory_write(p:*mut c_void)->*mut c_void;fn af_memory_size(w:*mut c_void)->i64;fn af_memory_copy(w:*mut c_void,out:*mut u8);fn af_memory_free(w:*mut c_void);fn af_memory_read(data:*const u8,n:i64)->*mut c_void;fn af_create()->*mut c_void;fn af_free(p:*mut c_void);fn af_count(p:*mut c_void)->i64;fn af_reconstruct(p:*mut c_void,id:i64,out:*mut f32)->i32;fn af_add(p:*mut c_void,v:*const f32,n:i64)->i32;fn af_search(p:*mut c_void,q:*const f32,ids:*const i64,n:i64,k:i64,scores:*mut f32,out:*mut i64)->i32;fn af_save(p:*mut c_void,path:*const std::ffi::c_char)->i32;fn af_save_fd(p:*mut c_void,fd:i32)->i32;fn af_load(path:*const std::ffi::c_char)->*mut c_void;}
 pub struct Index(*mut c_void);
+// Index exclusively owns a CPU IndexFlatIP; transferring ownership does not
+// allow concurrent access, and the FAISS object has no thread affinity.
+unsafe impl Send for Index {}
 impl Drop for Index {fn drop(&mut self){unsafe{af_free(self.0)}}}
 impl Index {
  pub fn to_memory(&self)->Result<Vec<u8>,&'static str>{let w=unsafe{af_memory_write(self.0)};if w.is_null(){return Err("serialize failed")}let n=unsafe{af_memory_size(w)};if !(0..=134217728).contains(&n){unsafe{af_memory_free(w)};return Err("index too large")}let mut out=vec![0u8;n as usize];unsafe{af_memory_copy(w,out.as_mut_ptr());af_memory_free(w)};Ok(out)}
@@ -15,6 +18,8 @@ impl Index {
  pub fn load(path:&Path)->Result<Self,&'static str>{let s=CString::new(path.to_str().ok_or("invalid path")?).map_err(|_|"invalid path")?;let p=unsafe{af_load(s.as_ptr())};if p.is_null(){Err("load failed")}else{Ok(Self(p))}}
 }
 #[cfg(test)] mod tests {use super::*;
+ #[test] fn owned_cpu_index_can_move_between_threads(){let mut index=Index::new().unwrap();let mut vector=[0.;512];vector[0]=1.;index.add(&[vector]).unwrap();let index=std::thread::spawn(move||{assert_eq!(index.reconstruct(0).unwrap(),vector);assert_eq!(index.search(&vector,&[0],1).unwrap()[0].0,0);let copy=Index::from_memory(&index.to_memory().unwrap()).unwrap();assert_eq!(copy.reconstruct(0).unwrap(),vector);index}).join().unwrap();assert_eq!(index.count(),1)}
+ #[test] fn independent_owned_indexes_can_move_concurrently(){let mut tasks=Vec::new();for n in 0..4{let mut index=Index::new().unwrap();let mut vector=[0.;512];vector[n]=1.;index.add(&[vector]).unwrap();tasks.push(std::thread::spawn(move||{for _ in 0..20{assert_eq!(index.reconstruct(0).unwrap(),vector);assert_eq!(index.search(&vector,&[0],1).unwrap()[0].0,0)}index}));}for task in tasks{assert_eq!(task.join().unwrap().count(),1)}}
  #[test] fn roundtrip_and_filter_before_topk(){let mut idx=Index::new().unwrap();let mut a=[0.;512];a[0]=1.;let mut b=[0.;512];b[0]=0.8;b[1]=0.6;let mut c=[0.;512];c[1]=1.;idx.add(&[a,b,c]).unwrap();assert_eq!(idx.search(&a,&[1,2],1).unwrap()[0].0,1);assert!(idx.search(&a,&[],1).unwrap().is_empty());let path=std::env::temp_dir().join(format!("atlas-faiss-probe-{}",std::process::id()));idx.save(&path).unwrap();let restored=Index::load(&path).unwrap();assert_eq!(restored.search(&a,&[0,1,2],2).unwrap().iter().map(|x|x.0).collect::<Vec<_>>(),vec![0,1]);std::fs::remove_file(path).unwrap();}
  #[test] fn python_roundtrip_when_requested(){if std::env::var_os("ATLAS_FAISS_CROSS_TEST").is_none(){return} let index=Index::load(Path::new("/private/tmp/atlas-faiss-python.index")).unwrap();let mut q=[0.;512];q[0]=1.;assert_eq!(index.search(&q,&[0,1],1).unwrap()[0].0,0);index.save(Path::new("/private/tmp/atlas-faiss-rust.index")).unwrap();}
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Test model identity across portable workspace exports, with synthetic encoder only."""
-import argparse, base64, concurrent.futures, hashlib, json, os, pathlib, shutil, signal, sqlite3, subprocess, tempfile, time
+import fcntl, argparse, base64, concurrent.futures, hashlib, json, os, pathlib, shutil, signal, sqlite3, subprocess, tempfile, time
 from urllib.request import Request, urlopen, install_opener, build_opener, ProxyHandler
 from urllib.error import HTTPError
 install_opener(build_opener(ProxyHandler({})))
-p=argparse.ArgumentParser();p.add_argument('--backend',required=True);p.add_argument('--source-backend');p.add_argument('--resources',default='');p.add_argument('--protected',action='store_true');p.add_argument('--external',action='store_true');p.add_argument('--attach-export',action='store_true');p.add_argument('--corrupt-worker',action='store_true');p.add_argument('--require-direct',action='store_true');p.add_argument('--stale-direct',action='store_true');p.add_argument('--symlink-direct',action='store_true');p.add_argument('--io-error-direct',action='store_true');p.add_argument('--failed-purge',action='store_true');p.add_argument('--search-io-error-direct',action='store_true');p.add_argument('--worker-reopen',action='store_true');p.add_argument('--worker-expired-ready',action='store_true');p.add_argument('--worker-expired-recovery',action='store_true');p.add_argument('--switch-incompatible-live',action='store_true');p.add_argument('--worker-reopen-stale',action='store_true');p.add_argument('--cancel-direct',action='store_true');p.add_argument('--duplicate-checking',action='store_true');p.add_argument('--expired-checking',action='store_true');p.add_argument('--many-expired',action='store_true');p.add_argument('--expired-disabled',action='store_true');p.add_argument('--disabled-recovery',action='store_true');p.add_argument('--before-marker-recovery',action='store_true');p.add_argument('--native-expired-recovery',action='store_true');p.add_argument('--cancel-restart',action='store_true');p.add_argument('--edit-checking',action='store_true');p.add_argument('--image-replace-direct',action='store_true');p.add_argument('--from-device',choices=['cpu','metal'],default='cpu');p.add_argument('--compatible-models',nargs=2,metavar=('Q8','BF16'),help='known tested model files, read-only');p.add_argument('--start-bf16',action='store_true');args=p.parse_args();assert not args.start_bf16 or args.compatible_models, '--start-bf16 requires --compatible-models'
+p=argparse.ArgumentParser();p.add_argument('--protected-search-migration',action='store_true');p.add_argument('--purge-export-race',action='store_true');p.add_argument('--protected-commit-responsive',action='store_true');p.add_argument('--protected-purge-crash',action='store_true');p.add_argument('--protected-purge-responsive',action='store_true');p.add_argument('--backend',required=True);p.add_argument('--source-backend');p.add_argument('--resources',default='');p.add_argument('--protected',action='store_true');p.add_argument('--external',action='store_true');p.add_argument('--attach-export',action='store_true');p.add_argument('--corrupt-worker',action='store_true');p.add_argument('--require-direct',action='store_true');p.add_argument('--staging-busy',action='store_true');p.add_argument('--staging-cancel',action='store_true');p.add_argument('--stale-direct',action='store_true');p.add_argument('--symlink-direct',action='store_true');p.add_argument('--io-error-direct',action='store_true');p.add_argument('--failed-purge',action='store_true');p.add_argument('--search-io-error-direct',action='store_true');p.add_argument('--worker-reopen',action='store_true');p.add_argument('--worker-expired-ready',action='store_true');p.add_argument('--worker-responsive',action='store_true');p.add_argument('--worker-retired-responsive',action='store_true');p.add_argument('--worker-restore-race',action='store_true');p.add_argument('--worker-expired-recovery',action='store_true');p.add_argument('--worker-crash-before',action='store_true');p.add_argument('--worker-crash-edit',action='store_true');p.add_argument('--worker-crash-legacy',action='store_true');p.add_argument('--switch-incompatible-live',action='store_true');p.add_argument('--worker-reopen-stale',action='store_true');p.add_argument('--cancel-direct',action='store_true');p.add_argument('--duplicate-checking',action='store_true');p.add_argument('--expired-checking',action='store_true');p.add_argument('--many-expired',action='store_true');p.add_argument('--expired-disabled',action='store_true');p.add_argument('--disabled-recovery',action='store_true');p.add_argument('--before-marker-recovery',action='store_true');p.add_argument('--native-expired-recovery',action='store_true');p.add_argument('--cancel-restart',action='store_true');p.add_argument('--edit-checking',action='store_true');p.add_argument('--image-replace-direct',action='store_true');p.add_argument('--from-device',choices=['cpu','metal'],default='cpu');p.add_argument('--compatible-models',nargs=2,metavar=('Q8','BF16'),help='known tested model files, read-only');p.add_argument('--start-bf16',action='store_true');args=p.parse_args();assert not args.start_bf16 or args.compatible_models, '--start-bf16 requires --compatible-models'
 root=pathlib.Path(tempfile.mkdtemp(prefix='atlas-index-independent-'));models=root/'models';models.mkdir();log=root/'calls.jsonl';actions=root/'index-actions.log'
 q8=models/'embeddinggemma-2-q8.gguf';bf16=models/'embeddinggemma-2.gguf'
 if args.compatible_models:
@@ -17,10 +17,29 @@ if args.image_replace_direct:
  assert args.attach_export and args.require_direct and not args.protected
  source=mock.read_text().replace("text=value['input'];","text=value['input'];text=json.dumps(text,sort_keys=True) if isinstance(text,list) else text;")
  mock=root/'mock-with-images.py';mock.write_text(source);mock.chmod(0o700)
-if args.worker_expired_recovery:assert args.worker_expired_ready
+if args.worker_expired_recovery or args.worker_crash_before:assert args.worker_expired_ready and args.external and not args.protected
+if args.worker_crash_edit or args.worker_crash_legacy:assert args.worker_crash_before
 settings={'embedding_variant':'bf16' if args.start_bf16 else 'q8','embedding':args.from_device,'llm':'cpu','semantic_enabled':True,'rag_enabled':False,'lexical_enabled':True,'image_enabled':args.image_replace_direct,'agentic':False,'idle_enabled':True,'idle_minutes':15,'model':'e2b'};(models/'settings.json').write_text(json.dumps(settings));marker='UNIQUE_PORTABLE_VECTOR_ALPHA_7381';password='test-password-01';token='independent-test-token';env=os.environ.copy();env.update(NO_PROXY='*',ATLAS_TEST_FAKE_ENCODER_LOG=str(log),ATLAS_TEST_INDEX_ACTION_LOG=str(actions),DYLD_LIBRARY_PATH=args.resources,LD_LIBRARY_PATH=args.resources);proc=None;data_root=root/'data'
 
+if args.protected_purge_responsive or args.protected_purge_crash or args.protected_commit_responsive:
+ assert args.protected
+ protected_barrier=root/'protected-purge-barrier';protected_barrier.mkdir();env['ATLAS_TEST_PROTECTED_COMMIT_BARRIER' if args.protected_commit_responsive else 'ATLAS_TEST_PROTECTED_PURGE_BLOCK_BARRIER']=str(protected_barrier);env['ATLAS_TEST_PROTECTED_FORCE_EXPIRE']='1'
+if args.worker_responsive or args.purge_export_race:
+ assert args.external and args.worker_expired_ready and not args.protected
+ responsive_barrier=root/'responsive-barrier';responsive_barrier.mkdir();env['ATLAS_TEST_PURGE_COMPACTION_BARRIER']=str(responsive_barrier)
+if args.worker_retired_responsive:
+ assert args.external and args.worker_expired_ready and not args.protected
+ retired_barrier=root/'retired-barrier';retired_barrier.mkdir();env['ATLAS_TEST_RETIRED_DELETE_BARRIER']=str(retired_barrier)
+if args.worker_restore_race:
+ assert args.external and args.worker_expired_ready and not args.protected
+ restore_barrier=root/'restore-barrier';restore_barrier.mkdir();env['ATLAS_TEST_PURGE_REVISION_BARRIER']=str(restore_barrier);env['ATLAS_TEST_PURGE_REVISION_REQUIRE_ENABLED']='1'
 if args.worker_expired_recovery:env['ATLAS_TEST_WORKER_PURGE_FAIL_AFTER_PUBLISH']='1'
+if args.worker_crash_before:
+ crash_barrier=root/'crash-barrier';crash_barrier.mkdir();env['ATLAS_TEST_PURGE_COMPACTION_BARRIER']=str(crash_barrier)
+if args.staging_busy:env['ATLAS_TEST_STAGING_RETRY_LOG']=str(root/'staging-retry.log')
+if args.staging_cancel:
+ assert args.staging_busy
+ staging_cancel_barrier=root/'staging-cancel-barrier';staging_cancel_barrier.mkdir();env['ATLAS_TEST_STAGING_RETRY_BARRIER']=str(staging_cancel_barrier)
 
 def req(path,body=None,method=None):
  data=None if body is None else json.dumps(body,ensure_ascii=False).encode();q=Request(base+path,data=data,method=method,headers={'X-Atlas-Token':token,'Content-Type':'application/json'})
@@ -52,7 +71,56 @@ try:
   if args.protected:attach.update(password=password,test_protected=True)
   wid=ok(200,req('/api/workspaces/attach',attach))['id'];external_path=next(disk.glob('Atlas-*'))
  elif args.protected:wid=ok(201,req('/api/workspaces',{'name':'Portable test','protected':True,'password':password}))['id']
+ if args.protected_search_migration:
+  assert args.protected, 'requires --protected'
+  obj=ok(201,req('/api/w/'+wid+'/notes',{'title':'Migration','text':'уникальное слово миграционное'}))['id'];assert search(wid,obj)
+  result=ok(200,req('/api/w/'+wid+'/search',{'mode':'lexical','query':'миграционное'}));assert result.get('results'),result
+  code,start=req('/api/w/'+wid+'/search-migration/start',{'password':password});assert code in (200,202),(code,start);deadline=time.monotonic()+120
+  while time.monotonic()<deadline:
+   status=ok(200,req('/api/w/'+wid+'/search-migration/status'))
+   if status.get('status')=='completed':break
+   assert status.get('status')!='failed',status
+   time.sleep(.1)
+  else:raise AssertionError(('migration timed out',status,start))
+  result=ok(200,req('/api/w/'+wid+'/search',{'mode':'lexical','query':'миграционное'}));assert result.get('results'),result
+  ok(200,req('/api/w/'+wid+'/notes/'+obj,{'title':'Migration','text':'уникальное слово послемиграции'},'PUT'))
+  deadline=time.monotonic()+30
+  while time.monotonic()<deadline:
+   code,result=req('/api/w/'+wid+'/search',{'mode':'lexical','query':'послемиграции'})
+   if code==200 and result.get('results'):break
+   time.sleep(.1)
+  else:raise AssertionError(('updated search unavailable',code,result))
+  print('PASS protected search migration and edit',flush=True);raise SystemExit(0)
  obj=ok(201,req('/api/w/'+wid+'/notes',{'title':'A','text':marker}))['id'];assert search(wid,obj);before=count();assert before==1,('initial body encoding count',before)
+ if args.protected_purge_responsive or args.protected_purge_crash or args.protected_commit_responsive:
+  doomed=ok(201,req('/api/w/'+wid+'/notes',{'title':'Expired','text':'temporary protected note'}))['id'];assert search(wid,doomed)
+  ok(200,req('/api/w/'+wid+'/objects/delete-many',{'ids':[doomed]}));ok(200,req('/api/w/'+wid+'/trash'))
+  deadline=time.monotonic()+30
+  while not (protected_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.05)
+  assert (protected_barrier/'ready').exists(),'protected cleanup did not reach index block barrier'
+  if args.protected_purge_crash:
+   os.killpg(proc.pid,signal.SIGKILL);proc.wait(timeout=15);env.pop('ATLAS_TEST_PROTECTED_PURGE_BLOCK_BARRIER')
+   proc=subprocess.Popen([args.backend,'--root',str(data_root),'--port','0','--token-stdin','--model-path',str(models/'embeddinggemma-2-q8.gguf'),'--rag-model-dir',str(models),'--llama-server',str(mock)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=True,env=env);proc.stdin.write(token+'\n');proc.stdin.flush();port=proc.stdout.readline().strip();assert port.isdigit(),('restart failed',port);base='http://127.0.0.1:'+port
+   if args.external:wid=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',external_path),'id':wid,'password':password,'test_protected':True}))['id']
+   else:ok(200,req('/api/workspaces/'+wid+'/unlock',{'password':password}))
+   assert ok(200,req('/api/w/'+wid+'/board'));assert search(wid,obj),'active vectors lost after crash'
+   deadline=time.monotonic()+30
+   while time.monotonic()<deadline:
+    code,data=req('/api/w/'+wid+'/trash')
+    if code==200 and all(item['id']!=doomed for item in data['objects']):break
+    time.sleep(.1)
+   else:raise AssertionError(('protected cleanup failed after crash',data))
+   print('PASS protected cleanup recovers after process kill',flush=True);raise SystemExit(0)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+   board=pool.submit(req,'/api/w/'+wid+'/board');write=pool.submit(req,'/api/w/'+wid+'/notes',{'title':'Concurrent','text':'write while cleanup pauses'})
+   assert board.result(timeout=2)[0]==200;assert write.result(timeout=2)[0]==201
+  (protected_barrier/'go').touch();end=time.monotonic()+30
+  while time.monotonic()<end:
+   code,data=req('/api/w/'+wid+'/trash')
+   if code==200 and all(item['id']!=doomed for item in data['objects']):break
+   time.sleep(.1)
+  else:raise AssertionError(('protected cleanup did not retry',data))
+  print('PASS protected workspace stays responsive and retries after concurrent write',flush=True);raise SystemExit(0)
  if args.image_replace_direct:
   image_a=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
   q=Request(base+'/api/w/'+wid+'/files?filename=image.png',data=image_a,method='POST',headers={'X-Atlas-Token':token,'Content-Type':'application/octet-stream'})
@@ -80,27 +148,119 @@ try:
   cfg=ok(200,req('/api/settings/app'));ok(200,req('/api/settings/app',dict(cfg,semantic_enabled=True),'PUT'));assert search(wid,obj)
   current=external_path/'.atlas-worker-index/current';generation=current.read_text();worker_doc_calls=document_calls()
   if actions.exists():actions.unlink()
+  if args.worker_restore_race:(restore_barrier/'enabled').touch()
+  if args.worker_retired_responsive:
+   for i in range(25):(external_path/'.atlas-worker-index'/f'gen-ff{i:030x}').mkdir()
+   (retired_barrier/'enabled').touch()
   while time.time()<expire_at+.1:time.sleep(.05)
+  ok(200,req('/api/w/'+wid+'/trash'))
+  if args.purge_export_race:
+   deadline=time.monotonic()+30
+   while not (responsive_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.05)
+   assert (responsive_barrier/'ready').exists(),'purge preparation barrier not reached'
+   export_dir=root/'export-during-purge';export_dir.mkdir()
+   capability=cap('export',export_dir)
+   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+    future=pool.submit(req,'/api/workspaces/export',{'capability':capability,'ids':[wid]})
+    try:
+     time.sleep(.5)
+     assert not future.done(), ('export unexpectedly completed while purge is in progress', future.result() if future.done() else None)
+    finally:(responsive_barrier/'go').touch()
+    result=future.result(timeout=30)
+   exported=ok(200,result);folder=pathlib.Path(exported.get('path') or export_dir/exported['folder']);assert folder.is_dir()
+   exported_root=folder/'workspace-1';assert (exported_root/'atlas.sqlite3').is_file()
+   with sqlite3.connect(exported_root/'atlas.sqlite3') as db:
+    assert db.execute('select count(*) from objects where id=?',(obj,)).fetchone()[0]==1,'saved note missing in snapshot'
+    assert db.execute('select count(*) from objects where id=?',(trash_id,)).fetchone()[0]==0,'expired note remains in snapshot'
+   assert not (exported_root/'.atlas-purge-pending').exists(),'snapshot includes incomplete purge'
+   attached=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',exported_root)}))['id']
+   before_read=document_calls();assert search(attached,obj),'exported semantic index does not find source note'
+   assert document_calls()==before_read,'opening exported index recalculated vectors'
+   print('PASS export waits for cleanup and preserves board/index',flush=True);raise SystemExit(0)
+  if args.worker_responsive:
+   deadline=time.monotonic()+30
+   while not (responsive_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.05)
+   assert (responsive_barrier/'ready').exists(),'cleanup did not reach barrier'
+   with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    board_future=pool.submit(req,'/api/w/'+wid+'/board')
+    write_future=pool.submit(req,'/api/w/'+wid+'/notes',{'title':'Concurrent','text':'Safe write'})
+    assert board_future.result(timeout=2)[0]==200,'external board blocked'
+    assert write_future.result(timeout=2)[0]==201,'external note creation blocked'
+   (responsive_barrier/'go').touch()
+  if args.worker_restore_race:
+   deadline=time.monotonic()+30
+   while not (restore_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.05)
+   assert (restore_barrier/'ready').exists(),'purge did not reach revision barrier'
+   with sqlite3.connect(external_path/'atlas.sqlite3') as db:before_restore=db.execute('select revision from atlas_content_revision where id=1').fetchone()[0]
+   ok(200,req('/api/w/'+wid+'/trash/'+trash_id+'/restore',{}))
+   with sqlite3.connect(external_path/'atlas.sqlite3') as db:assert db.execute('select revision from atlas_content_revision where id=1').fetchone()[0]>before_restore
+   (restore_barrier/'go').touch()
+  if args.worker_retired_responsive:
+   deadline=time.monotonic()+30
+   while not (retired_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.05)
+   assert (retired_barrier/'ready').exists(),'retired index cleanup did not reach barrier'
+   with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    board_future=pool.submit(req,'/api/w/'+wid+'/board')
+    write_future=pool.submit(req,'/api/w/'+wid+'/notes',{'title':'Concurrent retired','text':'Safe write during deletion'})
+    assert board_future.result(timeout=2)[0]==200,'board blocked while removing retired index'
+    concurrent_retired_id=ok(201,write_future.result(timeout=2))['id']
+   (retired_barrier/'go').touch()
   board_response=req('/api/w/'+wid+'/board')
-  if args.worker_expired_recovery:
-   assert board_response[0] in (409,500),('injected post-publication failure not reported',board_response)
-   ok(200,req('/api/workspaces/'+wid+'/close',{}))
+  assert board_response[0]==200,board_response
+  if args.worker_expired_recovery or args.worker_crash_before:
+   deadline=time.monotonic()+30
+   while time.monotonic()<deadline:
+    ready=(crash_barrier/'ready').exists() if args.worker_crash_before else (current.read_text()!=generation and (external_path/'.atlas-purge-pending').exists())
+    if ready:break
+    time.sleep(.03)
+   else:raise AssertionError('cleanup did not reach crash point')
+   if args.worker_crash_edit:
+    concurrent_id=ok(201,req('/api/w/'+wid+'/notes',{'title':'Concurrent crash edit','text':'UNIQUE_CONCURRENT_CRASH_NOTE'}))['id']
+    with sqlite3.connect(external_path/'atlas.sqlite3') as db:
+     proof_counter=db.execute('select after_counter from atlas_purge_proof').fetchone()[0]
+     current_counter=db.execute('select revision from atlas_content_revision where id=1').fetchone()[0]
+     assert current_counter>proof_counter,'concurrent write did not invalidate purge proof'
+   os.killpg(proc.pid,signal.SIGKILL);proc.wait(timeout=10)
+   if args.worker_crash_legacy:
+    old_marker=external_path/'.atlas-purge-pending';legacy=json.loads(old_marker.read_text());legacy.pop('purge_id',None);old_marker.write_text(json.dumps(legacy))
+   env.pop('ATLAS_TEST_WORKER_PURGE_FAIL_AFTER_PUBLISH',None);env.pop('ATLAS_TEST_PURGE_COMPACTION_BARRIER',None)
+   proc=subprocess.Popen([args.backend,'--root',str(data_root),'--port','0','--token-stdin','--model-path',str(models/'embeddinggemma-2-q8.gguf'),'--rag-model-dir',str(models),'--llama-server',str(mock)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=True,env=env);proc.stdin.write(token+'\n');proc.stdin.flush();port=proc.stdout.readline().strip();assert port.isdigit();base='http://127.0.0.1:'+port
    wid=ok(200,req('/api/workspaces/attach',{'capability':cap('attach',external_path),'id':wid}))['id']
-  else:assert board_response[0]==200,board_response
+   ok(200,req('/api/w/'+wid+'/trash'))
   deadline=time.monotonic()+15
   while time.monotonic()<deadline:
    state=ok(200,req('/api/w/'+wid+'/semantic/status'))
-   assert not state.get('indexing'),('worker-only expired trash triggered rebuild',state)
+   if not args.worker_crash_edit and not args.worker_crash_legacy and not args.worker_responsive and not args.worker_retired_responsive and not args.worker_restore_race:assert not state.get('indexing'),('worker-only expired trash triggered rebuild',state)
    if state.get('available') and not state.get('message'):break
    time.sleep(.03)
   else:raise AssertionError(('worker-only index did not become ready',state))
   assert search(wid,obj),'worker-only search failed after purge'
+  if args.worker_crash_edit:assert search(wid,concurrent_id),'concurrent note missing from search after recovery'
+  if args.worker_retired_responsive:assert search(wid,concurrent_retired_id),'concurrent note missing from search'
+  if args.worker_restore_race:assert search(wid,trash_id),'restored note missing from search'
   assert current.read_text().startswith('gen-'),'worker-only current generation invalid'
-  assert not actions.exists() or not actions.read_text().strip(),'worker-only purge entered rebuild'
-  assert document_calls()==worker_doc_calls,'worker-only purge reencoded text'
-  for name in ('metadata.json','overlay.json'):
-   for meta in (external_path/'.atlas-worker-index').rglob(name):
-    assert 'OLD_TRASH_CONTENT' not in meta.read_text(), 'expired trash remains in index metadata'
+  if not args.worker_responsive and not args.worker_crash_edit and not args.worker_crash_legacy and not args.worker_retired_responsive and not args.worker_restore_race:assert not actions.exists() or not actions.read_text().strip(),('worker-only purge entered rebuild',actions.read_text() if actions.exists() else '')
+  if not args.worker_responsive and not args.worker_crash_edit and not args.worker_crash_legacy and not args.worker_retired_responsive and not args.worker_restore_race:assert document_calls()==worker_doc_calls,'worker-only purge reencoded text'
+  if args.worker_restore_race:
+   deadline=time.monotonic()+30
+   while (external_path/'.atlas-purge-pending').exists() and time.monotonic()<deadline:
+    ok(200,req('/api/w/'+wid+'/trash'));time.sleep(.1)
+   assert not (external_path/'.atlas-purge-pending').exists(),'restore race cleanup did not recover'
+   assert (external_path/'notes'/f'{trash_id}.md').exists(),'restored note file was removed'
+   print('PASS restored note remains accessible after cleanup race',flush=True);raise SystemExit(0)
+  # Cleanup is asynchronous. Poll until the expired vectors and metadata are gone.
+  deadline=time.monotonic()+30
+  while True:
+   ok(200,req('/api/w/'+wid+'/trash'))
+   remaining=[meta for name in ('metadata.json','overlay.json') for meta in (external_path/'.atlas-worker-index').rglob(name) if 'OLD_TRASH_CONTENT' in meta.read_text()]
+   if not remaining:break
+   if time.monotonic()>deadline:raise AssertionError(('expired trash remains in index metadata',remaining))
+   time.sleep(.1)
+  if args.worker_retired_responsive:
+   deadline=time.monotonic()+30
+   while list((external_path/'.atlas-worker-index').glob('gen-ff*')) and time.monotonic()<deadline:
+    ok(200,req('/api/w/'+wid+'/trash'));time.sleep(.1)
+   assert not list((external_path/'.atlas-worker-index').glob('gen-ff*')),'retired generations were not eventually removed'
   print('PASS worker-only ready index survives expired trash purge and recovery' if args.worker_expired_recovery else 'PASS worker-only ready index survives expired trash purge',flush=True);raise SystemExit(0)
  if args.worker_reopen:
   assert args.external and not args.protected and not args.attach_export
@@ -202,6 +362,10 @@ try:
   if args.symlink_direct:
    assert args.attach_export and not args.require_direct
    current=target/'.atlas-semantic-native/current';existing_generation=current.read_text();outside=root/'outside-index-current';outside.write_text(existing_generation);current.unlink();current.symlink_to(outside)
+  if args.staging_busy:
+   assert args.require_direct and args.attach_export and not args.protected
+   stage_lock=(target/'.atlas-semantic-native/.staging.lock').open('a+')
+   fcntl.flock(stage_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   if args.require_direct and not args.stale_direct and not args.protected:
    index=target/'.atlas-semantic-native'
    before_files={str(path.relative_to(index)):hashlib.sha256(path.read_bytes()).hexdigest() for path in index.rglob('*') if path.is_file()}
@@ -213,6 +377,33 @@ try:
  else:
   items=ok(201,req('/api/workspaces/import',{'capability':cap('import',folder)}))['workspaces'];assert len(items)==1;copy=items[0]['id']
   if args.protected:ok(200,req('/api/workspaces/'+copy+'/unlock',{'password':password}))
+ if args.staging_cancel:
+  ok(200,req('/api/w/'+copy+'/semantic/status'));deadline=time.monotonic()+15
+  while not (staging_cancel_barrier/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+  assert (staging_cancel_barrier/'ready').exists(),'readiness retry not reached'
+  try:ok(200,req('/api/w/'+copy+'/semantic/cancel',{}))
+  finally:(staging_cancel_barrier/'go').touch()
+  deadline=time.monotonic()+10
+  while time.monotonic()<deadline:
+   state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+   if state.get('cancelled') and not state.get('checking') and not state.get('indexing'):break
+   time.sleep(.03)
+  else:raise AssertionError(('cancel during staging retry did not finish',state))
+  fcntl.flock(stage_lock,fcntl.LOCK_UN);stage_lock.close()
+  ok(202,req('/api/w/'+copy+'/semantic/rebuild',{'force':False}));assert search(copy,obj),'search did not resume'
+  assert not actions.exists() or not actions.read_text().strip(),'cancellation entered index build'
+  print('PASS cancellation during staging retry and resume without rebuild',flush=True);raise SystemExit(0)
+ if args.staging_busy:
+  # The first readiness check must defer instead of starting an index rebuild.
+  deadline=time.monotonic()+1.5
+  while time.monotonic()<deadline:
+   state=ok(200,req('/api/w/'+copy+'/semantic/status'))
+   assert not state.get('indexing'),('busy staging lease triggered a rebuild',state)
+   assert state.get('message') in (None,'Проверяем индекс'),('busy staging lease marked the index as failed',state)
+   time.sleep(.1)
+  assert (root/'staging-retry.log').exists(),'fixture did not exercise staging retry'
+  assert not actions.exists() or not actions.read_text().strip(),'busy staging lease entered the index build path'
+  fcntl.flock(stage_lock,fcntl.LOCK_UN);stage_lock.close()
  if args.disabled_recovery or args.before_marker_recovery:
   before_purge_calls=document_calls()
   try:
